@@ -10,6 +10,7 @@
 - `query_database` 使用 SQLite 只读连接，结果最多返回 200 行。
 - `execute_database` 只接受单条 `INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`，并使用事务。
 - 自动创建 SQLite 演示库，包含客户、商品、订单、订单明细以及一个明细视图。
+- 记录 Agent 会话、轮次、工具调用、重试和服务生命周期日志，并按天滚动。
 - 响应式 Web UI、Schema 查看器、示例业务问题和持久会话列表。
 
 ## 模块设计
@@ -33,6 +34,8 @@ Browser session id (= Pi sessionId)
 ```
 
 HTTP 层只调用 `AgentSessionStore` 和 `DemoDatabase` 的小接口，不需要理解 Pi 的会话文件格式或 SQLite 的安全约束。
+
+运行日志使用 JSON Lines 格式写入 `.data/logs/sql-web-YYYY-MM-DD.log`。文件名按服务器本地日期计算，跨过午夜后自动写入下一天的文件，无需重启服务。Agent 日志包含 session ID、轮次、工具名、耗时、重试和错误信息；为避免把业务数据扩散到日志中，不记录用户问题正文、工具参数、查询结果或模型回答正文。
 
 ## TypeScript 结构
 

@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentSession,
+  AgentSessionEvent,
   ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type {
@@ -22,6 +23,7 @@ import type {
 import type { DemoDatabase } from "./database.ts";
 import { createDatabaseTools, DATABASE_TOOL_NAMES } from "./database-tools.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
+import type { AppLogger } from "./logger.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
@@ -33,7 +35,16 @@ export interface AgentSessionStoreOptions {
   readonly sessionDir: string;
   readonly agentDir: string;
   readonly model: ModelSelection;
+  readonly logger?: AgentProcessLogger;
 }
+
+type AgentProcessLogger = Pick<AppLogger, "info" | "warn" | "error">;
+
+const NOOP_LOGGER: AgentProcessLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
 
 interface SessionTimes {
   created: Date;
@@ -142,9 +153,12 @@ export class AgentSessionStore {
   readonly #sessions = new Map<string, AgentSession>();
   readonly #sessionTimes = new Map<string, SessionTimes>();
   readonly #modelRuntime: ModelRuntime;
+  readonly #logger: AgentProcessLogger;
+  readonly #unsubscribers = new Map<string, () => void>();
+  readonly #toolStartedAt = new Map<string, number>();
 
   private constructor(
-    { database, cwd, sessionDir, agentDir, model }: AgentSessionStoreOptions,
+    { database, cwd, sessionDir, agentDir, model, logger }: AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
   ) {
     this.#database = database;
@@ -153,6 +167,7 @@ export class AgentSessionStore {
     this.#agentDir = agentDir;
     this.#model = model;
     this.#modelRuntime = modelRuntime;
+    this.#logger = logger ?? NOOP_LOGGER;
   }
 
   static async open(options: AgentSessionStoreOptions): Promise<AgentSessionStore> {
@@ -177,7 +192,13 @@ export class AgentSessionStore {
         `Pi 无法解析本地模型 ${resolvedOptions.model.provider}/${resolvedOptions.model.model}，请检查模型文件格式`,
       );
     }
-    return new AgentSessionStore(resolvedOptions, modelRuntime);
+    const store = new AgentSessionStore(resolvedOptions, modelRuntime);
+    store.#logger.info("agent.store.opened", {
+      provider: resolvedOptions.model.provider,
+      model: resolvedOptions.model.model,
+      sessionDir: resolvedOptions.sessionDir,
+    });
+    return store;
   }
 
   async create(): Promise<SerializedSession> {
@@ -189,6 +210,7 @@ export class AgentSessionStore {
     this.#sessions.set(session.sessionId, session);
     const now = new Date();
     this.#sessionTimes.set(session.sessionId, { created: now, modified: now });
+    this.#logger.info("agent.session.created", { sessionId: session.sessionId });
     return this.serialize(session);
   }
 
@@ -238,6 +260,7 @@ export class AgentSessionStore {
     );
     this.#sessions.set(id, session);
     this.#sessionTimes.set(id, { created: info.created, modified: info.modified });
+    this.#logger.info("agent.session.restored", { sessionId: id });
     return session;
   }
 
@@ -255,14 +278,35 @@ export class AgentSessionStore {
     if (!session.sessionName || session.sessionName === "新会话") {
       session.setSessionName(shortTitle(text));
     }
-    await session.prompt(text.trim(), { expandPromptTemplates: false });
-    const times = this.#sessionTimes.get(id);
-    if (times) times.modified = new Date();
+    const prompt = text.trim();
+    const startedAt = Date.now();
+    this.#logger.info("agent.prompt.started", {
+      sessionId: id,
+      promptLength: prompt.length,
+    });
+    try {
+      await session.prompt(prompt, { expandPromptTemplates: false });
+      const times = this.#sessionTimes.get(id);
+      if (times) times.modified = new Date();
+      this.#logger.info("agent.prompt.completed", {
+        sessionId: id,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      this.#logger.error("agent.prompt.failed", error, {
+        sessionId: id,
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
+    }
   }
 
   async abort(id: string): Promise<void> {
     const session = await this.get(id);
-    if (session.isStreaming) await session.abort();
+    if (!session.isStreaming) return;
+    this.#logger.warn("agent.abort.requested", { sessionId: id });
+    await session.abort();
+    this.#logger.info("agent.abort.completed", { sessionId: id });
   }
 
   serialize(session: AgentSession): SerializedSession {
@@ -288,7 +332,11 @@ export class AgentSessionStore {
   }
 
   dispose(): void {
+    this.#logger.info("agent.store.disposing", { activeSessionCount: this.#sessions.size });
+    for (const unsubscribe of this.#unsubscribers.values()) unsubscribe();
     for (const session of this.#sessions.values()) session.dispose();
+    this.#unsubscribers.clear();
+    this.#toolStartedAt.clear();
     this.#sessions.clear();
     this.#sessionTimes.clear();
   }
@@ -322,7 +370,78 @@ export class AgentSessionStore {
       session.dispose();
       throw error;
     }
+    const unsubscribe = session.subscribe((event) => this.#logAgentEvent(session.sessionId, event));
+    this.#unsubscribers.set(session.sessionId, unsubscribe);
     return session;
+  }
+
+  #logAgentEvent(sessionId: string, event: AgentSessionEvent): void {
+    const common = { sessionId };
+    if (event.type === "agent_start") {
+      this.#logger.info("agent.run.started", common);
+    } else if (event.type === "turn_start") {
+      this.#logger.info("agent.turn.started", common);
+    } else if (event.type === "turn_end") {
+      this.#logger.info("agent.turn.completed", {
+        ...common,
+        toolResultCount: event.toolResults.length,
+      });
+    } else if (event.type === "tool_execution_start") {
+      const key = `${sessionId}:${event.toolCallId}`;
+      this.#toolStartedAt.set(key, Date.now());
+      this.#logger.info("agent.tool.started", {
+        ...common,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+      });
+    } else if (event.type === "tool_execution_end") {
+      const key = `${sessionId}:${event.toolCallId}`;
+      const startedAt = this.#toolStartedAt.get(key);
+      this.#toolStartedAt.delete(key);
+      const fields = {
+        ...common,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        isError: event.isError,
+        ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }),
+      };
+      if (event.isError) this.#logger.warn("agent.tool.completed", fields);
+      else this.#logger.info("agent.tool.completed", fields);
+    } else if (event.type === "auto_retry_start") {
+      this.#logger.warn("agent.retry.started", {
+        ...common,
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        delayMs: event.delayMs,
+        errorMessage: event.errorMessage,
+      });
+    } else if (event.type === "auto_retry_end") {
+      const fields = {
+        ...common,
+        attempt: event.attempt,
+        success: event.success,
+        ...(event.finalError ? { finalError: event.finalError } : {}),
+      };
+      if (event.success) this.#logger.info("agent.retry.completed", fields);
+      else this.#logger.warn("agent.retry.completed", fields);
+    } else if (event.type === "compaction_start") {
+      this.#logger.info("agent.compaction.started", { ...common, reason: event.reason });
+    } else if (event.type === "compaction_end") {
+      this.#logger.info("agent.compaction.completed", {
+        ...common,
+        reason: event.reason,
+        aborted: event.aborted,
+        willRetry: event.willRetry,
+      });
+    } else if (event.type === "agent_end") {
+      this.#logger.info("agent.run.completed", {
+        ...common,
+        messageCount: event.messages.length,
+        willRetry: event.willRetry,
+      });
+    } else if (event.type === "agent_settled") {
+      this.#logger.info("agent.run.settled", common);
+    }
   }
 
   #assertValidId(id: string): void {

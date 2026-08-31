@@ -30,7 +30,11 @@ const STATIC_FILES = new Map<string, readonly [filename: string, contentType: st
 ]);
 
 interface Logger {
-  error(message: string, error: unknown): void;
+  error(
+    event: string,
+    error: unknown,
+    fields?: Readonly<Record<string, unknown>>,
+  ): void;
 }
 
 export interface WebSessionPort {
@@ -243,7 +247,7 @@ export function createWebServer({ database, sessions, publicDir, logger = consol
           await sessions.prompt(id, body.message);
           writeSse(response, "done", await sessions.getSerialized(id));
         } catch (error) {
-          logger.error("Agent prompt failed", error);
+          logger.error("http.agent_prompt.failed", error, { sessionId: id });
           writeSse(response, "error", { message: errorMessage(error, "Agent 回答失败") });
         } finally {
           unsubscribe();
@@ -262,7 +266,11 @@ export function createWebServer({ database, sessions, publicDir, logger = consol
 
       json(response, 404, { error: "接口不存在" } satisfies ErrorResponse);
     } catch (error) {
-      logger.error("HTTP request failed", error);
+      logger.error("http.request.failed", error, {
+        method: request.method ?? "UNKNOWN",
+        pathname: url.pathname,
+        statusCode: errorStatus(error),
+      });
       if (!response.headersSent) {
         json(response, errorStatus(error), {
           error: errorMessage(error, "服务器内部错误"),

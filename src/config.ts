@@ -23,6 +23,7 @@ export interface AppConfig {
   readonly schemaPath: string;
   readonly seedPath: string;
   readonly agentDir: string;
+  readonly logDir: string;
   readonly model: ModelSelection;
 }
 
@@ -86,6 +87,7 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     seedPath: path.join(projectRoot, "sql", "seed.sql"),
     agentDir: path.join(projectRoot, ".data", "agent"),
+    logDir: path.join(projectRoot, ".data", "logs"),
     model: { provider, model },
   };
 }

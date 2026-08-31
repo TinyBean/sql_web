@@ -26,6 +26,7 @@ test("loads the selected model from the project environment file", (t) => {
   assert.equal(config.port, 4321);
   assert.deepEqual(config.model, { provider: "test-provider", model: "test-model" });
   assert.equal(config.agentDir, path.join(config.projectRoot, ".data", "agent"));
+  assert.equal(config.logDir, path.join(config.projectRoot, ".data", "logs"));
 });
 
 test("requires both model fields", () => {

@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "rootDir": ".",
+    "outDir": "public/generated",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "sourceMap": false
+  },
+  "include": ["client/**/*.ts", "shared/**/*.ts"],
+  "exclude": ["dist", "node_modules", "public/generated"]
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+public/generated/
+.data/
+.agents/
+.codex/
+.env
+npm-debug.log*
+coverage/

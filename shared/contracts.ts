@@ -1,84 +1,89 @@
 export type ChatRole = "user" | "assistant";
+export type DatabaseToolName = "query_database" | "execute_database";
 
 export interface ChatMessage {
-  id: string;
-  role: ChatRole;
-  text: string;
-  timestamp?: number;
+  readonly id: string;
+  readonly role: ChatRole;
+  readonly text: string;
+  readonly timestamp?: number;
 }
 
 export interface ModelDescriptor {
-  provider: string;
-  id: string;
-  name: string;
+  readonly provider: string;
+  readonly id: string;
+  readonly name: string;
 }
 
 export interface SerializedSession {
-  id: string;
-  title: string;
-  model: ModelDescriptor | null;
-  tools: string[];
-  streaming: boolean;
-  messages: ChatMessage[];
+  readonly id: string;
+  readonly title: string;
+  readonly model: ModelDescriptor | null;
+  readonly tools: readonly DatabaseToolName[];
+  readonly streaming: boolean;
+  readonly messages: readonly ChatMessage[];
 }
 
 export interface SessionSummary {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  messageCount: number;
-  active: boolean;
+  readonly id: string;
+  readonly title: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly messageCount: number;
+  readonly active: boolean;
 }
 
 export interface ModelSelection {
-  provider: string | null;
-  model: string | null;
+  readonly provider: string;
+  readonly model: string;
 }
 
 export interface AgentStatus {
-  tools: string[];
-  model: ModelSelection;
-  availableModelCount: number;
-  activeSessionCount: number;
+  readonly tools: readonly DatabaseToolName[];
+  readonly model: ModelSelection;
+  readonly availableModelCount: number;
+  readonly activeSessionCount: number;
 }
 
 export interface HealthResponse {
-  ok: true;
-  database: { engine: "SQLite"; path: string };
-  agent: AgentStatus;
+  readonly ok: true;
+  readonly database: { readonly engine: "SQLite"; readonly path: string };
+  readonly agent: AgentStatus;
 }
 
 export interface SchemaColumn {
-  name: string;
-  type: string;
-  nullable: boolean;
-  primaryKey: boolean;
+  readonly name: string;
+  readonly type: string;
+  readonly nullable: boolean;
+  readonly primaryKey: boolean;
 }
 
 export interface SchemaObject {
-  type: "table" | "view";
-  name: string;
-  sql: string | null;
-  columns: SchemaColumn[];
+  readonly type: "table" | "view";
+  readonly name: string;
+  readonly sql: string | null;
+  readonly columns: readonly SchemaColumn[];
 }
 
 export type PublicSchemaObject = Omit<SchemaObject, "sql">;
 
 export interface SchemaResponse {
-  objects: PublicSchemaObject[];
+  readonly objects: readonly PublicSchemaObject[];
 }
 
 export interface SessionsResponse {
-  sessions: SessionSummary[];
+  readonly sessions: readonly SessionSummary[];
 }
 
 export interface MessageRequest {
-  message: string;
+  readonly message: string;
 }
 
 export interface ErrorResponse {
-  error: string;
+  readonly error: string;
+}
+
+export interface AbortResponse {
+  readonly ok: true;
 }
 
 export interface SseEventMap {
@@ -96,3 +101,11 @@ export type ParsedSseEvent = {
     data: SseEventMap[EventName];
   };
 }[keyof SseEventMap];
+
+export type JsonResponseBody =
+  | AbortResponse
+  | ErrorResponse
+  | HealthResponse
+  | SchemaResponse
+  | SerializedSession
+  | SessionsResponse;

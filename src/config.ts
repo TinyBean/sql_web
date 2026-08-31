@@ -2,23 +2,28 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
 import { fileURLToPath } from "node:url";
+import type { ModelSelection } from "../shared/contracts.ts";
 
-export interface ModelOverride {
-  provider: string;
-  model: string;
+export interface AppEnvironment {
+  readonly HOST?: string | undefined;
+  readonly PORT?: string | undefined;
+  readonly SQL_WEB_DB_PATH?: string | undefined;
+  readonly SQL_WEB_SESSION_DIR?: string | undefined;
+  readonly SQL_WEB_PROVIDER?: string | undefined;
+  readonly SQL_WEB_MODEL?: string | undefined;
 }
 
 export interface AppConfig {
-  projectRoot: string;
-  host: string;
-  port: number;
-  databasePath: string;
-  sessionDir: string;
-  publicDir: string;
-  schemaPath: string;
-  seedPath: string;
-  agentDir: string;
-  model: ModelOverride;
+  readonly projectRoot: string;
+  readonly host: string;
+  readonly port: number;
+  readonly databasePath: string;
+  readonly sessionDir: string;
+  readonly publicDir: string;
+  readonly schemaPath: string;
+  readonly seedPath: string;
+  readonly agentDir: string;
+  readonly model: ModelSelection;
 }
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -27,11 +32,11 @@ const projectRoot = path.basename(path.dirname(moduleDirectory)) === "dist"
   : path.resolve(moduleDirectory, "..");
 
 function resolveProjectPath(value: string | undefined, fallback: string): string {
-  return path.resolve(projectRoot, value || fallback);
+  return path.resolve(projectRoot, value ?? fallback);
 }
 
 function parsePort(value: string | undefined): number {
-  const port = Number(value || 3000);
+  const port = Number(value ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`PORT 必须是 1 到 65535 之间的整数，当前值为 ${value}`);
   }
@@ -41,11 +46,19 @@ function parsePort(value: string | undefined): number {
 export function loadProjectEnvironment(
   envFilePath = path.join(projectRoot, ".env"),
   target: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
+): AppEnvironment {
   try {
     const values = parseEnv(readFileSync(envFilePath, "utf8"));
     Object.assign(target, values);
-    return target;
+    return {
+      HOST: target["HOST"],
+      PORT: target["PORT"],
+      SQL_WEB_DB_PATH: target["SQL_WEB_DB_PATH"],
+      SQL_WEB_SESSION_DIR: target["SQL_WEB_SESSION_DIR"],
+      // The model must come from this project's .env, never from inherited shell state.
+      SQL_WEB_PROVIDER: values["SQL_WEB_PROVIDER"],
+      SQL_WEB_MODEL: values["SQL_WEB_MODEL"],
+    };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       throw new Error(`找不到环境配置文件 ${envFilePath}，请复制 .env.example 并填写模型配置`, {
@@ -56,7 +69,7 @@ export function loadProjectEnvironment(
   }
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+export function loadConfig(env: AppEnvironment): AppConfig {
   const provider = env.SQL_WEB_PROVIDER?.trim();
   const model = env.SQL_WEB_MODEL?.trim();
   if (!provider || !model) {

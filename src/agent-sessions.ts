@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import {
   createAgentSession,
@@ -14,23 +14,25 @@ import type {
 import type {
   AgentStatus,
   ChatMessage,
+  DatabaseToolName,
+  ModelSelection,
   SerializedSession,
   SessionSummary,
-} from "../shared/contracts.js";
-import type { ModelOverride } from "./config.js";
-import type { DemoDatabase } from "./database.js";
-import { createDatabaseTools, DATABASE_TOOL_NAMES } from "./database-tools.js";
+} from "../shared/contracts.ts";
+import type { DemoDatabase } from "./database.ts";
+import { createDatabaseTools, DATABASE_TOOL_NAMES } from "./database-tools.ts";
+import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 type SessionMessage = AgentSession["messages"][number];
 
 export interface AgentSessionStoreOptions {
-  database: DemoDatabase;
-  cwd: string;
-  sessionDir: string;
-  agentDir: string;
-  model: ModelOverride;
+  readonly database: DemoDatabase;
+  readonly cwd: string;
+  readonly sessionDir: string;
+  readonly agentDir: string;
+  readonly model: ModelSelection;
 }
 
 interface SessionTimes {
@@ -101,7 +103,7 @@ function serializeMessages(messages: readonly SessionMessage[]): ChatMessage[] {
       id: `${message.role}-${transcript.length + 1}`,
       role: message.role,
       text,
-      timestamp: message.timestamp,
+      ...(message.timestamp === undefined ? {} : { timestamp: message.timestamp }),
     });
   }
   return transcript;
@@ -117,45 +119,65 @@ function shortTitle(prompt: string): string {
   return Array.from(normalized).slice(0, 32).join("");
 }
 
-export class AgentSessionStore {
-  #database: DemoDatabase;
-  #cwd: string;
-  #sessionDir: string;
-  #agentDir: string;
-  #model: ModelOverride;
-  #sessions = new Map<string, AgentSession>();
-  #sessionTimes = new Map<string, SessionTimes>();
-  #modelRuntime: ModelRuntime | undefined;
+function isDatabaseToolName(name: string): name is DatabaseToolName {
+  return DATABASE_TOOL_NAMES.some((expected) => expected === name);
+}
 
-  constructor({ database, cwd, sessionDir, agentDir, model }: AgentSessionStoreOptions) {
+function validatedDatabaseToolNames(names: readonly string[]): DatabaseToolName[] {
+  if (
+    names.length !== DATABASE_TOOL_NAMES.length ||
+    names.some((name) => !isDatabaseToolName(name))
+  ) {
+    throw new Error(`Agent 工具白名单校验失败：${names.join(", ")}`);
+  }
+  return names.filter(isDatabaseToolName);
+}
+
+export class AgentSessionStore {
+  readonly #database: DemoDatabase;
+  readonly #cwd: string;
+  readonly #sessionDir: string;
+  readonly #agentDir: string;
+  readonly #model: ModelSelection;
+  readonly #sessions = new Map<string, AgentSession>();
+  readonly #sessionTimes = new Map<string, SessionTimes>();
+  readonly #modelRuntime: ModelRuntime;
+
+  private constructor(
+    { database, cwd, sessionDir, agentDir, model }: AgentSessionStoreOptions,
+    modelRuntime: ModelRuntime,
+  ) {
     this.#database = database;
-    this.#cwd = path.resolve(cwd);
-    this.#sessionDir = path.resolve(sessionDir);
-    this.#agentDir = path.resolve(agentDir);
+    this.#cwd = cwd;
+    this.#sessionDir = sessionDir;
+    this.#agentDir = agentDir;
     this.#model = model;
+    this.#modelRuntime = modelRuntime;
   }
 
-  async initialize(): Promise<this> {
-    mkdirSync(this.#sessionDir, { recursive: true });
-    mkdirSync(this.#agentDir, { recursive: true });
-    const modelsPath = path.join(this.#agentDir, "models.json");
-    const modelsStorePath = path.join(this.#agentDir, "models-store.json");
-    if (!existsSync(modelsPath) && !existsSync(modelsStorePath)) {
-      throw new Error(
-        `在 ${this.#agentDir} 中找不到 models.json 或 models-store.json，无法加载模型列表`,
-      );
-    }
-    this.#modelRuntime = await ModelRuntime.create({
-      authPath: path.join(this.#agentDir, "auth.json"),
+  static async open(options: AgentSessionStoreOptions): Promise<AgentSessionStore> {
+    const resolvedOptions: AgentSessionStoreOptions = {
+      ...options,
+      cwd: path.resolve(options.cwd),
+      sessionDir: path.resolve(options.sessionDir),
+      agentDir: path.resolve(options.agentDir),
+    };
+    mkdirSync(resolvedOptions.sessionDir, { recursive: true });
+    mkdirSync(resolvedOptions.agentDir, { recursive: true });
+    const modelsPath = path.join(resolvedOptions.agentDir, "models.json");
+    const modelsStorePath = path.join(resolvedOptions.agentDir, "models-store.json");
+    assertModelInLocalCatalog(resolvedOptions.agentDir, resolvedOptions.model);
+    const modelRuntime = await ModelRuntime.create({
+      authPath: path.join(resolvedOptions.agentDir, "auth.json"),
       modelsPath,
       modelsStorePath,
     });
-    if (!this.#modelRuntime.getModel(this.#model.provider, this.#model.model)) {
+    if (!modelRuntime.getModel(resolvedOptions.model.provider, resolvedOptions.model.model)) {
       throw new Error(
-        `.env 指定的模型 ${this.#model.provider}/${this.#model.model} 不在本地模型列表中`,
+        `Pi 无法解析本地模型 ${resolvedOptions.model.provider}/${resolvedOptions.model.model}，请检查模型文件格式`,
       );
     }
-    return this;
+    return new AgentSessionStore(resolvedOptions, modelRuntime);
   }
 
   async create(): Promise<SerializedSession> {
@@ -250,7 +272,7 @@ export class AgentSessionStore {
       model: session.model
         ? { provider: session.model.provider, id: session.model.id, name: session.model.name }
         : null,
-      tools: [...session.getActiveToolNames()],
+      tools: validatedDatabaseToolNames(session.getActiveToolNames()),
       streaming: session.isStreaming,
       messages: serializeMessages(session.messages),
     };
@@ -260,7 +282,7 @@ export class AgentSessionStore {
     return {
       tools: [...DATABASE_TOOL_NAMES],
       model: this.#model,
-      availableModelCount: this.#modelRuntime?.getAvailableSnapshot().length ?? 0,
+      availableModelCount: this.#modelRuntime.getAvailableSnapshot().length,
       activeSessionCount: this.#sessions.size,
     };
   }
@@ -272,9 +294,8 @@ export class AgentSessionStore {
   }
 
   async #createPiSession(sessionManager: SessionManager): Promise<AgentSession> {
-    const modelRuntime = this.#requireModelRuntime();
     const settingsManager = SettingsManager.create(this.#cwd, this.#agentDir, { projectTrusted: false });
-    const model = modelRuntime.getModel(this.#model.provider, this.#model.model);
+    const model = this.#modelRuntime.getModel(this.#model.provider, this.#model.model);
     if (!model) {
       throw new Error(
         `找不到模型 ${this.#model.provider}/${this.#model.model}，请检查 .env 与 ${this.#agentDir}`,
@@ -286,7 +307,7 @@ export class AgentSessionStore {
       cwd: this.#cwd,
       agentDir: this.#agentDir,
       model,
-      modelRuntime,
+      modelRuntime: this.#modelRuntime,
       settingsManager,
       sessionManager,
       resourceLoader: createLockedResourceLoader(buildSystemPrompt()),
@@ -295,13 +316,11 @@ export class AgentSessionStore {
       noTools: "builtin",
     });
 
-    const activeTools = session.getActiveToolNames();
-    if (
-      activeTools.length !== DATABASE_TOOL_NAMES.length ||
-      DATABASE_TOOL_NAMES.some((name) => !activeTools.includes(name))
-    ) {
+    try {
+      validatedDatabaseToolNames(session.getActiveToolNames());
+    } catch (error) {
       session.dispose();
-      throw new Error(`Agent 工具白名单校验失败：${activeTools.join(", ")}`);
+      throw error;
     }
     return session;
   }
@@ -310,8 +329,4 @@ export class AgentSessionStore {
     if (!SESSION_ID_PATTERN.test(id)) throw new SessionNotFoundError(id);
   }
 
-  #requireModelRuntime(): ModelRuntime {
-    if (!this.#modelRuntime) throw new Error("AgentSessionStore 尚未初始化");
-    return this.#modelRuntime;
-  }
 }

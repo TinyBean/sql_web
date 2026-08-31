@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { SchemaObject } from "../shared/contracts.js";
+import type { SchemaObject } from "../shared/contracts.ts";
 
 export type SqlParameter = string | number | bigint | boolean | null | Uint8Array;
 type BoundSqlParameter = Exclude<SqlParameter, boolean>;
@@ -17,25 +17,25 @@ type ScannerState =
   | "bracket";
 
 export interface DatabaseOptions {
-  filePath: string;
-  schemaPath: string;
-  seedPath: string;
+  readonly filePath: string;
+  readonly schemaPath: string;
+  readonly seedPath: string;
 }
 
 export interface QueryOptions {
-  maxRows?: number;
+  readonly maxRows?: number;
 }
 
 export interface QueryResult {
-  columns: string[];
-  rows: NormalizedRow[];
-  rowCount: number;
-  truncated: boolean;
+  readonly columns: readonly string[];
+  readonly rows: readonly NormalizedRow[];
+  readonly rowCount: number;
+  readonly truncated: boolean;
 }
 
 export interface ExecuteResult {
-  changes: number;
-  lastInsertRowid: string | number;
+  readonly changes: number;
+  readonly lastInsertRowid: string | number;
 }
 
 const DEFAULT_MAX_ROWS = 100;
@@ -190,33 +190,49 @@ function configureConnection(database: DatabaseSync): void {
   database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   // enableDefensive() exists in newer Node releases but not in the Node 22
   // type surface supported by this project. Keep the extra hardening when present.
-  const defensiveDatabase = database as DatabaseSync & { enableDefensive?: (enabled: boolean) => void };
-  defensiveDatabase.enableDefensive?.(true);
+  if ("enableDefensive" in database && typeof database.enableDefensive === "function") {
+    database.enableDefensive(true);
+  }
 }
 
 export class DemoDatabase {
   readonly filePath: string;
   readonly schemaPath: string;
   readonly seedPath: string;
-  #writer: DatabaseSync | undefined;
-  #reader: DatabaseSync | undefined;
+  #writer: DatabaseSync | null;
+  #reader: DatabaseSync | null;
 
-  constructor({ filePath, schemaPath, seedPath }: DatabaseOptions) {
-    this.filePath = path.resolve(filePath);
-    this.schemaPath = path.resolve(schemaPath);
-    this.seedPath = path.resolve(seedPath);
+  private constructor(options: DatabaseOptions, writer: DatabaseSync, reader: DatabaseSync) {
+    this.filePath = options.filePath;
+    this.schemaPath = options.schemaPath;
+    this.seedPath = options.seedPath;
+    this.#writer = writer;
+    this.#reader = reader;
   }
 
-  initialize(): this {
-    mkdirSync(path.dirname(this.filePath), { recursive: true });
-    this.#writer = new DatabaseSync(this.filePath);
-    configureConnection(this.#writer);
-    this.#writer.exec(readFileSync(this.schemaPath, "utf8"));
-    this.#writer.exec(readFileSync(this.seedPath, "utf8"));
+  static open({ filePath, schemaPath, seedPath }: DatabaseOptions): DemoDatabase {
+    const options: DatabaseOptions = {
+      filePath: path.resolve(filePath),
+      schemaPath: path.resolve(schemaPath),
+      seedPath: path.resolve(seedPath),
+    };
+    mkdirSync(path.dirname(options.filePath), { recursive: true });
+    let writer: DatabaseSync | undefined;
+    let reader: DatabaseSync | undefined;
+    try {
+      writer = new DatabaseSync(options.filePath);
+      configureConnection(writer);
+      writer.exec(readFileSync(options.schemaPath, "utf8"));
+      writer.exec(readFileSync(options.seedPath, "utf8"));
 
-    this.#reader = new DatabaseSync(this.filePath, { readOnly: true });
-    configureConnection(this.#reader);
-    return this;
+      reader = new DatabaseSync(options.filePath, { readOnly: true });
+      configureConnection(reader);
+      return new DemoDatabase(options, writer, reader);
+    } catch (error) {
+      reader?.close();
+      writer?.close();
+      throw error;
+    }
   }
 
   query(sql: string, parameters?: readonly SqlParameter[], options: QueryOptions = {}): QueryResult {
@@ -278,24 +294,24 @@ export class DemoDatabase {
       .all();
 
     return objects.map((object): SchemaObject => {
-      const type = object.type;
-      const name = object.name;
+      const type = object["type"];
+      const name = object["name"];
       if ((type !== "table" && type !== "view") || typeof name !== "string") {
         throw new Error("数据库返回了无法识别的 Schema 元数据");
       }
       return {
-      type,
-      name,
-      sql: typeof object.sql === "string" ? object.sql : null,
-      columns: reader
-        .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?) ORDER BY cid")
-        .all(name)
-        .map((column) => ({
-          name: String(column.name),
-          type: String(column.type),
-          nullable: column.notnull === 0,
-          primaryKey: typeof column.pk === "number" && column.pk > 0,
-        })),
+        type,
+        name,
+        sql: typeof object["sql"] === "string" ? object["sql"] : null,
+        columns: reader
+          .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?) ORDER BY cid")
+          .all(name)
+          .map((column) => ({
+            name: String(column["name"]),
+            type: String(column["type"]),
+            nullable: column["notnull"] === 0,
+            primaryKey: typeof column["pk"] === "number" && column["pk"] > 0,
+          })),
       };
     });
   }
@@ -303,8 +319,8 @@ export class DemoDatabase {
   close(): void {
     this.#reader?.close();
     this.#writer?.close();
-    this.#reader = undefined;
-    this.#writer = undefined;
+    this.#reader = null;
+    this.#writer = null;
   }
 
   #connections(): { writer: DatabaseSync; reader: DatabaseSync } {

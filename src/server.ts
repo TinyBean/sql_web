@@ -1,22 +1,31 @@
-import { AgentSessionStore } from "./agent-sessions.js";
-import { loadConfig, loadProjectEnvironment } from "./config.js";
-import { DemoDatabase } from "./database.js";
-import { createWebServer } from "./http-server.js";
+import { AgentSessionStore } from "./agent-sessions.ts";
+import { loadConfig, loadProjectEnvironment } from "./config.ts";
+import { DemoDatabase } from "./database.ts";
+import { createWebServer } from "./http-server.ts";
 
 const config = loadConfig(loadProjectEnvironment());
-const database = new DemoDatabase({
+const database = DemoDatabase.open({
   filePath: config.databasePath,
   schemaPath: config.schemaPath,
   seedPath: config.seedPath,
-}).initialize();
-const sessions = await new AgentSessionStore({
+});
+const sessions = await AgentSessionStore.open({
   database,
   cwd: config.projectRoot,
   sessionDir: config.sessionDir,
   agentDir: config.agentDir,
   model: config.model,
-}).initialize();
+}).catch((error: unknown) => {
+  database.close();
+  throw error;
+});
 const server = createWebServer({ database, sessions, publicDir: config.publicDir });
+
+server.once("error", (error) => {
+  sessions.dispose();
+  database.close();
+  throw error;
+});
 
 server.listen(config.port, config.host, () => {
   console.log(`数据库问答网站已启动：http://${config.host}:${config.port}`);

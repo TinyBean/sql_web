@@ -5,21 +5,27 @@ import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } fro
 import path from "node:path";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type {
+  AbortResponse,
   AgentStatus,
+  ErrorResponse,
+  HealthResponse,
+  JsonResponseBody,
   MessageRequest,
+  SchemaResponse,
   SerializedSession,
   SessionSummary,
+  SessionsResponse,
   SseEventMap,
-} from "../shared/contracts.js";
-import { SessionBusyError, SessionNotFoundError } from "./agent-sessions.js";
-import type { AgentSessionStore } from "./agent-sessions.js";
-import { DatabaseInputError } from "./database.js";
-import type { DemoDatabase } from "./database.js";
+} from "../shared/contracts.ts";
+import { SessionBusyError, SessionNotFoundError } from "./agent-sessions.ts";
+import { DatabaseInputError } from "./database.ts";
+import type { DemoDatabase } from "./database.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const STATIC_FILES = new Map<string, readonly [filename: string, contentType: string]>([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["generated/client/app.js", "text/javascript; charset=utf-8"]],
+  ["/api-contracts.js", ["generated/client/api-contracts.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -31,10 +37,15 @@ export interface WebSessionPort {
   status(): AgentStatus;
   list(): Promise<SessionSummary[]>;
   create(): Promise<SerializedSession>;
-  get(id: string): ReturnType<AgentSessionStore["get"]>;
+  get(id: string): Promise<StreamableAgentSession>;
   getSerialized(id: string): Promise<SerializedSession>;
   prompt(id: string, text: string): Promise<void>;
   abort(id: string): Promise<void>;
+}
+
+export interface StreamableAgentSession {
+  readonly isStreaming: boolean;
+  subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 }
 
 export interface WebServerOptions {
@@ -45,9 +56,12 @@ export interface WebServerOptions {
 }
 
 class HttpError extends Error {
-  constructor(message: string, readonly statusCode: number) {
+  readonly statusCode: number;
+
+  constructor(message: string, statusCode: number) {
     super(message);
     this.name = "HttpError";
+    this.statusCode = statusCode;
   }
 }
 
@@ -63,7 +77,7 @@ function securityHeaders(contentType: string): OutgoingHttpHeaders {
   };
 }
 
-function json(response: ServerResponse, status: number, value: unknown): void {
+function json(response: ServerResponse, status: number, value: JsonResponseBody): void {
   response.writeHead(status, securityHeaders("application/json; charset=utf-8"));
   response.end(JSON.stringify(value));
 }
@@ -84,7 +98,8 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    return value;
   } catch {
     throw new HttpError("请求体不是有效 JSON", 400);
   }
@@ -175,21 +190,26 @@ export function createWebServer({ database, sessions, publicDir, logger = consol
       if (request.method === "GET" && (await serveStatic(response, publicDir, url.pathname))) return;
 
       if (request.method === "GET" && url.pathname === "/api/health") {
-        json(response, 200, {
+        const body = {
           ok: true,
           database: { engine: "SQLite", path: path.basename(database.filePath) },
           agent: sessions.status(),
-        });
+        } satisfies HealthResponse;
+        json(response, 200, body);
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/schema") {
-        json(response, 200, { objects: database.getSchema().map(({ sql: _sql, ...item }) => item) });
+        const body = {
+          objects: database.getSchema().map(({ sql: _sql, ...item }) => item),
+        } satisfies SchemaResponse;
+        json(response, 200, body);
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/sessions") {
-        json(response, 200, { sessions: await sessions.list() });
+        const body = { sessions: await sessions.list() } satisfies SessionsResponse;
+        json(response, 200, body);
         return;
       }
 
@@ -236,15 +256,17 @@ export function createWebServer({ database, sessions, publicDir, logger = consol
       if (request.method === "POST" && abortMatch) {
         await readJson(request);
         await sessions.abort(decodeSessionId(abortMatch));
-        json(response, 200, { ok: true });
+        json(response, 200, { ok: true } satisfies AbortResponse);
         return;
       }
 
-      json(response, 404, { error: "接口不存在" });
+      json(response, 404, { error: "接口不存在" } satisfies ErrorResponse);
     } catch (error) {
       logger.error("HTTP request failed", error);
       if (!response.headersSent) {
-        json(response, errorStatus(error), { error: errorMessage(error, "服务器内部错误") });
+        json(response, errorStatus(error), {
+          error: errorMessage(error, "服务器内部错误"),
+        } satisfies ErrorResponse);
       }
       else response.end();
     }

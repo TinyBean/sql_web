@@ -1,38 +1,57 @@
 import type {
   ChatMessage,
   ChatRole,
-  HealthResponse,
+  MessageRequest,
   ParsedSseEvent,
   SchemaObject,
-  SchemaResponse,
   SerializedSession,
-  SessionsResponse,
   SessionSummary,
-} from "../shared/contracts.js";
+} from "../shared/contracts.ts";
+import {
+  decodeAbortResponse,
+  decodeHealthResponse,
+  decodeSchemaResponse,
+  decodeSerializedSession,
+  decodeSessionsResponse,
+  decodeSseEvent,
+  errorMessageFromResponse,
+  parseJson,
+  type Decoder,
+} from "./api-contracts.ts";
 
-function requiredElement<ElementType extends Element>(selector: string): ElementType {
-  const element = document.querySelector<ElementType>(selector);
-  if (!element) throw new Error(`页面缺少必要元素：${selector}`);
+interface ElementConstructor<ElementType extends Element> {
+  readonly prototype: ElementType;
+  new(): ElementType;
+}
+
+function requiredElement<ElementType extends Element>(
+  selector: string,
+  constructor: ElementConstructor<ElementType>,
+): ElementType {
+  const element = document.querySelector(selector);
+  if (!(element instanceof constructor)) {
+    throw new Error(`页面元素 ${selector} 不存在或类型错误`);
+  }
   return element;
 }
 
 const elements = {
-  sidebar: requiredElement<HTMLElement>("#sidebar"),
-  sidebarScrim: requiredElement<HTMLElement>("#sidebarScrim"),
-  menuButton: requiredElement<HTMLButtonElement>("#menuButton"),
-  newChatButton: requiredElement<HTMLButtonElement>("#newChatButton"),
-  sessionList: requiredElement<HTMLElement>("#sessionList"),
-  messages: requiredElement<HTMLElement>("#messages"),
-  welcome: requiredElement<HTMLElement>("#welcome"),
-  composer: requiredElement<HTMLFormElement>("#composer"),
-  input: requiredElement<HTMLTextAreaElement>("#questionInput"),
-  sendButton: requiredElement<HTMLButtonElement>("#sendButton"),
-  modelBadge: requiredElement<HTMLElement>("#modelBadge"),
-  schemaButton: requiredElement<HTMLButtonElement>("#schemaButton"),
-  schemaCloseButton: requiredElement<HTMLButtonElement>("#schemaCloseButton"),
-  schemaPanel: requiredElement<HTMLElement>("#schemaPanel"),
-  schemaList: requiredElement<HTMLElement>("#schemaList"),
-  toast: requiredElement<HTMLElement>("#toast"),
+  sidebar: requiredElement("#sidebar", HTMLElement),
+  sidebarScrim: requiredElement("#sidebarScrim", HTMLElement),
+  menuButton: requiredElement("#menuButton", HTMLButtonElement),
+  newChatButton: requiredElement("#newChatButton", HTMLButtonElement),
+  sessionList: requiredElement("#sessionList", HTMLElement),
+  messages: requiredElement("#messages", HTMLElement),
+  welcome: requiredElement("#welcome", HTMLElement),
+  composer: requiredElement("#composer", HTMLFormElement),
+  input: requiredElement("#questionInput", HTMLTextAreaElement),
+  sendButton: requiredElement("#sendButton", HTMLButtonElement),
+  modelBadge: requiredElement("#modelBadge", HTMLElement),
+  schemaButton: requiredElement("#schemaButton", HTMLButtonElement),
+  schemaCloseButton: requiredElement("#schemaCloseButton", HTMLButtonElement),
+  schemaPanel: requiredElement("#schemaPanel", HTMLElement),
+  schemaList: requiredElement("#schemaList", HTMLElement),
+  toast: requiredElement("#toast", HTMLElement),
 };
 
 interface StreamNode {
@@ -45,17 +64,20 @@ interface StreamNode {
 
 interface ClientState {
   sessionId: string | null;
-  sessions: SessionSummary[];
-  streaming: boolean;
-  streamNode: StreamNode | null;
+  sessions: readonly SessionSummary[];
+  activeStream: ActiveStream | null;
   toastTimer: number | null;
+}
+
+interface ActiveStream {
+  readonly sessionId: string;
+  readonly node: StreamNode;
 }
 
 const state: ClientState = {
   sessionId: null,
   sessions: [],
-  streaming: false,
-  streamNode: null,
+  activeStream: null,
   toastTimer: null,
 };
 
@@ -83,21 +105,27 @@ function messageFromUnknown(error: unknown, fallback = "请求失败"): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function errorFromPayload(payload: unknown): string | undefined {
-  if (typeof payload !== "object" || payload === null || !("error" in payload)) return undefined;
-  return typeof payload.error === "string" ? payload.error : undefined;
+async function responsePayload(response: Response): Promise<unknown> {
+  const text = await response.text();
+  return parseJson(text, `$response(${response.status})`);
 }
 
-async function api<ResponseBody>(path: string, options: RequestInit = {}): Promise<ResponseBody> {
+async function api<ResponseBody>(
+  path: string,
+  decode: Decoder<ResponseBody>,
+  options: RequestInit = {},
+): Promise<ResponseBody> {
   const headers = new Headers(options.headers);
   if (options.body) headers.set("Content-Type", "application/json");
   const response = await fetch(path, {
     ...options,
     headers,
   });
-  const payload: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(errorFromPayload(payload) || `请求失败 (${response.status})`);
-  return payload as ResponseBody;
+  const payload = await responsePayload(response);
+  if (!response.ok) {
+    throw new Error(errorMessageFromResponse(payload) ?? `请求失败 (${response.status})`);
+  }
+  return decode(payload, `$response(${response.status})`);
 }
 
 function closeSidebar(): void {
@@ -125,7 +153,7 @@ function renderSessions(): void {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-item${session.id === state.sessionId ? " active" : ""}`;
-    button.dataset.sessionId = session.id;
+    button.dataset["sessionId"] = session.id;
     button.append(
       createSvg([{ d: "M7 17.5 4 20v-4.5a8 8 0 1 1 3 2Z" }]),
       Object.assign(document.createElement("span"), { textContent: session.title || "新会话" }),
@@ -163,9 +191,13 @@ function renderSchema(objects: readonly Omit<SchemaObject, "sql">[]): void {
 }
 
 function ensureMessageStream(): HTMLElement {
-  let stream = elements.messages.querySelector<HTMLElement>(".message-stream");
+  const existing = elements.messages.querySelector(".message-stream");
+  if (existing && !(existing instanceof HTMLElement)) {
+    throw new Error("消息列表元素类型错误");
+  }
+  let stream = existing;
   if (!stream) {
-    elements.welcome?.remove();
+    elements.welcome.remove();
     stream = document.createElement("div");
     stream.className = "message-stream";
     elements.messages.append(stream);
@@ -197,8 +229,9 @@ function appendMessage(role: ChatRole, text = "", streaming = false): StreamNode
   messageText.className = "message-text";
   messageText.textContent = text;
   body.append(label, tools, messageText);
+  let typing: HTMLDivElement | null = null;
   if (streaming) {
-    const typing = document.createElement("div");
+    typing = document.createElement("div");
     typing.className = "typing";
     typing.setAttribute("aria-label", "正在思考");
     typing.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
@@ -212,7 +245,7 @@ function appendMessage(role: ChatRole, text = "", streaming = false): StreamNode
     body,
     text: messageText,
     tools,
-    typing: body.querySelector<HTMLDivElement>(".typing"),
+    typing,
   };
 }
 
@@ -228,8 +261,9 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
   for (const message of messages) appendMessage(message.role, message.text);
 }
 
-function setStreaming(streaming: boolean): void {
-  state.streaming = streaming;
+function setActiveStream(activeStream: ActiveStream | null): void {
+  state.activeStream = activeStream;
+  const streaming = activeStream !== null;
   elements.sendButton.classList.toggle("streaming", streaming);
   elements.sendButton.setAttribute("aria-label", streaming ? "停止回答" : "发送问题");
   elements.input.disabled = streaming;
@@ -239,20 +273,23 @@ function setStreaming(streaming: boolean): void {
 function applySession(session: SerializedSession): void {
   state.sessionId = session.id;
   history.replaceState(null, "", `#session=${encodeURIComponent(session.id)}`);
-  renderTranscript(session.messages || []);
+  renderTranscript(session.messages);
   renderSessions();
   elements.input.focus();
 }
 
 async function refreshSessions(): Promise<void> {
-  const payload = await api<SessionsResponse>("/api/sessions");
+  const payload = await api("/api/sessions", decodeSessionsResponse);
   state.sessions = payload.sessions;
   renderSessions();
 }
 
-async function createSession(): Promise<SerializedSession | undefined> {
-  if (state.streaming) return;
-  const session = await api<SerializedSession>("/api/sessions", { method: "POST", body: "{}" });
+async function createSession(): Promise<SerializedSession | null> {
+  if (state.activeStream) return null;
+  const session = await api("/api/sessions", decodeSerializedSession, {
+    method: "POST",
+    body: "{}",
+  });
   await refreshSessions();
   applySession(session);
   closeSidebar();
@@ -260,14 +297,13 @@ async function createSession(): Promise<SerializedSession | undefined> {
 }
 
 async function loadSession(id: string): Promise<void> {
-  if (state.streaming || !id) return;
-  const session = await api<SerializedSession>(`/api/sessions/${encodeURIComponent(id)}`);
+  if (state.activeStream || !id) return;
+  const session = await api(
+    `/api/sessions/${encodeURIComponent(id)}`,
+    decodeSerializedSession,
+  );
   applySession(session);
   closeSidebar();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function parseSseBlock(block: string): ParsedSseEvent | null {
@@ -278,39 +314,7 @@ function parseSseBlock(block: string): ParsedSseEvent | null {
     else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
   }
   if (!dataLines.length) return null;
-  const data: unknown = JSON.parse(dataLines.join("\n"));
-  if (!isRecord(data)) return null;
-
-  if (event === "text_delta" && typeof data.delta === "string") {
-    return { event, data: { delta: data.delta } };
-  }
-  if (
-    event === "tool_start" &&
-    typeof data.id === "string" &&
-    typeof data.name === "string"
-  ) {
-    return { event, data: { id: data.id, name: data.name } };
-  }
-  if (
-    event === "tool_end" &&
-    typeof data.id === "string" &&
-    typeof data.name === "string" &&
-    typeof data.isError === "boolean"
-  ) {
-    return { event, data: { id: data.id, name: data.name, isError: data.isError } };
-  }
-  if ((event === "status" || event === "error") && typeof data.message === "string") {
-    return { event, data: { message: data.message } };
-  }
-  if (
-    event === "done" &&
-    typeof data.id === "string" &&
-    typeof data.title === "string" &&
-    Array.isArray(data.messages)
-  ) {
-    return { event, data: data as unknown as SerializedSession };
-  }
-  return null;
+  return decodeSseEvent(event, parseJson(dataLines.join("\n"), `$sse.${event}`));
 }
 
 function handleStreamEvent(
@@ -326,11 +330,11 @@ function handleStreamEvent(
     node.typing = null;
     const chip = document.createElement("span");
     chip.className = "tool-chip";
-    chip.dataset.toolId = parsed.data.id;
+    chip.dataset["toolId"] = parsed.data.id;
     chip.textContent = parsed.data.name === "query_database" ? "正在查询数据库" : "正在修改数据库";
     node.tools.append(chip);
   } else if (parsed.event === "tool_end") {
-    const chip = node.tools.querySelector<HTMLElement>(
+    const chip = node.tools.querySelector(
       `[data-tool-id="${CSS.escape(parsed.data.id)}"]`,
     );
     if (chip) {
@@ -351,17 +355,18 @@ function handleStreamEvent(
   elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
-async function streamQuestion(message: string): Promise<SerializedSession | null> {
-  const sessionId = state.sessionId;
-  if (!sessionId) throw new Error("尚未创建会话");
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+async function streamQuestion(
+  message: string,
+  activeStream: ActiveStream,
+): Promise<SerializedSession | null> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(activeStream.sessionId)}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message } satisfies MessageRequest),
   });
   if (!response.ok) {
-    const payload: unknown = await response.json().catch(() => ({}));
-    throw new Error(errorFromPayload(payload) || `请求失败 (${response.status})`);
+    const payload = await responsePayload(response);
+    throw new Error(errorMessageFromResponse(payload) ?? `请求失败 (${response.status})`);
   }
   if (!response.body) throw new Error("浏览器不支持流式响应");
 
@@ -371,14 +376,14 @@ async function streamQuestion(message: string): Promise<SerializedSession | null
   let completedSession: SerializedSession | null = null;
   while (true) {
     const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const blocks = buffer.split(/\r?\n\r?\n/u);
-    buffer = blocks.pop() || "";
+    buffer = blocks.pop() ?? "";
     for (const block of blocks) {
       const parsed = parseSseBlock(block);
       if (!parsed) continue;
       if (parsed.event === "done") completedSession = parsed.data;
-      else if (state.streamNode) handleStreamEvent(parsed, state.streamNode);
+      else handleStreamEvent(parsed, activeStream.node);
     }
     if (done) break;
   }
@@ -387,16 +392,18 @@ async function streamQuestion(message: string): Promise<SerializedSession | null
 
 async function submitQuestion(question: string): Promise<void> {
   const message = question.trim();
-  if (!message || state.streaming) return;
+  if (!message || state.activeStream) return;
   if (!state.sessionId) await createSession();
+  const sessionId = state.sessionId;
+  if (!sessionId) throw new Error("尚未创建会话");
   elements.input.value = "";
   appendMessage("user", message);
   const streamNode = appendMessage("assistant", "", true);
-  state.streamNode = streamNode;
-  setStreaming(true);
+  const activeStream: ActiveStream = { sessionId, node: streamNode };
+  setActiveStream(activeStream);
 
   try {
-    const completed = await streamQuestion(message);
+    const completed = await streamQuestion(message, activeStream);
     streamNode.typing?.remove();
     if (completed) {
       state.sessionId = completed.id;
@@ -408,20 +415,21 @@ async function submitQuestion(question: string): Promise<void> {
       streamNode,
     );
   } finally {
-    setStreaming(false);
-    state.streamNode = null;
+    setActiveStream(null);
     elements.input.focus();
   }
 }
 
 async function abortAnswer(): Promise<void> {
-  if (!state.streaming || !state.sessionId) return;
+  const activeStream = state.activeStream;
+  if (!activeStream) return;
   elements.sendButton.disabled = true;
   try {
-    await api<{ ok: true }>(`/api/sessions/${encodeURIComponent(state.sessionId)}/abort`, {
-      method: "POST",
-      body: "{}",
-    });
+    await api(
+      `/api/sessions/${encodeURIComponent(activeStream.sessionId)}/abort`,
+      decodeAbortResponse,
+      { method: "POST", body: "{}" },
+    );
   } catch (error) {
     showToast(messageFromUnknown(error));
   } finally {
@@ -432,17 +440,12 @@ async function abortAnswer(): Promise<void> {
 async function initialize(): Promise<void> {
   try {
     const [health, schema, sessionPayload] = await Promise.all([
-      api<HealthResponse>("/api/health"),
-      api<SchemaResponse>("/api/schema"),
-      api<SessionsResponse>("/api/sessions"),
+      api("/api/health", decodeHealthResponse),
+      api("/api/schema", decodeSchemaResponse),
+      api("/api/sessions", decodeSessionsResponse),
     ]);
     const model = health.agent.model;
-    if (model.provider && model.model) {
-      elements.modelBadge.textContent = `${model.provider}/${model.model}`;
-    } else {
-      elements.modelBadge.textContent = "请先在 pi 中选择模型";
-      elements.modelBadge.classList.add("warning");
-    }
+    elements.modelBadge.textContent = `${model.provider}/${model.model}`;
     renderSchema(schema.objects);
     state.sessions = sessionPayload.sessions;
     renderSessions();
@@ -459,7 +462,7 @@ async function initialize(): Promise<void> {
 
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (state.streaming) void abortAnswer();
+  if (state.activeStream) void abortAnswer();
   else void submitQuestion(elements.input.value).catch((error) => showToast(messageFromUnknown(error)));
 });
 elements.input.addEventListener("keydown", (event) => {
@@ -473,16 +476,18 @@ elements.newChatButton.addEventListener("click", () => {
 });
 elements.sessionList.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
-  const button = event.target.closest<HTMLElement>("[data-session-id]");
-  const sessionId = button?.dataset.sessionId;
+  const candidate = event.target.closest("[data-session-id]");
+  const button = candidate instanceof HTMLElement ? candidate : null;
+  const sessionId = button?.dataset["sessionId"];
   if (sessionId) {
     void loadSession(sessionId).catch((error) => showToast(messageFromUnknown(error)));
   }
 });
 elements.messages.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
-  const button = event.target.closest<HTMLElement>("[data-question]");
-  const question = button?.dataset.question;
+  const candidate = event.target.closest("[data-question]");
+  const button = candidate instanceof HTMLElement ? candidate : null;
+  const question = button?.dataset["question"];
   if (question) {
     void submitQuestion(question).catch((error) => showToast(messageFromUnknown(error)));
   }

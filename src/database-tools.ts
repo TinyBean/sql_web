@@ -1,8 +1,10 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { DemoDatabase } from "./database.js";
+import type { DatabaseToolName } from "../shared/contracts.ts";
+import type { DemoDatabase } from "./database.ts";
 
-export const DATABASE_TOOL_NAMES = ["query_database", "execute_database"] as const;
+export const DATABASE_TOOL_NAMES = ["query_database", "execute_database"] as const satisfies
+  readonly DatabaseToolName[];
 
 const scalar = Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]);
 const sqlParameters = Type.Optional(
@@ -29,7 +31,8 @@ export function createDatabaseTools(database: DemoDatabase) {
     }),
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
-      const result = database.query(params.sql, params.parameters, { maxRows: params.limit });
+      const options = params.limit === undefined ? {} : { maxRows: params.limit };
+      const result = database.query(params.sql, params.parameters, options);
       signal?.throwIfAborted();
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

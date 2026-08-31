@@ -3,18 +3,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { DatabaseInputError, DemoDatabase } from "../src/database.js";
-import type { QueryResult } from "../src/database.js";
+import { DatabaseInputError, DemoDatabase } from "../src/database.ts";
+import type { QueryResult } from "../src/database.ts";
 
 const projectRoot = process.cwd();
 
 function createFixture(t: TestContext): DemoDatabase {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-test-"));
-  const database = new DemoDatabase({
+  const database = DemoDatabase.open({
     filePath: path.join(directory, "demo.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     seedPath: path.join(projectRoot, "sql", "seed.sql"),
-  }).initialize();
+  });
   t.after(() => {
     database.close();
     rmSync(directory, { recursive: true, force: true });
@@ -58,20 +58,20 @@ test("keeps query_database read-only", (t) => {
     () => database.query("DELETE FROM products WHERE id = 1"),
     (error) => error instanceof DatabaseInputError && /只读 SQL/u.test(error.message),
   );
-  assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM products")).count, 10);
+  assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM products"))["count"], 10);
 });
 
 test("execute commits allowed writes and rolls back invalid writes", (t) => {
   const database = createFixture(t);
   const result = database.execute("UPDATE products SET stock = stock - ? WHERE id = ?", [2, 1]);
   assert.equal(result.changes, 1);
-  assert.equal(firstRow(database.query("SELECT stock FROM products WHERE id = ?", [1])).stock, 34);
+  assert.equal(firstRow(database.query("SELECT stock FROM products WHERE id = ?", [1]))["stock"], 34);
 
   assert.throws(
     () => database.execute("UPDATE products SET stock = -1 WHERE id = 1"),
     /CHECK constraint failed/u,
   );
-  assert.equal(firstRow(database.query("SELECT stock FROM products WHERE id = 1")).stock, 34);
+  assert.equal(firstRow(database.query("SELECT stock FROM products WHERE id = 1"))["stock"], 34);
 });
 
 test("rejects DDL and multiple statements while accepting semicolons in strings", (t) => {
@@ -94,15 +94,15 @@ test("seed initialization is idempotent and preserves later changes", (t) => {
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     seedPath: path.join(projectRoot, "sql", "seed.sql"),
   };
-  const first = new DemoDatabase(options).initialize();
+  const first = DemoDatabase.open(options);
   first.execute("UPDATE products SET stock = ? WHERE id = ?", [31, 1]);
   first.close();
-  const second = new DemoDatabase(options).initialize();
+  const second = DemoDatabase.open(options);
   t.after(() => {
     second.close();
     rmSync(directory, { recursive: true, force: true });
   });
 
-  assert.equal(firstRow(second.query("SELECT stock FROM products WHERE id = 1")).stock, 31);
-  assert.equal(firstRow(second.query("SELECT COUNT(*) AS count FROM customers")).count, 8);
+  assert.equal(firstRow(second.query("SELECT stock FROM products WHERE id = 1"))["stock"], 31);
+  assert.equal(firstRow(second.query("SELECT COUNT(*) AS count FROM customers"))["count"], 8);
 });

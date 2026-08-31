@@ -39,13 +39,18 @@ HTTP 层只调用 `AgentSessionStore` 和 `DemoDatabase` 的小接口，不需�
 ```text
 src/                 Node.js 后端源码
 client/              浏览器端源码
+client/api-contracts.ts  HTTP 与 SSE 运行时解码器
 shared/contracts.ts  HTTP、会话和 SSE 共享类型
 test/                TypeScript 测试
 public/              HTML、CSS 和生成的浏览器 JavaScript
 dist/                编译后的后端与测试
 ```
 
-服务端和客户端使用独立的 `tsconfig`：服务端采用 `NodeNext`，客户端只加载 DOM 类型。浏览器产物生成到 `public/generated/`，`dist/` 与生成文件均不纳入版本控制。
+服务端和客户端使用独立的 `tsconfig`：服务端采用 `NodeNext`，客户端只加载 DOM 类型。公共配置启用了 `strict`、`exactOptionalPropertyTypes`、`noUncheckedIndexedAccess`、`noPropertyAccessFromIndexSignature` 与 `erasableSyntaxOnly` 等严格检查。
+
+源码中的相对导入统一使用 `.ts` 后缀；TypeScript 通过 `rewriteRelativeImportExtensions` 在构建时改写为运行时需要的 `.js`。因此 `dist/`、`public/generated/`、HTML 脚本地址和 `package.json` 启动命令中出现 `.js` 属于编译产物，不是 JavaScript 源码残留。
+
+浏览器不会直接相信 `fetch` 或 SSE 返回值。`client/api-contracts.ts` 从 `unknown` 开始逐字段验证完整响应，后端响应对象同时使用共享类型进行 `satisfies` 校验，避免仅靠泛型断言掩盖协议漂移。浏览器产物生成到 `public/generated/`，`dist/` 与生成文件均不纳入版本控制。
 
 ## 环境要求
 

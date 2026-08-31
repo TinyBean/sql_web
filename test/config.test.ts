@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig, loadProjectEnvironment } from "../src/config.js";
+import { loadConfig, loadProjectEnvironment } from "../src/config.ts";
 
 test("loads the selected model from the project environment file", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));
@@ -35,9 +35,24 @@ test("requires both model fields", () => {
   );
 });
 
-test("reports a missing project environment file", () => {
+test("does not inherit the selected model from the shell", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));
+  const envPath = path.join(directory, ".env");
+  writeFileSync(envPath, "PORT=3000\n");
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+
+  const environment = loadProjectEnvironment(envPath, {
+    SQL_WEB_PROVIDER: "shell-provider",
+    SQL_WEB_MODEL: "shell-model",
+  });
+  assert.throws(() => loadConfig(environment), /SQL_WEB_PROVIDER 和 SQL_WEB_MODEL/u);
+});
+
+test("reports a missing project environment file", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   assert.throws(
-    () => loadProjectEnvironment(path.join(tmpdir(), "missing-sql-web.env"), {}),
+    () => loadProjectEnvironment(path.join(directory, "missing.env"), {}),
     /找不到环境配置文件/u,
   );
 });

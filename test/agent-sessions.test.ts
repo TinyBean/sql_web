@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { AgentSessionStore } from "../src/agent-sessions.js";
-import { DemoDatabase } from "../src/database.js";
+import { AgentSessionStore } from "../src/agent-sessions.ts";
+import { DemoDatabase } from "../src/database.ts";
 
 const projectRoot = process.cwd();
 
@@ -25,18 +25,18 @@ test("maps a web session directly to a Pi session with only database tools", asy
       },
     }),
   );
-  const database = new DemoDatabase({
+  const database = DemoDatabase.open({
     filePath: path.join(directory, "demo.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     seedPath: path.join(projectRoot, "sql", "seed.sql"),
-  }).initialize();
-  const store = await new AgentSessionStore({
+  });
+  const store = await AgentSessionStore.open({
     database,
     cwd: directory,
     sessionDir: path.join(directory, "sessions"),
     agentDir,
     model: { provider: "test-provider", model: "test-model" },
-  }).initialize();
+  });
   t.after(() => {
     store.dispose();
     database.close();

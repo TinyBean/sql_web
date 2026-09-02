@@ -96,6 +96,8 @@ npm run data:status
 
 生产环境可定期执行 `data:sync`。命令失败时返回非零退出码，可以由 cron、systemd timer 或调度平台告警。
 
+数据拉取、重试、导入和同步结果以 JSON Lines 格式持续追加到 `.data/logs/oee-data.log`，该文件不按日期滚动。网站服务日志与数据日志分开，按本地自然日写入 `.data/logs/sql_web-YYYY-MM-DD.log`。
+
 ## 表结构
 
 主要查询表：

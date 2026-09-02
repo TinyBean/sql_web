@@ -9,10 +9,16 @@ export interface AppLogger {
   error(event: string, error: unknown, fields?: LogFields): void;
 }
 
-export interface DailyFileLoggerOptions {
+interface LoggerOptions {
   readonly now?: () => Date;
   readonly reportWriteError?: (error: unknown) => void;
 }
+
+export interface DailyFileLoggerOptions extends LoggerOptions {
+  readonly filenamePrefix?: string;
+}
+
+export type FileLoggerOptions = LoggerOptions;
 
 type LogLevel = "INFO" | "WARN" | "ERROR";
 
@@ -45,28 +51,18 @@ function jsonLine(value: unknown): string {
   })}\n`;
 }
 
-/**
- * Synchronously appends one JSON object per line. The destination filename is
- * resolved for every entry, so a process that spans midnight rolls over without
- * needing a timer or restart.
- */
-export class DailyFileLogger implements AppLogger {
-  readonly #logDir: string;
+class JsonFileLogger implements AppLogger {
+  readonly #resolveFilename: (now: Date) => string;
   readonly #now: () => Date;
   readonly #reportWriteError: (error: unknown) => void;
   #writeErrorReported = false;
 
-  constructor(logDir: string, options: DailyFileLoggerOptions = {}) {
-    this.#logDir = path.resolve(logDir);
+  constructor(resolveFilename: (now: Date) => string, options: LoggerOptions = {}) {
+    this.#resolveFilename = resolveFilename;
     this.#now = options.now ?? (() => new Date());
     this.#reportWriteError = options.reportWriteError ?? ((error) => {
       console.error("写入应用日志失败", error);
     });
-    mkdirSync(this.#logDir, { recursive: true });
-  }
-
-  get logDir(): string {
-    return this.#logDir;
   }
 
   info(event: string, fields?: LogFields): void {
@@ -96,7 +92,7 @@ export class DailyFileLogger implements AppLogger {
       ...(fields ? { fields } : {}),
       ...(error ? { error } : {}),
     };
-    const filename = path.join(this.#logDir, `sql-web-${localDate(now)}.log`);
+    const filename = this.#resolveFilename(now);
     try {
       appendFileSync(filename, jsonLine(entry), { encoding: "utf8", mode: 0o640 });
       this.#writeErrorReported = false;
@@ -106,5 +102,47 @@ export class DailyFileLogger implements AppLogger {
         this.#reportWriteError(writeError);
       }
     }
+  }
+}
+
+/** Appends every entry to one fixed JSON Lines file. */
+export class FileLogger extends JsonFileLogger {
+  readonly #filePath: string;
+
+  constructor(filePath: string, options: FileLoggerOptions = {}) {
+    const resolvedFilePath = path.resolve(filePath);
+    super(() => resolvedFilePath, options);
+    this.#filePath = resolvedFilePath;
+    mkdirSync(path.dirname(resolvedFilePath), { recursive: true });
+  }
+
+  get filePath(): string {
+    return this.#filePath;
+  }
+}
+
+/** Appends entries to one JSON Lines file per local calendar date. */
+export class DailyFileLogger extends JsonFileLogger {
+  readonly #logDir: string;
+  readonly #filenamePrefix: string;
+
+  constructor(logDir: string, options: DailyFileLoggerOptions = {}) {
+    const resolvedLogDir = path.resolve(logDir);
+    const filenamePrefix = options.filenamePrefix ?? "sql_web";
+    super(
+      (now) => path.join(resolvedLogDir, `${filenamePrefix}-${localDate(now)}.log`),
+      options,
+    );
+    this.#logDir = resolvedLogDir;
+    this.#filenamePrefix = filenamePrefix;
+    mkdirSync(resolvedLogDir, { recursive: true });
+  }
+
+  get logDir(): string {
+    return this.#logDir;
+  }
+
+  get filenamePrefix(): string {
+    return this.#filenamePrefix;
   }
 }

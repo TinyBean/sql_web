@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, mkdirSync, readFileSync } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { DatabaseSync } from "node:sqlite";
+import type { AppLogger } from "./logger.ts";
 
 export const OEE_DATASETS = ["availability", "dut_utilization"] as const;
 export type OeeDataset = (typeof OEE_DATASETS)[number];
@@ -31,6 +32,7 @@ export interface OeeDataStoreOptions {
   readonly apiBaseUrl?: string;
   readonly requestTimeoutMs?: number;
   readonly fetchRetries?: number;
+  readonly logger?: AppLogger;
 }
 
 export interface ImportFileOptions {
@@ -165,6 +167,11 @@ const DEFAULT_FETCH_RETRIES = 2;
 const DEFAULT_MAX_WINDOW_DAYS = 14;
 const MAX_AUDIT_RANGE_DAYS = 3_660;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
+const SILENT_LOGGER: AppLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
 
 const DATASET_SPECS: Record<OeeDataset, DatasetSpec> = {
   availability: {
@@ -521,6 +528,7 @@ export class OeeDataStore {
   readonly #apiBaseUrl: string;
   readonly #requestTimeoutMs: number;
   readonly #fetchRetries: number;
+  readonly #logger: AppLogger;
   #closed = false;
 
   private constructor(options: Required<OeeDataStoreOptions>, database: DatabaseSync) {
@@ -529,6 +537,7 @@ export class OeeDataStore {
     this.#apiBaseUrl = options.apiBaseUrl;
     this.#requestTimeoutMs = options.requestTimeoutMs;
     this.#fetchRetries = options.fetchRetries;
+    this.#logger = options.logger;
   }
 
   static open(options: OeeDataStoreOptions): OeeDataStore {
@@ -538,6 +547,7 @@ export class OeeDataStore {
       apiBaseUrl: options.apiBaseUrl ?? DEFAULT_API_BASE_URL,
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       fetchRetries: options.fetchRetries ?? DEFAULT_FETCH_RETRIES,
+      logger: options.logger ?? SILENT_LOGGER,
     };
     if (!Number.isInteger(resolved.requestTimeoutMs) || resolved.requestTimeoutMs <= 0) {
       throw new Error("requestTimeoutMs 必须是正整数");
@@ -574,6 +584,15 @@ export class OeeDataStore {
        ) VALUES (?, ?, ?, ?, ?, 'running', ?)`,
     ).run(spec.dataset, sourceKind, sourceRef, options.requestedStartDate, options.requestedEndDate, now);
     const runId = Number(runResult.lastInsertRowid);
+    const startedAtMs = Date.now();
+    this.#logger.info("oee.import.started", {
+      dataset: spec.dataset,
+      runId,
+      sourceKind,
+      sourceRef,
+      requestedStartDate: options.requestedStartDate,
+      requestedEndDate: options.requestedEndDate,
+    });
     const beforeCounts = this.#dateCounts(spec.tableName, requestedDates);
     const observedCounts = new Map<string, number>();
     const touchedMonths = new Set<string>();
@@ -680,7 +699,7 @@ export class OeeDataStore {
       );
       this.#database.exec("COMMIT; DROP TABLE temp.oee_import_seen;");
       transactionOpen = false;
-      return {
+      const result: ImportResult = {
         dataset: spec.dataset,
         runId,
         rowsReceived,
@@ -697,6 +716,11 @@ export class OeeDataStore {
         sourceSha256,
         coverage,
       };
+      this.#logger.info("oee.import.completed", {
+        ...result,
+        durationMs: Date.now() - startedAtMs,
+      });
+      return result;
     } catch (error) {
       if (transactionOpen) this.#database.exec("ROLLBACK");
       this.#database.exec("DROP TABLE IF EXISTS temp.oee_import_seen");
@@ -713,6 +737,17 @@ export class OeeDataStore {
         duplicateRows,
         runId,
       );
+      this.#logger.error("oee.import.failed", error, {
+        dataset: spec.dataset,
+        runId,
+        sourceKind,
+        sourceRef,
+        requestedStartDate: options.requestedStartDate,
+        requestedEndDate: options.requestedEndDate,
+        rowsReceived,
+        duplicateRowsInResponse: duplicateRows,
+        durationMs: Date.now() - startedAtMs,
+      });
       throw error;
     }
   }
@@ -726,15 +761,22 @@ export class OeeDataStore {
     const spec = DATASET_SPECS[options.dataset];
     const window = { startDate: options.startDate, endDate: options.endDate };
     const url = sourceUrl(this.#apiBaseUrl, spec, window);
+    const startedAtMs = Date.now();
+    this.#logger.info("oee.pull.started", {
+      dataset: spec.dataset,
+      startDate: window.startDate,
+      endDate: window.endDate,
+      url,
+    });
     let downloadedPath: string | null = null;
     try {
-      downloadedPath = await this.#download(url, spec.dataset);
-    } catch (error) {
-      this.#recordFailedPull(spec.dataset, url, window, error);
-      throw error;
-    }
-    try {
-      return await this.importFile({
+      try {
+        downloadedPath = await this.#download(url, spec.dataset);
+      } catch (error) {
+        this.#recordFailedPull(spec.dataset, url, window, error);
+        throw error;
+      }
+      const result = await this.importFile({
         dataset: spec.dataset,
         filePath: downloadedPath,
         requestedStartDate: window.startDate,
@@ -742,8 +784,29 @@ export class OeeDataStore {
         sourceKind: "api",
         sourceRef: url,
       });
+      this.#logger.info("oee.pull.completed", {
+        dataset: spec.dataset,
+        startDate: window.startDate,
+        endDate: window.endDate,
+        runId: result.runId,
+        rowsReceived: result.rowsReceived,
+        rowsInserted: result.rowsInserted,
+        rowsUpdated: result.rowsUpdated,
+        rowsUnchanged: result.rowsUnchanged,
+        durationMs: Date.now() - startedAtMs,
+      });
+      return result;
+    } catch (error) {
+      this.#logger.error("oee.pull.failed", error, {
+        dataset: spec.dataset,
+        startDate: window.startDate,
+        endDate: window.endDate,
+        url,
+        durationMs: Date.now() - startedAtMs,
+      });
+      throw error;
     } finally {
-      await unlink(downloadedPath).catch(() => {});
+      if (downloadedPath) await unlink(downloadedPath).catch(() => {});
     }
   }
 
@@ -763,22 +826,45 @@ export class OeeDataStore {
     const datasets = options.dataset && options.dataset !== "all"
       ? [options.dataset]
       : [...OEE_DATASETS];
-    const results: SyncResult[] = [];
-    for (const dataset of datasets) {
-      const windows = this.#planWindows(
-        dataset,
-        options.throughDate,
-        options.initialStartDate,
-        overlapDays,
-        maxWindowDays,
-      );
-      const imports: ImportResult[] = [];
-      for (const window of windows) {
-        imports.push(await this.pullWindow({ dataset, ...window }));
+    const startedAtMs = Date.now();
+    this.#logger.info("oee.sync.started", {
+      datasets,
+      throughDate: options.throughDate,
+      initialStartDate: options.initialStartDate,
+      overlapDays,
+      maxWindowDays,
+    });
+    try {
+      const results: SyncResult[] = [];
+      for (const dataset of datasets) {
+        const windows = this.#planWindows(
+          dataset,
+          options.throughDate,
+          options.initialStartDate,
+          overlapDays,
+          maxWindowDays,
+        );
+        this.#logger.info("oee.sync.windows_planned", { dataset, windows });
+        const imports: ImportResult[] = [];
+        for (const window of windows) {
+          imports.push(await this.pullWindow({ dataset, ...window }));
+        }
+        results.push({ dataset, plannedWindows: windows, imports });
       }
-      results.push({ dataset, plannedWindows: windows, imports });
+      this.#logger.info("oee.sync.completed", {
+        datasets,
+        importCount: results.reduce((count, result) => count + result.imports.length, 0),
+        durationMs: Date.now() - startedAtMs,
+      });
+      return results;
+    } catch (error) {
+      this.#logger.error("oee.sync.failed", error, {
+        datasets,
+        throughDate: options.throughDate,
+        durationMs: Date.now() - startedAtMs,
+      });
+      throw error;
     }
-    return results;
   }
 
   getStatus(): DatasetStatus[] {
@@ -1253,29 +1339,58 @@ export class OeeDataStore {
     await mkdir(incomingDirectory, { recursive: true });
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.#fetchRetries; attempt += 1) {
+      const attemptNumber = attempt + 1;
+      const attemptStartedAtMs = Date.now();
       const target = path.join(incomingDirectory, `${dataset}-${randomUUID()}.json.part`);
+      this.#logger.info("oee.download.attempt_started", {
+        dataset,
+        url,
+        attempt: attemptNumber,
+        maxAttempts: this.#fetchRetries + 1,
+      });
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(this.#requestTimeoutMs) });
         if (!response.ok) {
           await response.body?.cancel();
           const message = `API 返回 HTTP ${response.status} ${response.statusText}`;
           if (!retryableStatus(response.status)) throw new NonRetryableDownloadError(message);
-          const error = new Error(message);
-          if (attempt === this.#fetchRetries) throw error;
-          lastError = error;
-          await delay(500 * 2 ** attempt);
-          continue;
+          throw new Error(message);
         }
         if (!response.body) throw new Error("API 响应没有正文");
         await pipeline(
           Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>),
           createWriteStream(target, { flags: "wx" }),
         );
+        const metadata = await stat(target);
+        this.#logger.info("oee.download.completed", {
+          dataset,
+          url,
+          attempt: attemptNumber,
+          status: response.status,
+          bytes: metadata.size,
+          durationMs: Date.now() - attemptStartedAtMs,
+        });
         return target;
       } catch (error) {
         await unlink(target).catch(() => {});
         lastError = error;
-        if (error instanceof NonRetryableDownloadError || attempt === this.#fetchRetries) break;
+        const willRetry = !(error instanceof NonRetryableDownloadError) && attempt < this.#fetchRetries;
+        const fields = {
+          dataset,
+          url,
+          attempt: attemptNumber,
+          maxAttempts: this.#fetchRetries + 1,
+          durationMs: Date.now() - attemptStartedAtMs,
+        };
+        if (!willRetry) {
+          this.#logger.error("oee.download.failed", error, fields);
+          break;
+        }
+        this.#logger.warn("oee.download.retrying", {
+          ...fields,
+          error: errorMessage(error),
+          retryDelayMs: 500 * 2 ** attempt,
+        });
         await delay(500 * 2 ** attempt);
       }
     }

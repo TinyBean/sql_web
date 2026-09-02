@@ -6,7 +6,7 @@ import { createWebServer } from "./http-server.ts";
 import { DailyFileLogger } from "./logger.ts";
 
 const config = loadConfig(loadProjectEnvironment());
-const logger = new DailyFileLogger(config.logDir);
+const logger = new DailyFileLogger(config.logDir, { filenamePrefix: "sql_web" });
 logger.info("system.starting", {
   host: config.host,
   port: config.port,
@@ -48,7 +48,7 @@ server.once("error", (error) => {
 server.listen(config.port, config.host, () => {
   logger.info("system.started", { host: config.host, port: config.port });
   console.log(`数据库问答网站已启动：http://${config.host}:${config.port}`);
-  console.log(`日志：${config.logDir}/sql-web-YYYY-MM-DD.log`);
+  console.log(`日志：${config.logDir}/sql_web-YYYY-MM-DD.log`);
 });
 
 let closing = false;

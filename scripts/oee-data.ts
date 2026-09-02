@@ -1,11 +1,13 @@
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
+import { FileLogger } from "../src/logger.ts";
 import { OeeDataStore, parseOeeDataset } from "../src/oee-data.ts";
 
 const projectRoot = path.basename(path.resolve(import.meta.dirname, "..")) === "dist"
   ? path.resolve(import.meta.dirname, "../..")
   : path.resolve(import.meta.dirname, "..");
+const logger = new FileLogger(path.join(projectRoot, ".data", "logs", "oee-data.log"));
 
 function requiredArgument(value: string | undefined, name: string): string {
   if (!value) throw new Error(`缺少参数 ${name}`);
@@ -28,6 +30,7 @@ function usage(): never {
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (!command) usage();
+  logger.info("oee.command.started", { command, args });
   let fileEnvironment: Record<string, string | undefined> = {};
   try {
     fileEnvironment = parseEnv(readFileSync(path.join(projectRoot, ".env"), "utf8"));
@@ -43,6 +46,7 @@ async function main(): Promise<void> {
     databasePath,
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    logger,
   });
 
   try {
@@ -56,6 +60,7 @@ async function main(): Promise<void> {
         requestedEndDate: requiredArgument(args[3], "end-date"),
       });
       console.log(JSON.stringify(result, null, 2));
+      logger.info("oee.command.completed", { command });
       return;
     }
 
@@ -66,6 +71,7 @@ async function main(): Promise<void> {
         endDate: requiredArgument(args[2], "end-date"),
       });
       console.log(JSON.stringify(result, null, 2));
+      logger.info("oee.command.completed", { command });
       return;
     }
 
@@ -79,11 +85,13 @@ async function main(): Promise<void> {
         ...(initialStartDate ? { initialStartDate } : {}),
       });
       console.log(JSON.stringify(result, null, 2));
+      logger.info("oee.command.completed", { command });
       return;
     }
 
     if (command === "status") {
       console.log(JSON.stringify(store.getStatus(), null, 2));
+      logger.info("oee.command.completed", { command });
       return;
     }
 
@@ -94,6 +102,7 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error: unknown) => {
+  logger.error("oee.command.failed", error);
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import type { AppLogger } from "../src/logger.ts";
+import { FileLogger } from "../src/logger.ts";
 import { OeeDataStore } from "../src/oee-data.ts";
 
 const projectRoot = process.cwd();
@@ -79,11 +81,12 @@ function dutResponse(rows: readonly Record<string, unknown>[]): string {
   });
 }
 
-function createStore(directory: string, apiBaseUrl?: string): OeeDataStore {
+function createStore(directory: string, apiBaseUrl?: string, logger?: AppLogger): OeeDataStore {
   return OeeDataStore.open({
     databasePath: path.join(directory, "oee.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    ...(logger ? { logger } : {}),
     requestTimeoutMs: 5_000,
     fetchRetries: 0,
   });
@@ -115,7 +118,9 @@ test("imports idempotently, audits missing dates, and syncs gaps with overlap", 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
+  const logFilePath = path.join(directory, "logs", "oee-data.log");
+  const logger = new FileLogger(logFilePath);
+  const store = createStore(directory, `http://127.0.0.1:${address.port}/`, logger);
   t.after(async () => {
     store.close();
     await new Promise<void>((resolve, reject) => {
@@ -151,6 +156,24 @@ test("imports idempotently, audits missing dates, and syncs gaps with overlap", 
   assert.equal(status?.minDataDate, "2026-08-20");
   assert.equal(status?.maxDataDate, "2026-08-24");
   assert.deepEqual(status?.openGaps, []);
+
+  const logEntries = readFileSync(logFilePath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event: string });
+  assert.deepEqual(logEntries.map((entry) => entry.event), [
+    "oee.import.started",
+    "oee.import.completed",
+    "oee.sync.started",
+    "oee.sync.windows_planned",
+    "oee.pull.started",
+    "oee.download.attempt_started",
+    "oee.download.completed",
+    "oee.import.started",
+    "oee.import.completed",
+    "oee.pull.completed",
+    "oee.sync.completed",
+  ]);
 });
 
 test("streams large DUT fields and records reversed timestamps without rejecting the batch", async (t) => {
@@ -183,4 +206,85 @@ test("streams large DUT fields and records reversed timestamps without rejecting
     reader.prepare("SELECT total_duration_seconds FROM oee_dut_monthly_stats").get()?.["total_duration_seconds"],
     0,
   );
+});
+
+test("logs API download and pull failures", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "oee-pull-log-test-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "bad request" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const logFilePath = path.join(directory, "logs", "oee-data.log");
+  const store = createStore(
+    directory,
+    `http://127.0.0.1:${address.port}/`,
+    new FileLogger(logFilePath),
+  );
+  t.after(async () => {
+    store.close();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    store.pullWindow({
+      dataset: "availability",
+      startDate: "2026-08-20",
+      endDate: "2026-08-20",
+    }),
+    /API 返回 HTTP 400/u,
+  );
+
+  const events = readFileSync(logFilePath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => (JSON.parse(line) as { event: string }).event);
+  assert.deepEqual(events, [
+    "oee.pull.started",
+    "oee.download.attempt_started",
+    "oee.download.failed",
+    "oee.pull.failed",
+  ]);
+});
+
+test("logs file import failures", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "oee-import-log-test-"));
+  const sourcePath = path.join(directory, "invalid.json");
+  const logFilePath = path.join(directory, "logs", "oee-data.log");
+  writeFileSync(sourcePath, JSON.stringify({ unexpected: [] }));
+  const store = createStore(directory, undefined, new FileLogger(logFilePath));
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    store.importFile({
+      dataset: "availability",
+      filePath: sourcePath,
+      requestedStartDate: "2026-08-20",
+      requestedEndDate: "2026-08-20",
+    }),
+    /未能完整读取/u,
+  );
+
+  const entries = readFileSync(logFilePath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as {
+      event: string;
+      level: string;
+      error?: { message?: string };
+    });
+  assert.deepEqual(entries.map((entry) => entry.event), [
+    "oee.import.started",
+    "oee.import.failed",
+  ]);
+  assert.equal(entries[1]?.level, "ERROR");
+  assert.match(entries[1]?.error?.message ?? "", /未能完整读取/u);
 });

@@ -14,15 +14,15 @@ test("groups agent turns into one answer with an ordered persisted trace", () =>
       content: [
         { type: "thinking", thinking: "不得传给前端" },
         { type: "text", text: "先读取订单。" },
-        { type: "toolCall", id: "call-1", name: "query_database", arguments: { sql: "secret" } },
+        { type: "toolCall", id: "call-1", name: "execute_sql", arguments: { sql: "secret" } },
         { type: "text", text: "然后按城市汇总。" },
-        { type: "toolCall", id: "call-2", name: "query_database", arguments: { sql: "secret-2" } },
+        { type: "toolCall", id: "call-2", name: "execute_sql", arguments: { sql: "secret-2" } },
       ],
       stopReason: "toolUse",
       timestamp: 3,
     },
-    { role: "toolResult", toolCallId: "call-1", toolName: "query_database", isError: false },
-    { role: "toolResult", toolCallId: "call-2", toolName: "query_database", isError: true },
+    { role: "toolResult", toolCallId: "call-1", toolName: "execute_sql", isError: false },
+    { role: "toolResult", toolCallId: "call-2", toolName: "execute_sql", isError: true },
     {
       role: "assistant",
       content: [
@@ -43,9 +43,9 @@ test("groups agent turns into one answer with an ordered persisted trace", () =>
       timestamp: 4,
       trace: [
         { type: "text", text: "先读取订单。" },
-        { type: "tool", id: "call-1", name: "query_database", isError: false },
+        { type: "tool", id: "call-1", name: "execute_sql", isError: false },
         { type: "text", text: "然后按城市汇总。" },
-        { type: "tool", id: "call-2", name: "query_database", isError: true },
+        { type: "tool", id: "call-2", name: "execute_sql", isError: true },
       ],
     },
   ]);

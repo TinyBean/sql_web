@@ -3,7 +3,7 @@ import type {
   ChatMessage,
   ChatRole,
   ChatTraceItem,
-  DatabaseToolName,
+  AgentToolName,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -88,10 +88,10 @@ function chatTraceItem(value: unknown, path: string): ChatTraceItem {
   return invalid(`${path}.type`, "text 或 tool");
 }
 
-function databaseToolName(value: unknown, path: string): DatabaseToolName {
-  return value === "query_database" || value === "execute_database"
+function agentToolName(value: unknown, path: string): AgentToolName {
+  return value === "execute_sql" || value === "get_current_time"
     ? value
-    : invalid(path, "数据库工具名");
+    : invalid(path, "Agent 工具名");
 }
 
 function schemaObjectType(value: unknown, path: string): "table" | "view" {
@@ -171,7 +171,7 @@ export const decodeSerializedSession: Decoder<SerializedSession> = (value, path 
     id: string(item["id"], `${path}.id`),
     title: string(item["title"], `${path}.title`),
     model: model === null ? null : modelDescriptor(model, `${path}.model`),
-    tools: array(item["tools"], `${path}.tools`, databaseToolName),
+    tools: array(item["tools"], `${path}.tools`, agentToolName),
     streaming: boolean(item["streaming"], `${path}.streaming`),
     messages: array(item["messages"], `${path}.messages`, chatMessage),
   };
@@ -200,7 +200,7 @@ export const decodeHealthResponse: Decoder<HealthResponse> = (value, path = "$he
       path: string(database["path"], `${path}.database.path`),
     },
     agent: {
-      tools: array(agent["tools"], `${path}.agent.tools`, databaseToolName),
+      tools: array(agent["tools"], `${path}.agent.tools`, agentToolName),
       model: modelSelection(agent["model"], `${path}.agent.model`),
       availableModelCount: nonNegativeInteger(
         agent["availableModelCount"],

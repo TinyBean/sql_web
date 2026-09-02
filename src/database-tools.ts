@@ -1,10 +1,10 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { DatabaseToolName } from "../shared/contracts.ts";
-import type { DemoDatabase } from "./database.ts";
+import type { AgentToolName } from "../shared/contracts.ts";
+import type { AppDatabase } from "./database.ts";
 
-export const DATABASE_TOOL_NAMES = ["query_database", "execute_database"] as const satisfies
-  readonly DatabaseToolName[];
+export const AGENT_TOOL_NAMES = ["execute_sql", "get_current_time"] as const satisfies
+  readonly AgentToolName[];
 
 const scalar = Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]);
 const sqlParameters = Type.Optional(
@@ -14,12 +14,26 @@ const sqlParameters = Type.Optional(
   }),
 );
 
-export function createDatabaseTools(database: DemoDatabase) {
-  const queryTool = defineTool({
-    name: "query_database",
-    label: "查询数据库",
+export interface CurrentTimeResult {
+  readonly utc: string;
+  readonly local: string;
+  readonly timezone: string;
+}
+
+export function getCurrentTime(now = new Date()): CurrentTimeResult {
+  return {
+    utc: now.toISOString(),
+    local: now.toLocaleString("zh-CN", { hour12: false, timeZoneName: "longOffset" }),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+}
+
+export function createAgentTools(database: AppDatabase) {
+  const executeSqlTool = defineTool({
+    name: "execute_sql",
+    label: "执行只读 SQL",
     description:
-      "Run exactly one read-only SQLite query and return columns and rows. Use ? placeholders with the optional parameters array. Results are capped at 200 rows.",
+      "Execute exactly one read-only SQLite SQL statement and return its columns and rows. This tool cannot insert, update, or delete data. Use ? placeholders with the optional parameters array. Results are capped at 200 rows.",
     promptSnippet: "执行一条只读 SQLite 查询并返回结构化结果",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -41,20 +55,16 @@ export function createDatabaseTools(database: DemoDatabase) {
     },
   });
 
-  const executeTool = defineTool({
-    name: "execute_database",
-    label: "修改数据库",
-    description:
-      "Run exactly one SQLite INSERT, UPDATE, DELETE, or REPLACE statement. Only use this when the user explicitly asks to change data. Use ? placeholders with the optional parameters array.",
-    promptSnippet: "执行一条受控的数据写入语句",
+  const currentTimeTool = defineTool({
+    name: "get_current_time",
+    label: "查询当前时间",
+    description: "Return the server's current time, including UTC and local timezone representations.",
+    promptSnippet: "查询当前日期和时间",
     executionMode: "sequential",
-    parameters: Type.Object({
-      sql: Type.String({ description: "A single INSERT, UPDATE, DELETE, or REPLACE statement." }),
-      parameters: sqlParameters,
-    }),
-    async execute(_toolCallId, params, signal) {
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, signal) {
       signal?.throwIfAborted();
-      const result = database.execute(params.sql, params.parameters);
+      const result = getCurrentTime();
       signal?.throwIfAborted();
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
@@ -63,5 +73,5 @@ export function createDatabaseTools(database: DemoDatabase) {
     },
   });
 
-  return [queryTool, executeTool];
+  return [executeSqlTool, currentTimeTool];
 }

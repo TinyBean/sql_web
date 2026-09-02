@@ -42,7 +42,7 @@
           </div>
           <div>
             <strong>工具隔离已开启</strong>
-            <span>Agent 仅可访问两个数据库工具</span>
+            <span>Agent 仅可执行只读查询和获取当前时间</span>
           </div>
         </div>
       </aside>
@@ -57,7 +57,7 @@
               <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7" /></svg>
             </div>
             <div>
-              <h1>电商演示数据库</h1>
+              <h1>OEE 生产数据</h1>
               <div class="connection-line"><span class="status-dot"></span>SQLite · 本地连接</div>
             </div>
           </div>
@@ -82,21 +82,21 @@
                 <h2>用自然语言探索你的数据</h2>
                 <p class="welcome-copy">直接描述你想了解的业务问题。Agent 会选择合适的查询、读取真实结果，再给出清晰结论。</p>
                 <div class="suggestions">
-                  <button type="button" data-question="哪个城市的客户贡献收入最高？请排除已取消订单。">
+                  <button type="button" data-question="按设备统计当前数据范围内的 Availability 时间，并列出最高的设备。">
                     <span class="suggestion-icon mint">↗</span>
-                    <span><strong>分析城市收入</strong><small>哪个城市贡献最高？</small></span>
+                    <span><strong>分析设备 Availability</strong><small>哪些设备时间最高？</small></span>
                   </button>
-                  <button type="button" data-question="统计每个商品分类的销量和销售额，按销售额从高到低排序。">
+                  <button type="button" data-question="按月和机器统计 DUT 的投入量、产出量与产出率。">
                     <span class="suggestion-icon blue">▥</span>
-                    <span><strong>比较商品分类</strong><small>销量和销售额排名</small></span>
+                    <span><strong>查看 DUT 利用情况</strong><small>投入、产出与产出率</small></span>
                   </button>
-                  <button type="button" data-question="列出库存低于 20 的商品，并按库存从少到多排序。">
+                  <button type="button" data-question="检查当前数据库的数据覆盖范围、缺失日期和最近一次导入结果。">
                     <span class="suggestion-icon amber">!</span>
-                    <span><strong>检查低库存</strong><small>找出需要补货的商品</small></span>
+                    <span><strong>检查数据完整性</strong><small>覆盖范围与日期缺口</small></span>
                   </button>
-                  <button type="button" data-question="按月统计 2025 年非取消订单的数量和收入趋势。">
+                  <button type="button" data-question="比较不同班次的 Availability 状态分布和总时长。">
                     <span class="suggestion-icon violet">⌁</span>
-                    <span><strong>查看月度趋势</strong><small>订单量与收入变化</small></span>
+                    <span><strong>比较班次表现</strong><small>状态分布和总时长</small></span>
                   </button>
                 </div>
               </section>
@@ -119,7 +119,7 @@
                   </button>
                 </div>
               </form>
-              <p class="disclaimer">回答基于当前演示数据库，请在重要决策前核对查询口径。</p>
+              <p class="disclaimer">回答基于当前 OEE 数据库；请结合数据覆盖范围与缺口状态核对统计口径。</p>
             </div>
           </section>
 

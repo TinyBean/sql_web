@@ -8,7 +8,7 @@ import {
 
 test("formats raw tool names with every execution status", () => {
   assert.deepEqual(
-    (["query_database", "execute_database"] as const).flatMap((name) => (
+    (["execute_sql", "get_current_time"] as const).flatMap((name) => (
       (["queued", "running", "done", "error"] as const).map((status) => ({
         name,
         status,
@@ -16,14 +16,14 @@ test("formats raw tool names with every execution status", () => {
       }))
     )),
     [
-      { name: "query_database", status: "queued", label: "query_database · 准备查询数据库" },
-      { name: "query_database", status: "running", label: "query_database · 正在查询数据库" },
-      { name: "query_database", status: "done", label: "query_database · 数据库操作完成" },
-      { name: "query_database", status: "error", label: "query_database · 数据库操作失败" },
-      { name: "execute_database", status: "queued", label: "execute_database · 准备修改数据库" },
-      { name: "execute_database", status: "running", label: "execute_database · 正在修改数据库" },
-      { name: "execute_database", status: "done", label: "execute_database · 数据库操作完成" },
-      { name: "execute_database", status: "error", label: "execute_database · 数据库操作失败" },
+      { name: "execute_sql", status: "queued", label: "execute_sql · 准备执行 SQL 查询" },
+      { name: "execute_sql", status: "running", label: "execute_sql · 正在执行 SQL 查询" },
+      { name: "execute_sql", status: "done", label: "execute_sql · 执行 SQL 查询完成" },
+      { name: "execute_sql", status: "error", label: "execute_sql · 执行 SQL 查询失败" },
+      { name: "get_current_time", status: "queued", label: "get_current_time · 准备查询当前时间" },
+      { name: "get_current_time", status: "running", label: "get_current_time · 正在查询当前时间" },
+      { name: "get_current_time", status: "done", label: "get_current_time · 查询当前时间完成" },
+      { name: "get_current_time", status: "error", label: "get_current_time · 查询当前时间失败" },
     ],
   );
 });
@@ -35,15 +35,15 @@ test("preserves text/tool order and promotes only the final turn", () => {
   state = reduceStreamPresentation(state, { event: "text_delta", data: { turn: 0, delta: "查询" } });
   state = reduceStreamPresentation(state, {
     event: "tool_call",
-    data: { turn: 0, id: "call-1", name: "query_database" },
+    data: { turn: 0, id: "call-1", name: "execute_sql" },
   });
   state = reduceStreamPresentation(state, {
     event: "tool_start",
-    data: { turn: 0, id: "call-1", name: "query_database" },
+    data: { turn: 0, id: "call-1", name: "execute_sql" },
   });
   state = reduceStreamPresentation(state, {
     event: "tool_end",
-    data: { turn: 0, id: "call-1", name: "query_database", isError: false },
+    data: { turn: 0, id: "call-1", name: "execute_sql", isError: false },
   });
   state = reduceStreamPresentation(state, { event: "turn_end", data: { turn: 0, final: false } });
   state = reduceStreamPresentation(state, { event: "turn_start", data: { turn: 1 } });
@@ -53,7 +53,7 @@ test("preserves text/tool order and promotes only the final turn", () => {
   assert.equal(state.finalText, "");
   assert.deepEqual(state.items, [
     { type: "text", turn: 0, text: "先查询" },
-    { type: "tool", turn: 0, id: "call-1", name: "query_database", status: "done" },
+    { type: "tool", turn: 0, id: "call-1", name: "execute_sql", status: "done" },
     { type: "text", turn: 1, text: "最终回答" },
   ]);
 
@@ -62,7 +62,7 @@ test("preserves text/tool order and promotes only the final turn", () => {
   assert.equal(state.finalized, true);
   assert.deepEqual(state.items, [
     { type: "text", turn: 0, text: "先查询" },
-    { type: "tool", turn: 0, id: "call-1", name: "query_database", status: "done" },
+    { type: "tool", turn: 0, id: "call-1", name: "execute_sql", status: "done" },
   ]);
 });
 

@@ -1,74 +1,123 @@
-# DataLens：SQLite 数据库问答网站
+# DataLens：OEE SQLite 数据问答网站
 
-一个使用严格 TypeScript 构建、可直接本地运行的数据库问答 MVP。浏览器中的每个会话都直接对应一个 `pi-coding-agent` 持久化 session；Agent 不加载 Pi 的原生工具、项目扩展、技能或上下文文件，只能调用两个数据库工具。
+一个使用严格 TypeScript 构建的本地 OEE 数据问答应用。浏览器中的每个会话对应一个持久化 Agent session；Agent 只能调用受限的只读 SQLite 查询和当前时间工具。
 
-## 已实现
-
-- 前端会话与 Pi `sessionId` 一一对应，刷新或重启服务后可恢复历史。
-- 流式展示回答、数据库工具执行状态，并支持停止当前回答。
-- 严格的工具 allowlist：`query_database` 与 `execute_database`。
-- `query_database` 使用 SQLite 只读连接，结果最多返回 200 行。
-- `execute_database` 只接受单条 `INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`，并使用事务。
-- 自动创建 SQLite 演示库，包含客户、商品、订单、订单明细以及一个明细视图。
-- 记录 Agent 会话、轮次、工具调用、重试和服务生命周期日志，并按天滚动。
-- 响应式 Web UI、Schema 查看器、示例业务问题和可删除的持久会话列表。
-
-## 模块设计
+## 数据链路
 
 ```text
-Browser session id (= Pi sessionId)
-              │
-              ▼
-       AgentSessionStore
-       ├─ Pi SessionManager ── .data/sessions/*.jsonl
-       ├─ Pi ModelRuntime ──── .data/agent/
-       └─ exact tool allowlist
-              │
-       ┌──────┴────────┐
-       ▼               ▼
- query_database   execute_database
-  (read-only)      (controlled write)
-       └──────┬────────┘
-              ▼
-       .data/demo.sqlite
+OEE HTTP API / 本地 JSON
+          │
+          ▼
+   OeeDataStore
+   ├─ 流式下载与解析
+   ├─ 请求日期和响应日期审计
+   ├─ 业务主键去重与幂等更新
+   ├─ 缺失/部分响应记录
+   └─ 月度汇总刷新
+          │
+          ▼
+   .data/oee.sqlite
+   ├─ OEE 事实表
+   ├─ DUT 大字段 Payload 表
+   ├─ 月度汇总表
+   └─ 导入批次、覆盖范围和缺口
+          │
+          ▼
+       Agent 问答
 ```
 
-HTTP 层只调用 `AgentSessionStore` 和 `DemoDatabase` 的小接口，不需要理解 Pi 的会话文件格式或 SQLite 的安全约束。
+OEE API 默认地址：
 
-运行日志使用 JSON Lines 格式写入 `.data/logs/sql-web-YYYY-MM-DD.log`。文件名按服务器本地日期计算，跨过午夜后自动写入下一天的文件，无需重启服务。Agent 日志包含 session ID、轮次、工具名、耗时、重试和错误信息；为避免把业务数据扩散到日志中，不记录用户问题正文、工具参数、查询结果或模型回答正文。
+- `R_OEE_MT_TOP_AVAILABILITY_2W`
+- `R_OEE_MT_TOP_DUT_UTILIZATION_2W`
 
-## TypeScript 结构
+参数使用 `pSTARTDAY=YYYYMMDD&pENDDAY=YYYYMMDD`。单次自动拉取最多 14 天，避免超出接口窗口。
 
-```text
-src/                 Node.js 后端源码
-client/              浏览器端源码
-client/api-contracts.ts  HTTP 与 SSE 运行时解码器
-shared/contracts.ts  HTTP、会话和 SSE 共享类型
-test/                TypeScript 测试
-public/              HTML、CSS 和生成的浏览器 JavaScript
-dist/                编译后的后端与测试
+## 数据完整性
+
+每次导入都会记录：
+
+- 请求的开始、结束日期。
+- 响应实际包含的最小、最大日期。
+- 接收、新增、更新、未变化和响应内重复行数。
+- 请求窗口内完全缺失的日期。
+- 重复拉取时，响应行数低于数据库已有行数的日期。
+- 响应中超出请求窗口的日期。
+- 单条记录中结束时间早于开始时间等字段级质量问题。
+- 当前数据库的最小日期、最大日期、总行数和日期数。
+- 原始响应 SHA-256。
+
+事实表使用稳定业务字段生成 `record_key`。重叠窗口再次导入不会制造重复记录；相同业务记录内容发生变化时会更新。`oee_data_gaps` 保存未解决缺口，后续 `data:sync` 会优先补拉缺口，并额外重拉最近两天以接收迟到或修正数据。
+
+数据库状态可以直接查询：
+
+```sql
+SELECT * FROM oee_data_status;
+
+SELECT *
+FROM oee_data_gaps
+WHERE status = 'open'
+ORDER BY dataset, data_date;
 ```
 
-服务端和客户端使用独立的 `tsconfig`：服务端采用 `NodeNext`，客户端只加载 DOM 类型。公共配置启用了 `strict`、`exactOptionalPropertyTypes`、`noUncheckedIndexedAccess`、`noPropertyAccessFromIndexSignature` 与 `erasableSyntaxOnly` 等严格检查。
+## 数据命令
 
-源码中的相对导入统一使用 `.ts` 后缀；TypeScript 通过 `rewriteRelativeImportExtensions` 在构建时改写为运行时需要的 `.js`。因此 `dist/`、`public/generated/`、HTML 脚本地址和 `package.json` 启动命令中出现 `.js` 属于编译产物，不是 JavaScript 源码残留。
+导入已经下载的 JSON：
 
-浏览器不会直接相信 `fetch` 或 SSE 返回值。`client/api-contracts.ts` 从 `unknown` 开始逐字段验证完整响应，后端响应对象同时使用共享类型进行 `satisfies` 校验，避免仅靠泛型断言掩盖协议漂移。浏览器产物生成到 `public/generated/`，`dist/` 与生成文件均不纳入版本控制。
+```bash
+npm run data:import -- availability .data/availability.json 2026-08-20 2026-08-30
+npm run data:import -- dut_utilization .data/dut.json 2026-08-20 2026-08-30
+```
 
-## 环境要求
+直接拉取并导入一个窗口：
 
-- Node.js 22.19 或更高版本（使用内置 `node:sqlite`）
-- `.data/agent/` 中已准备好 Pi 模型目录与模型凭据
+```bash
+npm run data:pull -- availability 2026-08-20 2026-08-30
+npm run data:pull -- dut_utilization 2026-08-20 2026-08-30
+```
 
-当前项目固定使用 `@earendil-works/pi-coding-agent@0.84.4`。服务仅从项目内的 `.data/agent/` 加载 Pi 配置，不读取用户主目录下的全局 Pi 配置：
+根据数据库覆盖范围、未解决缺口和两天重叠窗口同步到指定日期：
 
-- `.data/agent/models-store.json`：Pi 缓存的模型目录。
-- `.data/agent/models.json`：可选的自定义模型或覆盖配置。
-- `.data/agent/auth.json`：模型凭据；也可以使用对应提供方的 API Key 环境变量。
+```bash
+npm run data:sync -- all 2026-09-02
+```
 
-`models-store.json` 与 `models.json` 至少要存在一个。模型选择不读取 Pi 默认值，而是由项目根目录 `.env` 中的 `SQL_WEB_PROVIDER` 和 `SQL_WEB_MODEL` 明确指定。
+空数据库首次同步需要提供起始日期：
+
+```bash
+npm run data:sync -- all 2026-09-02 2026-08-20
+```
+
+查看状态：
+
+```bash
+npm run data:status
+```
+
+生产环境可定期执行 `data:sync`。命令失败时返回非零退出码，可以由 cron、systemd timer 或调度平台告警。
+
+## 表结构
+
+主要查询表：
+
+- `oee_availability`：Availability 事实数据。
+- `oee_dut_utilization`：DUT 统计事实数据。
+- `oee_dut_payload`：不参与常规统计的长位图字段。
+- `oee_availability_monthly_stats`：Availability 月度汇总。
+- `oee_dut_monthly_stats`：DUT 月度汇总。
+
+数据治理表：
+
+- `oee_ingestion_runs`：每次文件导入或 API 拉取批次。
+- `oee_ingestion_run_days`：每个请求日期的行数和质量状态。
+- `oee_data_gaps`：需要补拉或人工确认的日期。
+- `oee_record_issues`：需要修复或人工接受的记录级质量问题。
+- `oee_dataset_state`：当前数据库覆盖范围。
+- `oee_data_status`：面向 Agent 的覆盖状态视图。
 
 ## 启动
+
+环境要求：Node.js 22.19 或更高版本。
 
 ```bash
 npm install
@@ -76,22 +125,14 @@ cp .env.example .env
 npm start
 ```
 
-`npm start` 会先进行完整 TypeScript 构建，再运行 `dist/src/server.js`。打开 <http://127.0.0.1:3000>。
+打开 <http://127.0.0.1:3000>。
 
-开发模式：
+开发和验证：
 
 ```bash
 npm run dev
-```
-
-开发命令会同时监听后端和客户端 TypeScript；也可以单独运行 `npm run dev:server` 或 `npm run dev:client`。
-
-测试、类型检查与单独构建：
-
-```bash
-npm test
 npm run check
-npm run build
+npm test
 ```
 
 ## 配置
@@ -100,29 +141,20 @@ npm run build
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | HTTP 监听地址 |
 | `PORT` | `3000` | HTTP 端口 |
-| `SQL_WEB_DB_PATH` | `.data/demo.sqlite` | SQLite 文件位置 |
-| `SQL_WEB_SESSION_DIR` | `.data/sessions` | Pi session 文件目录 |
-| `SQL_WEB_PROVIDER` | 必填 | `.env` 中指定的模型提供方 |
-| `SQL_WEB_MODEL` | 必填 | `.env` 中指定的模型 ID |
+| `SQL_WEB_DB_PATH` | `.data/oee.sqlite` | SQLite 文件位置 |
+| `SQL_WEB_SESSION_DIR` | `.data/sessions` | Agent session 目录 |
+| `OEE_API_BASE_URL` | 内部 OEE 地址 | 数据拉取根地址 |
+| `SQL_WEB_PROVIDER` | 必填 | 模型提供方 |
+| `SQL_WEB_MODEL` | 必填 | 模型 ID |
 
-启动时会自动读取项目根目录的 `.env`，缺少文件或任一模型字段都会直接报错。所选的 `provider/model` 必须能由 `.data/agent/models-store.json` 或 `.data/agent/models.json` 解析。例如：
-
-```bash
-SQL_WEB_PROVIDER=zai
-SQL_WEB_MODEL=glm-5.3-flash
-```
-
-## 演示数据
-
-数据库启动时执行 [`sql/schema.sql`](sql/schema.sql) 和 [`sql/seed.sql`](sql/seed.sql)。种子数据使用固定主键与 `INSERT OR IGNORE`，所以服务重启不会覆盖 Agent 或用户后续做出的数据修改。
-
-可尝试：
-
-- “哪个城市的客户贡献收入最高？请排除已取消订单。”
-- “统计每个商品分类的销量和销售额。”
-- “列出库存低于 20 的商品。”
-- “按月统计 2025 年非取消订单的数量和收入趋势。”
+服务只从项目内 `.data/agent/` 加载模型配置和凭据，不读取用户主目录中的全局 Pi 配置。
 
 ## 安全边界
 
-这是本地 MVP，不包含登录、租户隔离、审计审批或生产级限流。虽然 Agent 工具已经隔离，写工具仍会直接修改演示库；上线前应增加用户鉴权、数据库账号级权限、写操作确认/审批、审计日志与独立数据库沙箱。
+- `execute_sql` 使用只读 SQLite 连接，只接受一条返回结果集的查询，单次最多返回 200 行。
+- `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
+- 创建 Agent 会话时会把当前表和视图的 SQLite DDL 注入 system prompt；数据内容仍必须通过查询工具获取。
+- Agent 不加载项目工具、技能或上下文文件。
+- 日志不记录用户问题正文、工具参数、查询结果或模型回答正文。
+
+应用仍是本地部署形态，不包含用户登录和租户隔离。正式开放给多用户前，应增加鉴权、限流和独立审计。

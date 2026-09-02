@@ -21,7 +21,6 @@ export interface AppConfig {
   readonly sessionDir: string;
   readonly publicDir: string;
   readonly schemaPath: string;
-  readonly seedPath: string;
   readonly agentDir: string;
   readonly logDir: string;
   readonly model: ModelSelection;
@@ -81,11 +80,10 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     projectRoot,
     host: env.HOST?.trim() || "127.0.0.1",
     port: parsePort(env.PORT),
-    databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/demo.sqlite"),
+    databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/oee.sqlite"),
     sessionDir: resolveProjectPath(env.SQL_WEB_SESSION_DIR, ".data/sessions"),
     publicDir: path.join(projectRoot, "public"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-    seedPath: path.join(projectRoot, "sql", "seed.sql"),
     agentDir: path.join(projectRoot, ".data", "agent"),
     logDir: path.join(projectRoot, ".data", "logs"),
     model: { provider, model },

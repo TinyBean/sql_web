@@ -19,7 +19,6 @@ type ScannerState =
 export interface DatabaseOptions {
   readonly filePath: string;
   readonly schemaPath: string;
-  readonly seedPath: string;
 }
 
 export interface QueryOptions {
@@ -33,15 +32,9 @@ export interface QueryResult {
   readonly truncated: boolean;
 }
 
-export interface ExecuteResult {
-  readonly changes: number;
-  readonly lastInsertRowid: string | number;
-}
-
 const DEFAULT_MAX_ROWS = 100;
 const ABSOLUTE_MAX_ROWS = 200;
 const MAX_SQL_BYTES = 20_000;
-const ALLOWED_WRITE_KEYWORDS = new Set(["INSERT", "UPDATE", "DELETE", "REPLACE"]);
 
 export class DatabaseInputError extends Error {
   constructor(message: string) {
@@ -131,26 +124,6 @@ export function assertSingleStatement(sql: string): void {
   }
 }
 
-function stripLeadingTrivia(sql: string): string {
-  let rest = sql;
-  while (true) {
-    const before = rest;
-    rest = rest.replace(/^\s+/u, "");
-    rest = rest.replace(/^--[^\r\n]*(?:\r?\n|$)/u, "");
-    rest = rest.replace(/^\/\*[\s\S]*?\*\//u, "");
-    if (rest === before) return rest;
-  }
-}
-
-function assertAllowedWrite(sql: string): void {
-  const keyword = /^([A-Za-z]+)/u.exec(stripLeadingTrivia(sql))?.[1]?.toUpperCase();
-  if (!keyword || !ALLOWED_WRITE_KEYWORDS.has(keyword)) {
-    throw new DatabaseInputError(
-      "执行工具只允许 INSERT、UPDATE、DELETE 或 REPLACE；读取数据请使用查询工具",
-    );
-  }
-}
-
 function normalizeParameter(value: SqlParameter): BoundSqlParameter {
   if (typeof value === "boolean") return value ? 1 : 0;
   return value;
@@ -176,12 +149,6 @@ function normalizeValue(value: unknown): NormalizedValue {
   return String(value);
 }
 
-function normalizeLastInsertRowId(value: number | bigint): string | number {
-  return typeof value === "bigint" && (value > Number.MAX_SAFE_INTEGER || value < Number.MIN_SAFE_INTEGER)
-    ? value.toString()
-    : Number(value);
-}
-
 function normalizeRow(row: Record<string, unknown>): NormalizedRow {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeValue(value)]));
 }
@@ -195,26 +162,21 @@ function configureConnection(database: DatabaseSync): void {
   }
 }
 
-export class DemoDatabase {
+export class AppDatabase {
   readonly filePath: string;
   readonly schemaPath: string;
-  readonly seedPath: string;
-  #writer: DatabaseSync | null;
   #reader: DatabaseSync | null;
 
-  private constructor(options: DatabaseOptions, writer: DatabaseSync, reader: DatabaseSync) {
+  private constructor(options: DatabaseOptions, reader: DatabaseSync) {
     this.filePath = options.filePath;
     this.schemaPath = options.schemaPath;
-    this.seedPath = options.seedPath;
-    this.#writer = writer;
     this.#reader = reader;
   }
 
-  static open({ filePath, schemaPath, seedPath }: DatabaseOptions): DemoDatabase {
+  static open({ filePath, schemaPath }: DatabaseOptions): AppDatabase {
     const options: DatabaseOptions = {
       filePath: path.resolve(filePath),
       schemaPath: path.resolve(schemaPath),
-      seedPath: path.resolve(seedPath),
     };
     mkdirSync(path.dirname(options.filePath), { recursive: true });
     let writer: DatabaseSync | undefined;
@@ -222,12 +184,14 @@ export class DemoDatabase {
     try {
       writer = new DatabaseSync(options.filePath);
       configureConnection(writer);
+      writer.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
       writer.exec(readFileSync(options.schemaPath, "utf8"));
-      writer.exec(readFileSync(options.seedPath, "utf8"));
+      writer.close();
+      writer = undefined;
 
       reader = new DatabaseSync(options.filePath, { readOnly: true });
       configureConnection(reader);
-      return new DemoDatabase(options, writer, reader);
+      return new AppDatabase(options, reader);
     } catch (error) {
       reader?.close();
       writer?.close();
@@ -245,7 +209,7 @@ export class DemoDatabase {
     const statement = reader.prepare(sql);
     const columns = statement.columns().map((column) => column.name);
     if (columns.length === 0) {
-      throw new DatabaseInputError("查询工具只接受会返回结果集的只读 SQL");
+      throw new DatabaseInputError("SQL 工具只接受会返回结果集的只读 SQL");
     }
     statement.setReadBigInts(true);
 
@@ -259,27 +223,6 @@ export class DemoDatabase {
       rows.push(normalizeRow(row));
     }
     return { columns, rows, rowCount: rows.length, truncated };
-  }
-
-  execute(sql: string, parameters?: readonly SqlParameter[]): ExecuteResult {
-    const { writer } = this.#connections();
-    assertSingleStatement(sql);
-    assertAllowedWrite(sql);
-    const statement = writer.prepare(sql);
-    const bound = bindParameters(parameters);
-
-    writer.exec("BEGIN IMMEDIATE");
-    try {
-      const result = statement.run(...bound);
-      writer.exec("COMMIT");
-      return {
-        changes: Number(result.changes),
-        lastInsertRowid: normalizeLastInsertRowId(result.lastInsertRowid),
-      };
-    } catch (error) {
-      writer.exec("ROLLBACK");
-      throw error;
-    }
   }
 
   getSchema(): SchemaObject[] {
@@ -318,13 +261,11 @@ export class DemoDatabase {
 
   close(): void {
     this.#reader?.close();
-    this.#writer?.close();
     this.#reader = null;
-    this.#writer = null;
   }
 
-  #connections(): { writer: DatabaseSync; reader: DatabaseSync } {
-    if (!this.#writer || !this.#reader) throw new Error("数据库尚未初始化");
-    return { writer: this.#writer, reader: this.#reader };
+  #connections(): { reader: DatabaseSync } {
+    if (!this.#reader) throw new Error("数据库尚未初始化");
+    return { reader: this.#reader };
   }
 }

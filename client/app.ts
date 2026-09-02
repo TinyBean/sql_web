@@ -1,4 +1,5 @@
 import type {
+  ChatImage,
   ChatMessage,
   ChatRole,
   ChatTraceItem,
@@ -63,12 +64,15 @@ const elements = {
   schemaPanel: requiredElement("#schemaPanel", HTMLElement),
   schemaList: requiredElement("#schemaList", HTMLElement),
   toast: requiredElement("#toast", HTMLElement),
+  guardTitle: requiredElement("#guardTitle", HTMLElement),
+  guardCopy: requiredElement("#guardCopy", HTMLElement),
 };
 
 interface StreamNode {
   article: HTMLElement;
   body: HTMLDivElement;
   text: HTMLDivElement;
+  images: HTMLDivElement;
   thoughts: HTMLDetailsElement;
   thoughtSummary: HTMLElement;
   thoughtItems: HTMLDivElement;
@@ -272,6 +276,28 @@ function renderHistoricalTrace(node: StreamNode, trace: readonly ChatTraceItem[]
   node.thoughts.open = false;
 }
 
+function renderMessageImages(container: HTMLElement, images: readonly ChatImage[]): void {
+  container.replaceChildren();
+  container.hidden = images.length === 0;
+  for (const item of images) {
+    const image = document.createElement("img");
+    image.src = `data:${item.mimeType};base64,${item.data}`;
+    image.alt = item.alt;
+    image.loading = "lazy";
+    container.append(image);
+  }
+}
+
+function renderAssistantContent(
+  textContainer: HTMLElement,
+  imageContainer: HTMLElement,
+  text: string,
+  images: readonly ChatImage[],
+): void {
+  const embeddedImageCount = renderMarkdownInto(textContainer, text, images);
+  renderMessageImages(imageContainer, images.slice(embeddedImageCount));
+}
+
 function renderStreamPresentation(
   node: StreamNode,
   previous: StreamPresentation | null,
@@ -310,6 +336,7 @@ function appendMessage(
   text = "",
   streaming = false,
   trace: readonly ChatTraceItem[] = [],
+  images: readonly ChatImage[] = [],
 ): StreamNode {
   const article = document.createElement("article");
   article.className = `message ${role}`;
@@ -338,11 +365,17 @@ function appendMessage(
   thoughts.append(thoughtSummary, thoughtItems);
   const messageText = document.createElement("div");
   messageText.className = role === "assistant" ? "message-text markdown-content" : "message-text";
-  if (role === "assistant") renderMarkdownInto(messageText, text);
-  else messageText.textContent = text;
+  const messageImages = document.createElement("div");
+  messageImages.className = "message-images";
+  if (role === "assistant") renderAssistantContent(messageText, messageImages, text, images);
+  else {
+    messageText.textContent = text;
+    messageImages.hidden = true;
+  }
   body.append(label);
   if (role === "assistant") body.append(thoughts);
   body.append(messageText);
+  if (role === "assistant") body.append(messageImages);
   article.append(avatar, body);
   ensureMessageStream().append(article);
   elements.messages.scrollTop = elements.messages.scrollHeight;
@@ -350,6 +383,7 @@ function appendMessage(
     article,
     body,
     text: messageText,
+    images: messageImages,
     thoughts,
     thoughtSummary,
     thoughtItems,
@@ -370,7 +404,7 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
     return;
   }
   for (const message of messages) {
-    appendMessage(message.role, message.text, false, message.trace ?? []);
+    appendMessage(message.role, message.text, false, message.trace ?? [], message.images ?? []);
   }
 }
 
@@ -556,9 +590,14 @@ async function submitQuestion(question: string): Promise<void> {
     settleStreamNode(streamNode);
     if (completed) {
       state.sessionId = completed.id;
-      if (!streamNode.presentation?.finalText) {
-        const finalMessage = completed.messages.findLast((item) => item.role === "assistant");
-        if (finalMessage) renderMarkdownInto(streamNode.text, finalMessage.text);
+      const finalMessage = completed.messages.findLast((item) => item.role === "assistant");
+      if (finalMessage) {
+        renderAssistantContent(
+          streamNode.text,
+          streamNode.images,
+          finalMessage.text,
+          finalMessage.images ?? [],
+        );
       }
       await refreshSessions();
     }
@@ -599,6 +638,13 @@ async function initialize(): Promise<void> {
     ]);
     const model = health.agent.model;
     elements.modelBadge.textContent = `${model.provider}/${model.model}`;
+    if (health.agent.codeInterpreter.available) {
+      elements.guardTitle.textContent = "严格工具隔离已开启";
+      elements.guardCopy.textContent = "只读 SQL、当前时间与禁网 Python 沙箱";
+    } else {
+      elements.guardTitle.textContent = "代码解释器不可用";
+      elements.guardCopy.textContent = health.agent.codeInterpreter.reason ?? "当前仅启用只读 SQL 与当前时间";
+    }
     renderSchema(schema.objects);
     state.sessions = sessionPayload.sessions;
     renderSessions();

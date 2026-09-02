@@ -1,5 +1,7 @@
 import path from "node:path";
 import { AgentSessionStore } from "./agent-sessions.ts";
+import { ArtifactStore } from "./artifact-store.ts";
+import { CodeInterpreterRuntime } from "./code-interpreter.ts";
 import { loadConfig, loadProjectEnvironment } from "./config.ts";
 import { AppDatabase } from "./database.ts";
 import { createWebServer } from "./http-server.ts";
@@ -18,8 +20,24 @@ const database = AppDatabase.open({
   filePath: config.databasePath,
   schemaPath: config.schemaPath,
 });
+const artifacts = new ArtifactStore(config.artifactDir);
+const codeInterpreter = await CodeInterpreterRuntime.create({
+  ...config.codeInterpreter,
+  projectRoot: config.projectRoot,
+});
+if (codeInterpreter.status.available) {
+  logger.info("code_interpreter.available", {
+    pythonPath: config.codeInterpreter.pythonPath,
+  });
+} else {
+  logger.warn("code_interpreter.unavailable", {
+    reason: codeInterpreter.status.reason,
+  });
+}
 const sessions = await AgentSessionStore.open({
   database,
+  artifacts,
+  codeInterpreter,
   cwd: config.projectRoot,
   sessionDir: config.sessionDir,
   agentDir: config.agentDir,
@@ -27,6 +45,7 @@ const sessions = await AgentSessionStore.open({
   logger,
 }).catch((error: unknown) => {
   logger.error("agent.store.open_failed", error);
+  codeInterpreter.dispose();
   database.close();
   throw error;
 });

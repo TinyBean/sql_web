@@ -15,6 +15,8 @@ test("loads the selected model from the project environment file", (t) => {
       "PORT=4321",
       "SQL_WEB_PROVIDER=test-provider",
       "SQL_WEB_MODEL=test-model",
+      "SQL_WEB_ARTIFACT_DIR=.data/test-artifacts",
+      "SQL_WEB_PYTHON_PATH=/usr/local/bin/python3",
     ].join("\n"),
   );
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -27,6 +29,9 @@ test("loads the selected model from the project environment file", (t) => {
   assert.deepEqual(config.model, { provider: "test-provider", model: "test-model" });
   assert.equal(config.agentDir, path.join(config.projectRoot, ".data", "agent"));
   assert.equal(config.logDir, path.join(config.projectRoot, ".data", "logs"));
+  assert.equal(config.artifactDir, path.join(config.projectRoot, ".data", "test-artifacts"));
+  assert.equal(config.codeInterpreter.pythonPath, "/usr/local/bin/python3");
+  assert.equal(config.codeInterpreter.bwrapPath, "/usr/bin/bwrap");
 });
 
 test("requires both model fields", () => {

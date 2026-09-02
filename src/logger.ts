@@ -21,12 +21,15 @@ export interface DailyFileLoggerOptions extends LoggerOptions {
 export type FileLoggerOptions = LoggerOptions;
 
 type LogLevel = "INFO" | "WARN" | "ERROR";
+const SHANGHAI_UTC_OFFSET_MS = 8 * 60 * 60 * 1_000;
 
-function localDate(date: Date): string {
-  const year = String(date.getFullYear()).padStart(4, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function shanghaiIsoString(date: Date): string {
+  const shifted = new Date(date.getTime() + SHANGHAI_UTC_OFFSET_MS).toISOString();
+  return `${shifted.slice(0, -1)}+08:00`;
+}
+
+function shanghaiDate(date: Date): string {
+  return shanghaiIsoString(date).slice(0, 10);
 }
 
 function errorDetails(error: unknown): Readonly<Record<string, unknown>> {
@@ -85,7 +88,7 @@ class JsonFileLogger implements AppLogger {
   ): void {
     const now = this.#now();
     const entry = {
-      timestamp: now.toISOString(),
+      timestamp: shanghaiIsoString(now),
       level,
       event,
       pid: process.pid,
@@ -121,7 +124,7 @@ export class FileLogger extends JsonFileLogger {
   }
 }
 
-/** Appends entries to one JSON Lines file per local calendar date. */
+/** Appends entries to one JSON Lines file per Asia/Shanghai calendar date. */
 export class DailyFileLogger extends JsonFileLogger {
   readonly #logDir: string;
   readonly #filenamePrefix: string;
@@ -130,7 +133,7 @@ export class DailyFileLogger extends JsonFileLogger {
     const resolvedLogDir = path.resolve(logDir);
     const filenamePrefix = options.filenamePrefix ?? "sql_web";
     super(
-      (now) => path.join(resolvedLogDir, `${filenamePrefix}-${localDate(now)}.log`),
+      (now) => path.join(resolvedLogDir, `${filenamePrefix}-${shanghaiDate(now)}.log`),
       options,
     );
     this.#logDir = resolvedLogDir;

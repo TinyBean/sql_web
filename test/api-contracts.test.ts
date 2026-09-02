@@ -63,6 +63,20 @@ test("decodes ordered turn events and persisted trace items", () => {
   });
 });
 
+test("decodes code interpreter tools and inline PNG images", () => {
+  const session = {
+    ...validSession,
+    tools: ["execute_sql", "get_current_time", "code_interpreter"],
+    messages: [{
+      id: "assistant-1",
+      role: "assistant",
+      text: "图表",
+      images: [{ mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
+    }],
+  };
+  assert.deepEqual(decodeSerializedSession(session), session);
+});
+
 test("rejects malformed nested API and SSE payloads", () => {
   assert.throws(
     () => decodeSerializedSession({ ...validSession, messages: [{ role: "user" }] }),
@@ -97,6 +111,7 @@ test("rejects nullable model state and private schema SQL", () => {
       database: { engine: "SQLite", path: "oee.sqlite" },
       agent: {
         tools: ["execute_sql", "get_current_time"],
+        codeInterpreter: { available: false, reason: "unavailable in test" },
         model: { provider: null, model: null },
         availableModelCount: 0,
         activeSessionCount: 0,

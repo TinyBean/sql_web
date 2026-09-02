@@ -1,6 +1,6 @@
 # DataLens：OEE SQLite 数据问答网站
 
-一个使用严格 TypeScript 构建的本地 OEE 数据问答应用。浏览器中的每个会话对应一个持久化 Agent session；Agent 只能调用受限的只读 SQLite 查询和当前时间工具。
+一个使用严格 TypeScript 构建的本地 OEE 数据问答应用。浏览器中的每个会话对应一个持久化 Agent session；Agent 可以调用受限的只读 SQLite 查询、当前时间和严格隔离的 Python 代码解释器。
 
 ## 数据链路
 
@@ -96,7 +96,7 @@ npm run data:status
 
 生产环境可定期执行 `data:sync`。命令失败时返回非零退出码，可以由 cron、systemd timer 或调度平台告警。
 
-数据拉取、重试、导入和同步结果以 JSON Lines 格式持续追加到 `.data/logs/oee-data.log`，该文件不按日期滚动。网站服务日志与数据日志分开，按本地自然日写入 `.data/logs/sql_web-YYYY-MM-DD.log`。
+数据拉取、重试、导入和同步结果以 JSON Lines 格式持续追加到 `.data/logs/oee-data.log`，该文件不按日期滚动。网站服务日志与数据日志分开，按上海自然日写入 `.data/logs/sql_web-YYYY-MM-DD.log`；两类日志的时间戳均使用上海时区（`+08:00`）。
 
 ## 表结构
 
@@ -119,7 +119,7 @@ npm run data:status
 
 ## 启动
 
-环境要求：Node.js 22.19 或更高版本。
+环境要求：Node.js 22.19 或更高版本，以及 Linux x86_64 上的 Python 3.12、bubblewrap、prlimit、NumPy、SciPy、Matplotlib 和 Pillow。代码解释器依赖自检失败时网站仍可启动，但只启用 SQL 和当前时间工具。
 
 ```bash
 npm install
@@ -145,6 +145,10 @@ npm test
 | `PORT` | `3000` | HTTP 端口 |
 | `SQL_WEB_DB_PATH` | `.data/oee.sqlite` | SQLite 文件位置 |
 | `SQL_WEB_SESSION_DIR` | `.data/sessions` | Agent session 目录 |
+| `SQL_WEB_ARTIFACT_DIR` | `.data/artifacts` | 会话级 SQL JSON 产物目录 |
+| `SQL_WEB_PYTHON_PATH` | `/usr/bin/python3` | 代码解释器使用的 Python |
+| `SQL_WEB_BWRAP_PATH` | `/usr/bin/bwrap` | bubblewrap 可执行文件 |
+| `SQL_WEB_PRLIMIT_PATH` | `/usr/bin/prlimit` | 资源限制工具 |
 | `OEE_API_BASE_URL` | 内部 OEE 地址 | 数据拉取根地址 |
 | `SQL_WEB_PROVIDER` | 必填 | 模型提供方 |
 | `SQL_WEB_MODEL` | 必填 | 模型 ID |
@@ -153,10 +157,14 @@ npm test
 
 ## 安全边界
 
-- `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝，单次最多返回 200 行。
+- `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝。
+- 默认 `output_format="inline"` 直接返回最多 200 行。`output_format="json_file"` 会流式写入最多 100,000 行或 32 MiB 的 JSON，并返回当前会话专属的 `artifact://` 地址。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
+- `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址。输入在 Python 中为 `input_data`；文本通过 `print()` 返回，Matplotlib/Pillow 图片通过 `emit_image()` 返回。Matplotlib 会优先使用 `Noto Sans CJK SC` 简体中文字体；Pillow 可通过 `chinese_font(size)` 或 `chinese_font(size, bold=True)` 获取常规/粗体字体。
+- Python 使用 bubblewrap、seccomp 和 prlimit 隔离：无法访问数据库、项目目录、其他会话产物或网络，并限制执行时间、内存、进程和输出大小。
+- SQL JSON 文件随会话跨轮次、跨重启保留，删除会话时同步删除；文件不通过 HTTP 提供下载。
 - 创建 Agent 会话时会把当前表和视图的 SQLite DDL 注入 system prompt；数据内容仍必须通过查询工具获取。
-- Agent 不加载项目工具、技能或上下文文件。
+- Agent 不加载项目工具、技能或上下文文件；代码沙箱只会挂载显式传入的单个 JSON 文件。
 - 日志不记录用户问题正文、工具参数、查询结果或模型回答正文。
 
 应用仍是本地部署形态，不包含用户登录和租户隔离。正式开放给多用户前，应增加鉴权、限流和独立审计。

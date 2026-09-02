@@ -73,3 +73,35 @@ test("retains the last error when a run never produces a final answer", () => {
     { id: "assistant-2", role: "assistant", text: "连接失败" },
   ]);
 });
+
+test("associates persisted code interpreter PNG details with the final answer", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  assert.deepEqual(serializeMessages([
+    { role: "user", content: "画图" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "code-1", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "code-1",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [{ mimeType: "image/png", data: png, alt: "趋势图" }],
+      },
+    },
+    { role: "assistant", content: [{ type: "text", text: "趋势如下。" }], stopReason: "stop" },
+  ]), [
+    { id: "user-1", role: "user", text: "画图" },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      text: "趋势如下。",
+      trace: [{ type: "tool", id: "code-1", name: "code_interpreter", isError: false }],
+      images: [{ mimeType: "image/png", data: png, alt: "趋势图" }],
+    },
+  ]);
+});

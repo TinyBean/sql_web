@@ -41,8 +41,8 @@
             <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.8 8.6 7 10 4.2-1.4 7-5.5 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></svg>
           </div>
           <div>
-            <strong>工具隔离已开启</strong>
-            <span>Agent 仅可执行只读查询和获取当前时间</span>
+            <strong id="guardTitle">正在检查工具隔离…</strong>
+            <span id="guardCopy">Agent 工具状态加载中</span>
           </div>
         </div>
       </aside>
@@ -133,7 +133,7 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
               </button>
             </div>
-            <p class="schema-copy">Agent 已获得以下结构信息，无法访问数据库之外的文件或系统工具。</p>
+            <p class="schema-copy">Agent 已获得以下结构信息；代码计算仅能读取显式传入的 JSON 数据。</p>
             <div class="schema-list" id="schemaList"><div class="schema-loading">正在读取结构…</div></div>
           </aside>
         </div>

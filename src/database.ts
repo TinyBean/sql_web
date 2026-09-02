@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { SchemaObject } from "../shared/contracts.ts";
@@ -38,8 +38,26 @@ export interface QueryResult {
   readonly truncated: boolean;
 }
 
-const DEFAULT_MAX_ROWS = 100;
+export type QueryTruncationReason = "row_limit" | "byte_limit";
+
+export interface QueryJsonExportOptions {
+  readonly fileDescriptor: number;
+  readonly maxRows: number;
+  readonly maxBytes: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface QueryJsonExportResult {
+  readonly rowCount: number;
+  readonly byteCount: number;
+  readonly truncated: boolean;
+  readonly truncationReason: QueryTruncationReason | null;
+}
+
+const DEFAULT_MAX_ROWS = 200;
 const ABSOLUTE_MAX_ROWS = 200;
+const ABSOLUTE_MAX_EXPORT_ROWS = 100_000;
+const ABSOLUTE_MAX_EXPORT_BYTES = 32 * 1024 * 1024;
 const MAX_SQL_BYTES = 20_000;
 const QUERY_KEYWORDS = new Set(["SELECT", "VALUES"]);
 const STATEMENT_KEYWORDS = new Set(["SELECT", "VALUES", "INSERT", "UPDATE", "DELETE", "REPLACE"]);
@@ -414,6 +432,73 @@ export class AppDatabase {
       rows.push(normalizeRow(row));
     }
     return { columns, rows, rowCount: rows.length, truncated };
+  }
+
+  exportQueryJson(
+    sql: string,
+    parameters: readonly SqlParameter[] | undefined,
+    options: QueryJsonExportOptions,
+  ): QueryJsonExportResult {
+    const { reader } = this.#connections();
+    assertReadOnlyQuery(sql);
+    if (
+      !Number.isInteger(options.maxRows) || options.maxRows < 1 ||
+      options.maxRows > ABSOLUTE_MAX_EXPORT_ROWS
+    ) {
+      throw new DatabaseInputError(`JSON 文件行数上限必须是 1 到 ${ABSOLUTE_MAX_EXPORT_ROWS}`);
+    }
+    if (
+      !Number.isInteger(options.maxBytes) || options.maxBytes < 1 ||
+      options.maxBytes > ABSOLUTE_MAX_EXPORT_BYTES
+    ) {
+      throw new DatabaseInputError(`JSON 文件大小上限必须是 1 到 ${ABSOLUTE_MAX_EXPORT_BYTES}`);
+    }
+
+    const statement = reader.prepare(sql);
+    const columns = statement.columns().map((column) => column.name);
+    if (columns.length === 0) {
+      throw new DatabaseInputError("SQL 工具只接受会返回结果集的只读 SQL");
+    }
+    statement.setReadBigInts(true);
+
+    const header = `{"columns":${JSON.stringify(columns)},"rows":[`;
+    const maximumFooter =
+      `],"rowCount":${options.maxRows},"truncated":true,"truncationReason":"byte_limit"}`;
+    if (Buffer.byteLength(header + maximumFooter) > options.maxBytes) {
+      throw new DatabaseInputError("JSON 文件大小上限不足以保存查询结构");
+    }
+    writeSync(options.fileDescriptor, header);
+    let byteCount = Buffer.byteLength(header);
+    let rowCount = 0;
+    let truncationReason: QueryTruncationReason | null = null;
+
+    for (const row of statement.iterate(...bindParameters(parameters))) {
+      options.signal?.throwIfAborted();
+      if (rowCount === options.maxRows) {
+        truncationReason = "row_limit";
+        break;
+      }
+      const rowJson = `${rowCount === 0 ? "" : ","}${JSON.stringify(normalizeRow(row))}`;
+      const byteLimitFooter =
+        `],"rowCount":${rowCount + 1},"truncated":true,"truncationReason":"byte_limit"}`;
+      const rowBytes = Buffer.byteLength(rowJson);
+      if (byteCount + rowBytes + Buffer.byteLength(byteLimitFooter) > options.maxBytes) {
+        truncationReason = "byte_limit";
+        break;
+      }
+      writeSync(options.fileDescriptor, rowJson);
+      byteCount += rowBytes;
+      rowCount += 1;
+    }
+    options.signal?.throwIfAborted();
+
+    const truncated = truncationReason !== null;
+    const footer = `],"rowCount":${rowCount},"truncated":${truncated},"truncationReason":${
+      truncationReason === null ? "null" : JSON.stringify(truncationReason)
+    }}`;
+    writeSync(options.fileDescriptor, footer);
+    byteCount += Buffer.byteLength(footer);
+    return { rowCount, byteCount, truncated, truncationReason };
   }
 
   getSchema(): SchemaObject[] {

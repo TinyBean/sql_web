@@ -12,15 +12,15 @@ function readEntries(filename: string): unknown[] {
     .map((line) => JSON.parse(line) as unknown);
 }
 
-test("writes structured entries and rolls to a new file on the local date", (t) => {
+test("writes Shanghai timestamps and rolls on the Shanghai calendar date", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-logs-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
 
-  let now = new Date(2026, 7, 31, 23, 59, 59);
+  let now = new Date("2026-08-31T15:59:59.123Z");
   const logger = new DailyFileLogger(directory, { now: () => now, filenamePrefix: "sql_web" });
   logger.info("agent.prompt.started", { sessionId: "session-123" });
 
-  now = new Date(2026, 8, 1, 0, 0, 1);
+  now = new Date("2026-08-31T16:00:01.456Z");
   logger.error("agent.prompt.failed", new Error("provider unavailable"), {
     sessionId: "session-123",
   });
@@ -31,7 +31,7 @@ test("writes structured entries and rolls to a new file on the local date", (t) 
   ]);
   const firstEntries = readEntries(path.join(directory, "sql_web-2026-08-31.log"));
   assert.deepEqual(firstEntries, [{
-    timestamp: new Date(2026, 7, 31, 23, 59, 59).toISOString(),
+    timestamp: "2026-08-31T23:59:59.123+08:00",
     level: "INFO",
     event: "agent.prompt.started",
     pid: process.pid,
@@ -54,17 +54,21 @@ test("appends entries across dates to one fixed file", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-fixed-logs-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
 
-  let now = new Date(2026, 7, 31, 23, 59, 59);
+  let now = new Date("2026-08-31T15:59:59.123Z");
   const filename = path.join(directory, "oee-data.log");
   const logger = new FileLogger(filename, { now: () => now });
   logger.info("oee.pull.started");
-  now = new Date(2026, 8, 1, 0, 0, 1);
+  now = new Date("2026-08-31T16:00:01.456Z");
   logger.info("oee.pull.completed");
 
   assert.deepEqual(readdirSync(directory), ["oee-data.log"]);
-  const entries = readEntries(filename) as { event: string }[];
+  const entries = readEntries(filename) as { event: string; timestamp: string }[];
   assert.deepEqual(entries.map((entry) => entry.event), [
     "oee.pull.started",
     "oee.pull.completed",
+  ]);
+  assert.deepEqual(entries.map((entry) => entry.timestamp), [
+    "2026-08-31T23:59:59.123+08:00",
+    "2026-09-01T00:00:01.456+08:00",
   ]);
 });

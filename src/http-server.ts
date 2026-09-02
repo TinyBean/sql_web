@@ -35,6 +35,7 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/", { root: "public", filename: "index.html", contentType: "text/html; charset=utf-8" }],
   ["/app.js", { root: "public", filename: "generated/client/app.js", contentType: "text/javascript; charset=utf-8" }],
   ["/api-contracts.js", { root: "public", filename: "generated/client/api-contracts.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/image-placeholders.js", { root: "public", filename: "generated/client/image-placeholders.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown.js", { root: "public", filename: "generated/client/markdown.js", contentType: "text/javascript; charset=utf-8" }],
   ["/stream-state.js", { root: "public", filename: "generated/client/stream-state.js", contentType: "text/javascript; charset=utf-8" }],
   ["/styles.css", { root: "public", filename: "styles.css", contentType: "text/css; charset=utf-8" }],

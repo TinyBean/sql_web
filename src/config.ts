@@ -9,6 +9,10 @@ export interface AppEnvironment {
   readonly PORT?: string | undefined;
   readonly SQL_WEB_DB_PATH?: string | undefined;
   readonly SQL_WEB_SESSION_DIR?: string | undefined;
+  readonly SQL_WEB_ARTIFACT_DIR?: string | undefined;
+  readonly SQL_WEB_PYTHON_PATH?: string | undefined;
+  readonly SQL_WEB_BWRAP_PATH?: string | undefined;
+  readonly SQL_WEB_PRLIMIT_PATH?: string | undefined;
   readonly SQL_WEB_PROVIDER?: string | undefined;
   readonly SQL_WEB_MODEL?: string | undefined;
 }
@@ -19,11 +23,17 @@ export interface AppConfig {
   readonly port: number;
   readonly databasePath: string;
   readonly sessionDir: string;
+  readonly artifactDir: string;
   readonly publicDir: string;
   readonly schemaPath: string;
   readonly agentDir: string;
   readonly logDir: string;
   readonly model: ModelSelection;
+  readonly codeInterpreter: {
+    readonly pythonPath: string;
+    readonly bwrapPath: string;
+    readonly prlimitPath: string;
+  };
 }
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +65,10 @@ export function loadProjectEnvironment(
       PORT: target["PORT"],
       SQL_WEB_DB_PATH: target["SQL_WEB_DB_PATH"],
       SQL_WEB_SESSION_DIR: target["SQL_WEB_SESSION_DIR"],
+      SQL_WEB_ARTIFACT_DIR: target["SQL_WEB_ARTIFACT_DIR"],
+      SQL_WEB_PYTHON_PATH: target["SQL_WEB_PYTHON_PATH"],
+      SQL_WEB_BWRAP_PATH: target["SQL_WEB_BWRAP_PATH"],
+      SQL_WEB_PRLIMIT_PATH: target["SQL_WEB_PRLIMIT_PATH"],
       // The model must come from this project's .env, never from inherited shell state.
       SQL_WEB_PROVIDER: values["SQL_WEB_PROVIDER"],
       SQL_WEB_MODEL: values["SQL_WEB_MODEL"],
@@ -82,10 +96,16 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     port: parsePort(env.PORT),
     databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/oee.sqlite"),
     sessionDir: resolveProjectPath(env.SQL_WEB_SESSION_DIR, ".data/sessions"),
+    artifactDir: resolveProjectPath(env.SQL_WEB_ARTIFACT_DIR, ".data/artifacts"),
     publicDir: path.join(projectRoot, "public"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     agentDir: path.join(projectRoot, ".data", "agent"),
     logDir: path.join(projectRoot, ".data", "logs"),
     model: { provider, model },
+    codeInterpreter: {
+      pythonPath: path.resolve(env.SQL_WEB_PYTHON_PATH?.trim() || "/usr/bin/python3"),
+      bwrapPath: path.resolve(env.SQL_WEB_BWRAP_PATH?.trim() || "/usr/bin/bwrap"),
+      prlimitPath: path.resolve(env.SQL_WEB_PRLIMIT_PATH?.trim() || "/usr/bin/prlimit"),
+    },
   };
 }

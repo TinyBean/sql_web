@@ -44,6 +44,7 @@ async function createFixture(
   const sessions: WebSessionPort = sessionsOverride ?? {
     status: () => ({
       tools: ["execute_sql", "get_current_time"],
+      codeInterpreter: { available: false, reason: "test sandbox unavailable" },
       model: { provider: "test-provider", model: "test-model" },
       availableModelCount: 0,
       activeSessionCount: 0,
@@ -119,6 +120,9 @@ test("serves the app with restrictive security headers", async (t) => {
   const markdownModule = await fetch(`${baseUrl}/markdown.js`);
   assert.equal(markdownModule.status, 200);
   assert.match(markdownModule.headers.get("content-type") ?? "", /javascript/u);
+  const imagePlaceholdersModule = await fetch(`${baseUrl}/image-placeholders.js`);
+  assert.equal(imagePlaceholdersModule.status, 200);
+  assert.match(imagePlaceholdersModule.headers.get("content-type") ?? "", /javascript/u);
   const markedVendor = await fetch(`${baseUrl}/vendor/marked.js`);
   assert.equal(markedVendor.status, 200);
   assert.match(await markedVendor.text(), /marked/u);
@@ -131,6 +135,10 @@ test("exposes health, schema, and session endpoints", async (t) => {
   const baseUrl = await createFixture(t);
   const health = await fetchContract(`${baseUrl}/api/health`, decodeHealthResponse);
   assert.deepEqual(health.agent.tools, ["execute_sql", "get_current_time"]);
+  assert.deepEqual(health.agent.codeInterpreter, {
+    available: false,
+    reason: "test sandbox unavailable",
+  });
 
   const schema = await fetchContract(`${baseUrl}/api/schema`, decodeSchemaResponse);
   assert.equal(schema.objects.some((object) => object.name === "oee_availability"), true);
@@ -199,6 +207,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
   const sessions: WebSessionPort = {
     status: () => ({
       tools: ["execute_sql", "get_current_time"],
+      codeInterpreter: { available: false, reason: "test sandbox unavailable" },
       model: { provider: "test-provider", model: "test-model" },
       availableModelCount: 0,
       activeSessionCount: 1,

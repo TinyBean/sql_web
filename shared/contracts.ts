@@ -1,5 +1,11 @@
 export type ChatRole = "user" | "assistant";
-export type AgentToolName = "execute_sql" | "get_current_time";
+export type AgentToolName = "execute_sql" | "get_current_time" | "code_interpreter";
+
+export interface ChatImage {
+  readonly mimeType: "image/png";
+  readonly data: string;
+  readonly alt: string;
+}
 
 export interface ChatTraceText {
   readonly type: "text";
@@ -21,6 +27,7 @@ export interface ChatMessage {
   readonly text: string;
   readonly timestamp?: number;
   readonly trace?: readonly ChatTraceItem[];
+  readonly images?: readonly ChatImage[];
 }
 
 export interface ModelDescriptor {
@@ -54,6 +61,7 @@ export interface ModelSelection {
 
 export interface AgentStatus {
   readonly tools: readonly AgentToolName[];
+  readonly codeInterpreter: { readonly available: boolean; readonly reason: string | null };
   readonly model: ModelSelection;
   readonly availableModelCount: number;
   readonly activeSessionCount: number;

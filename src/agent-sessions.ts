@@ -15,6 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentStatus,
+  ChatImage,
   ChatMessage,
   ChatTraceItem,
   AgentToolName,
@@ -24,7 +25,9 @@ import type {
   SchemaObject,
 } from "../shared/contracts.ts";
 import type { AppDatabase } from "./database.ts";
-import { AGENT_TOOL_NAMES, createAgentTools } from "./database-tools.ts";
+import type { ArtifactStore } from "./artifact-store.ts";
+import type { CodeInterpreterRuntime } from "./code-interpreter.ts";
+import { activeAgentToolNames, createAgentTools } from "./database-tools.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import type { AppLogger } from "./logger.ts";
 
@@ -37,6 +40,8 @@ export interface AgentSessionStoreOptions {
   readonly sessionDir: string;
   readonly agentDir: string;
   readonly model: ModelSelection;
+  readonly artifacts: ArtifactStore;
+  readonly codeInterpreter: CodeInterpreterRuntime;
   readonly logger?: AgentProcessLogger;
 }
 
@@ -51,6 +56,7 @@ export interface TranscriptSourceMessage {
   readonly toolCallId?: string;
   readonly toolName?: string;
   readonly isError?: boolean;
+  readonly details?: unknown;
 }
 
 const NOOP_LOGGER: AgentProcessLogger = {
@@ -93,20 +99,30 @@ function formatDatabaseSchema(schema: readonly SchemaObject[]): string {
   }).join("\n\n");
 }
 
-function buildSystemPrompt(schema: readonly SchemaObject[]): string {
+function buildSystemPrompt(schema: readonly SchemaObject[], codeInterpreterAvailable: boolean): string {
   const databaseSchema = formatDatabaseSchema(schema);
+  const codeInterpreterRules = codeInterpreterAvailable
+    ? `
+10. 少量查询结果优先使用 execute_sql 的默认 inline 模式。需要对大量明细做额外计算或渲染时，使用 output_format="json_file"，再把返回的 fileUri 原样传给 code_interpreter.input_json。
+11. 只有 SQL 和当前时间工具无法完成精确计算、统计方法或 PNG 渲染时才调用 code_interpreter。Python 中通过 input_data 读取输入，使用 print() 返回计算结果，使用 emit_image() 输出 Matplotlib Figure 或 Pillow Image；精确小数计算优先使用 decimal.Decimal。Matplotlib 已自动配置简体中文字体；Pillow 绘制中文时使用全局函数 chinese_font(size)，粗体使用 chinese_font(size, bold=True)。
+12. code_interpreter 是禁网且与项目隔离的临时沙箱，不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
+13. emit_image() 生成的 PNG 会由前端自动附加并持久化。回答中不得虚构 artifact://image.png、sandbox 路径或其他 Markdown 图片地址。`
+    : "";
+  const availableTools = codeInterpreterAvailable
+    ? "execute_sql、get_current_time 和 code_interpreter"
+    : "execute_sql 和 get_current_time";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
 规则：
 1. 下方已经提供当前 SQLite 数据库结构。生成查询时必须严格使用其中的表、视图和字段，不得猜测不存在的结构。只有需要确认运行时结构变化时，才查询 sqlite_master 或 pragma_table_info。
 2. 涉及数据库事实、统计或明细时，必须调用 execute_sql 获取真实结果；不得凭空猜测数据。
 3. 使用 SQLite 语法。优先执行范围明确、列名明确的查询，并明确说明统计口径。
-4. execute_sql 只允许执行一条会返回结果集的只读 SQL；不得尝试新增、修改、删除数据或执行 DDL。
+4. execute_sql 只允许执行一条会返回结果集的只读 SQL；不得尝试新增、修改、删除数据或执行 DDL。默认 inline 模式最多返回 200 行。
 5. 用户询问当前日期、时间或相对时间范围时，先调用 get_current_time 获取真实的当前时间。
 6. 涉及日期范围、月度或年度统计时，先查询 oee_data_status、oee_data_gaps 和 oee_record_issues，核对数据库覆盖范围与未解决质量问题；存在缺口或相关异常时必须在答案中说明。
 7. 优先使用月度汇总表回答匹配其维度的问题；只有缺少所需维度或需要明细时才扫描事实表。除非用户明确询问原始 DUT 位图，不要读取 oee_dut_payload。
 8. 回答使用中文，先给结论，再简洁说明口径。比率说明分子与分母；没有数据时明确说明。
-9. 不要声称自己访问了文件、终端或网络。你只有 execute_sql 和 get_current_time 两个工具。
+9. 不要声称自己访问了未由工具提供的文件、终端或网络。你只有 ${availableTools}。${codeInterpreterRules}
 
 ## 数据库结构
 
@@ -148,6 +164,32 @@ function messageText(message: TranscriptSourceMessage | undefined): string {
     .join("");
 }
 
+function codeInterpreterImages(message: TranscriptSourceMessage): ChatImage[] {
+  if (message.toolName !== "code_interpreter") return [];
+  const details = message.details;
+  if (
+    typeof details !== "object" || details === null || !("kind" in details) ||
+    details.kind !== "code_interpreter" || !("images" in details) || !Array.isArray(details.images)
+  ) return [];
+  const images: ChatImage[] = [];
+  for (const candidate of details.images.slice(0, 3)) {
+    if (
+      typeof candidate !== "object" || candidate === null ||
+      !("mimeType" in candidate) || candidate.mimeType !== "image/png" ||
+      !("data" in candidate) || typeof candidate.data !== "string" ||
+      !("alt" in candidate) || typeof candidate.alt !== "string" ||
+      candidate.data.length > 2_800_000
+    ) continue;
+    const bytes = Buffer.from(candidate.data, "base64");
+    if (
+      bytes.length > 2 * 1024 * 1024 || bytes.length < 8 ||
+      bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a"
+    ) continue;
+    images.push({ mimeType: "image/png", data: candidate.data, alt: candidate.alt });
+  }
+  return images;
+}
+
 interface ToolCallSummary {
   readonly id: string;
   readonly name: string;
@@ -155,6 +197,7 @@ interface ToolCallSummary {
 
 interface ResponseAccumulator {
   readonly trace: ChatTraceItem[];
+  readonly images: ChatImage[];
   hasFinal: boolean;
   finalText: string;
   finalTimestamp: number | undefined;
@@ -188,6 +231,7 @@ function appendTraceText(trace: ChatTraceItem[], text: string): void {
 function newResponseAccumulator(): ResponseAccumulator {
   return {
     trace: [],
+    images: [],
     hasFinal: false,
     finalText: "",
     finalTimestamp: undefined,
@@ -199,9 +243,12 @@ function newResponseAccumulator(): ResponseAccumulator {
 export function serializeMessages(messages: readonly TranscriptSourceMessage[]): ChatMessage[] {
   const transcript: ChatMessage[] = [];
   const toolErrors = new Map<string, boolean>();
+  const toolImages = new Map<string, readonly ChatImage[]>();
   for (const message of messages) {
     if (message.role === "toolResult" && typeof message.toolCallId === "string") {
       toolErrors.set(message.toolCallId, message.isError === true);
+      const images = codeInterpreterImages(message);
+      if (images.length) toolImages.set(message.toolCallId, images);
     }
   }
 
@@ -219,6 +266,7 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
         text,
         ...(timestamp === undefined ? {} : { timestamp }),
         ...(response.trace.length ? { trace: response.trace } : {}),
+        ...(response.images.length ? { images: response.images } : {}),
       });
     }
     response = null;
@@ -261,6 +309,7 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
             name: tool.name,
             isError: toolErrors.get(tool.id) ?? true,
           });
+          response.images.push(...(toolImages.get(tool.id) ?? []));
         } else if (
           typeof part === "object" && part !== null && "type" in part && part.type === "text" &&
           "text" in part && typeof part.text === "string"
@@ -291,13 +340,17 @@ function shortTitle(prompt: string): string {
 }
 
 function isAgentToolName(name: string): name is AgentToolName {
-  return AGENT_TOOL_NAMES.some((expected) => expected === name);
+  return name === "execute_sql" || name === "get_current_time" || name === "code_interpreter";
 }
 
-function validatedAgentToolNames(names: readonly string[]): AgentToolName[] {
+function validatedAgentToolNames(
+  names: readonly string[],
+  expectedNames: readonly AgentToolName[],
+): AgentToolName[] {
   if (
-    names.length !== AGENT_TOOL_NAMES.length ||
-    names.some((name) => !isAgentToolName(name))
+    names.length !== expectedNames.length ||
+    new Set(names).size !== names.length ||
+    names.some((name) => !isAgentToolName(name) || !expectedNames.includes(name))
   ) {
     throw new Error(`Agent 工具白名单校验失败：${names.join(", ")}`);
   }
@@ -308,12 +361,32 @@ function errorHasCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
+function codeInterpreterLogFields(result: unknown): Readonly<Record<string, unknown>> {
+  if (
+    typeof result !== "object" || result === null || !("details" in result) ||
+    typeof result.details !== "object" || result.details === null ||
+    !("kind" in result.details) || result.details.kind !== "code_interpreter"
+  ) return {};
+  const details = result.details;
+  const stdoutBytes = "stdout" in details && typeof details.stdout === "string"
+    ? Buffer.byteLength(details.stdout)
+    : 0;
+  const stderrBytes = "stderr" in details && typeof details.stderr === "string"
+    ? Buffer.byteLength(details.stderr)
+    : 0;
+  const imageCount = "images" in details && Array.isArray(details.images) ? details.images.length : 0;
+  return { stdoutBytes, stderrBytes, imageCount };
+}
+
 export class AgentSessionStore {
   readonly #database: AppDatabase;
   readonly #cwd: string;
   readonly #sessionDir: string;
   readonly #agentDir: string;
   readonly #model: ModelSelection;
+  readonly #artifacts: ArtifactStore;
+  readonly #codeInterpreter: CodeInterpreterRuntime;
+  readonly #toolNames: readonly AgentToolName[];
   readonly #sessions = new Map<string, AgentSession>();
   readonly #sessionTimes = new Map<string, SessionTimes>();
   readonly #modelRuntime: ModelRuntime;
@@ -322,7 +395,8 @@ export class AgentSessionStore {
   readonly #toolStartedAt = new Map<string, number>();
 
   private constructor(
-    { database, cwd, sessionDir, agentDir, model, logger }: AgentSessionStoreOptions,
+    { database, cwd, sessionDir, agentDir, model, artifacts, codeInterpreter, logger }:
+      AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
   ) {
     this.#database = database;
@@ -330,6 +404,9 @@ export class AgentSessionStore {
     this.#sessionDir = sessionDir;
     this.#agentDir = agentDir;
     this.#model = model;
+    this.#artifacts = artifacts;
+    this.#codeInterpreter = codeInterpreter;
+    this.#toolNames = activeAgentToolNames(codeInterpreter);
     this.#modelRuntime = modelRuntime;
     this.#logger = logger ?? NOOP_LOGGER;
   }
@@ -450,7 +527,6 @@ export class AgentSessionStore {
         throw new Error(`会话文件不在持久化目录中：${filePath}`);
       }
     }
-
     const unsubscribe = this.#unsubscribers.get(id);
     if (unsubscribe) unsubscribe();
     session?.dispose();
@@ -468,6 +544,7 @@ export class AgentSessionStore {
         if (!errorHasCode(error, "ENOENT")) throw error;
       }
     }
+    await this.#artifacts.deleteSession(id);
     this.#logger.info("agent.session.deleted", {
       sessionId: id,
       persisted: filePath !== null,
@@ -522,7 +599,7 @@ export class AgentSessionStore {
       model: session.model
         ? { provider: session.model.provider, id: session.model.id, name: session.model.name }
         : null,
-      tools: validatedAgentToolNames(session.getActiveToolNames()),
+      tools: validatedAgentToolNames(session.getActiveToolNames(), this.#toolNames),
       streaming: session.isStreaming,
       messages: serializeMessages(session.messages),
     };
@@ -530,7 +607,8 @@ export class AgentSessionStore {
 
   status(): AgentStatus {
     return {
-      tools: [...AGENT_TOOL_NAMES],
+      tools: [...this.#toolNames],
+      codeInterpreter: this.#codeInterpreter.status,
       model: this.#model,
       availableModelCount: this.#modelRuntime.getAvailableSnapshot().length,
       activeSessionCount: this.#sessions.size,
@@ -545,6 +623,7 @@ export class AgentSessionStore {
     this.#toolStartedAt.clear();
     this.#sessions.clear();
     this.#sessionTimes.clear();
+    this.#codeInterpreter.dispose();
   }
 
   async #createPiSession(sessionManager: SessionManager): Promise<AgentSession> {
@@ -556,7 +635,8 @@ export class AgentSessionStore {
       );
     }
 
-    const tools = createAgentTools(this.#database);
+    const artifacts = this.#artifacts.forSession(sessionManager.getSessionId());
+    const tools = createAgentTools(this.#database, artifacts, this.#codeInterpreter);
     const { session } = await createAgentSession({
       cwd: this.#cwd,
       agentDir: this.#agentDir,
@@ -564,14 +644,16 @@ export class AgentSessionStore {
       modelRuntime: this.#modelRuntime,
       settingsManager,
       sessionManager,
-      resourceLoader: createLockedResourceLoader(buildSystemPrompt(this.#database.getSchema())),
-      tools: [...AGENT_TOOL_NAMES],
+      resourceLoader: createLockedResourceLoader(
+        buildSystemPrompt(this.#database.getSchema(), this.#codeInterpreter.status.available),
+      ),
+      tools: [...this.#toolNames],
       customTools: tools,
       noTools: "builtin",
     });
 
     try {
-      validatedAgentToolNames(session.getActiveToolNames());
+      validatedAgentToolNames(session.getActiveToolNames(), this.#toolNames);
     } catch (error) {
       session.dispose();
       throw error;
@@ -609,6 +691,7 @@ export class AgentSessionStore {
         toolCallId: event.toolCallId,
         toolName: event.toolName,
         isError: event.isError,
+        ...codeInterpreterLogFields(event.result),
         ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }),
       };
       if (event.isError) this.#logger.warn("agent.tool.completed", fields);

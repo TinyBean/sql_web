@@ -8,7 +8,7 @@ import {
 
 test("formats raw tool names with every execution status", () => {
   assert.deepEqual(
-    (["execute_sql", "get_current_time"] as const).flatMap((name) => (
+    (["execute_sql", "get_current_time", "code_interpreter"] as const).flatMap((name) => (
       (["queued", "running", "done", "error"] as const).map((status) => ({
         name,
         status,
@@ -24,6 +24,10 @@ test("formats raw tool names with every execution status", () => {
       { name: "get_current_time", status: "running", label: "get_current_time · 正在查询当前时间" },
       { name: "get_current_time", status: "done", label: "get_current_time · 查询当前时间完成" },
       { name: "get_current_time", status: "error", label: "get_current_time · 查询当前时间失败" },
+      { name: "code_interpreter", status: "queued", label: "code_interpreter · 准备执行代码计算" },
+      { name: "code_interpreter", status: "running", label: "code_interpreter · 正在执行代码计算" },
+      { name: "code_interpreter", status: "done", label: "code_interpreter · 执行代码计算完成" },
+      { name: "code_interpreter", status: "error", label: "code_interpreter · 执行代码计算失败" },
     ],
   );
 });

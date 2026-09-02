@@ -1,5 +1,6 @@
 import type {
   AbortResponse,
+  ChatImage,
   ChatMessage,
   ChatRole,
   ChatTraceItem,
@@ -89,9 +90,19 @@ function chatTraceItem(value: unknown, path: string): ChatTraceItem {
 }
 
 function agentToolName(value: unknown, path: string): AgentToolName {
-  return value === "execute_sql" || value === "get_current_time"
+  return value === "execute_sql" || value === "get_current_time" || value === "code_interpreter"
     ? value
     : invalid(path, "Agent 工具名");
+}
+
+function chatImage(value: unknown, path: string): ChatImage {
+  const item = record(value, path);
+  if (item["mimeType"] !== "image/png") invalid(`${path}.mimeType`, "image/png");
+  return {
+    mimeType: "image/png",
+    data: string(item["data"], `${path}.data`),
+    alt: string(item["alt"], `${path}.alt`),
+  };
 }
 
 function schemaObjectType(value: unknown, path: string): "table" | "view" {
@@ -102,6 +113,7 @@ function chatMessage(value: unknown, path: string): ChatMessage {
   const item = record(value, path);
   const timestamp = item["timestamp"];
   const trace = item["trace"];
+  const images = item["images"];
   return {
     id: string(item["id"], `${path}.id`),
     role: chatRole(item["role"], `${path}.role`),
@@ -112,6 +124,9 @@ function chatMessage(value: unknown, path: string): ChatMessage {
     ...(trace === undefined
       ? {}
       : { trace: array(trace, `${path}.trace`, chatTraceItem) }),
+    ...(images === undefined
+      ? {}
+      : { images: array(images, `${path}.images`, chatImage) }),
   };
 }
 
@@ -193,6 +208,8 @@ export const decodeHealthResponse: Decoder<HealthResponse> = (value, path = "$he
   const database = record(item["database"], `${path}.database`);
   if (database["engine"] !== "SQLite") invalid(`${path}.database.engine`, "SQLite");
   const agent = record(item["agent"], `${path}.agent`);
+  const codeInterpreter = record(agent["codeInterpreter"], `${path}.agent.codeInterpreter`);
+  const codeInterpreterReason = codeInterpreter["reason"];
   return {
     ok: true,
     database: {
@@ -201,6 +218,15 @@ export const decodeHealthResponse: Decoder<HealthResponse> = (value, path = "$he
     },
     agent: {
       tools: array(agent["tools"], `${path}.agent.tools`, agentToolName),
+      codeInterpreter: {
+        available: boolean(
+          codeInterpreter["available"],
+          `${path}.agent.codeInterpreter.available`,
+        ),
+        reason: codeInterpreterReason === null
+          ? null
+          : string(codeInterpreterReason, `${path}.agent.codeInterpreter.reason`),
+      },
       model: modelSelection(agent["model"], `${path}.agent.model`),
       availableModelCount: nonNegativeInteger(
         agent["availableModelCount"],

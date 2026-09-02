@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { AgentSessionStore, SessionNotFoundError } from "../src/agent-sessions.ts";
+import { ArtifactStore } from "../src/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../src/code-interpreter.ts";
 import { AppDatabase } from "../src/database.ts";
 
 const projectRoot = process.cwd();
@@ -30,8 +32,18 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
     filePath: path.join(directory, "oee.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
   });
+  const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
+  const codeInterpreter = await CodeInterpreterRuntime.create({
+    pythonPath: "/usr/bin/python3",
+    bwrapPath: "/usr/bin/bwrap",
+    prlimitPath: "/usr/bin/prlimit",
+    projectRoot: directory,
+  });
+  assert.equal(codeInterpreter.status.available, true);
   const store = await AgentSessionStore.open({
     database,
+    artifacts,
+    codeInterpreter,
     cwd: directory,
     sessionDir: path.join(directory, "sessions"),
     agentDir,
@@ -45,7 +57,7 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
 
   const created = await store.create();
   assert.match(created.id, /^[A-Za-z0-9-]{8,100}$/u);
-  assert.deepEqual(created.tools, ["execute_sql", "get_current_time"]);
+  assert.deepEqual(created.tools, ["execute_sql", "get_current_time", "code_interpreter"]);
   assert.equal(created.model?.provider, "test-provider");
   assert.equal(created.model?.id, "test-model");
 
@@ -56,12 +68,16 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
   assert.match(piSession.systemPrompt, /<database_schema dialect="sqlite">/u);
   assert.match(piSession.systemPrompt, /execute_sql 只允许执行一条会返回结果集的只读 SQL/u);
   assert.match(piSession.systemPrompt, /get_current_time/u);
+  assert.match(piSession.systemPrompt, /code_interpreter\.input_json/u);
 
   const listed = await store.list();
   assert.equal(listed.length, 1);
   assert.equal(listed[0]?.id, created.id);
 
+  artifacts.forSession(created.id).createJson((fileDescriptor) => writeSync(fileDescriptor, "{}"));
+  assert.equal(existsSync(path.join(directory, "artifacts", created.id)), true);
   await store.delete(created.id);
+  assert.equal(existsSync(path.join(directory, "artifacts", created.id)), false);
   assert.deepEqual(await store.list(), []);
   await assert.rejects(() => store.get(created.id), SessionNotFoundError);
 

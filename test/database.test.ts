@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -70,6 +70,51 @@ test("supports positional parameters and enforces the row cap", (t) => {
   );
   assert.equal(capped.rowCount, 2);
   assert.equal(capped.truncated, true);
+});
+
+test("defaults inline queries to 200 rows and streams bounded JSON exports", (t) => {
+  const database = createFixture(t);
+  const inline = database.query(
+    "WITH RECURSIVE numbers(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 201) SELECT value FROM numbers",
+  );
+  assert.equal(inline.rowCount, 200);
+  assert.equal(inline.truncated, true);
+
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-export-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const rowLimitedPath = path.join(directory, "rows.json");
+  const rowDescriptor = openSync(rowLimitedPath, "w", 0o600);
+  const rowLimited = database.exportQueryJson(
+    "SELECT value FROM json_each('[1,2,3]') ORDER BY value",
+    [],
+    { fileDescriptor: rowDescriptor, maxRows: 2, maxBytes: 10_000 },
+  );
+  closeSync(rowDescriptor);
+  assert.deepEqual(rowLimited, {
+    rowCount: 2,
+    byteCount: readFileSync(rowLimitedPath).byteLength,
+    truncated: true,
+    truncationReason: "row_limit",
+  });
+  assert.deepEqual(JSON.parse(readFileSync(rowLimitedPath, "utf8")), {
+    columns: ["value"],
+    rows: [{ value: 1 }, { value: 2 }],
+    rowCount: 2,
+    truncated: true,
+    truncationReason: "row_limit",
+  });
+
+  const byteLimitedPath = path.join(directory, "bytes.json");
+  const byteDescriptor = openSync(byteLimitedPath, "w", 0o600);
+  const byteLimited = database.exportQueryJson(
+    "SELECT value FROM json_each('[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]')",
+    [],
+    { fileDescriptor: byteDescriptor, maxRows: 100, maxBytes: 135 },
+  );
+  closeSync(byteDescriptor);
+  assert.equal(byteLimited.truncated, true);
+  assert.equal(byteLimited.truncationReason, "byte_limit");
+  assert.doesNotThrow(() => JSON.parse(readFileSync(byteLimitedPath, "utf8")));
 });
 
 test("keeps SQL execution read-only", (t) => {

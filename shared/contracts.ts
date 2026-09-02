@@ -1,5 +1,5 @@
 export type ChatRole = "user" | "assistant";
-export type DatabaseToolName = "query_database" | "execute_database";
+export type AgentToolName = "execute_sql" | "get_current_time";
 
 export interface ChatTraceText {
   readonly type: "text";
@@ -33,7 +33,7 @@ export interface SerializedSession {
   readonly id: string;
   readonly title: string;
   readonly model: ModelDescriptor | null;
-  readonly tools: readonly DatabaseToolName[];
+  readonly tools: readonly AgentToolName[];
   readonly streaming: boolean;
   readonly messages: readonly ChatMessage[];
 }
@@ -53,7 +53,7 @@ export interface ModelSelection {
 }
 
 export interface AgentStatus {
-  readonly tools: readonly DatabaseToolName[];
+  readonly tools: readonly AgentToolName[];
   readonly model: ModelSelection;
   readonly availableModelCount: number;
   readonly activeSessionCount: number;

@@ -5,11 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { AgentSessionStore, SessionNotFoundError } from "../src/agent-sessions.ts";
-import { DemoDatabase } from "../src/database.ts";
+import { AppDatabase } from "../src/database.ts";
 
 const projectRoot = process.cwd();
 
-test("maps a web session directly to a Pi session with only database tools", async (t) => {
+test("maps a web session directly to a Pi session with only allowlisted tools", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-agent-"));
   const agentDir = path.join(directory, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -26,10 +26,9 @@ test("maps a web session directly to a Pi session with only database tools", asy
       },
     }),
   );
-  const database = DemoDatabase.open({
-    filePath: path.join(directory, "demo.sqlite"),
+  const database = AppDatabase.open({
+    filePath: path.join(directory, "oee.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-    seedPath: path.join(projectRoot, "sql", "seed.sql"),
   });
   const store = await AgentSessionStore.open({
     database,
@@ -46,13 +45,17 @@ test("maps a web session directly to a Pi session with only database tools", asy
 
   const created = await store.create();
   assert.match(created.id, /^[A-Za-z0-9-]{8,100}$/u);
-  assert.deepEqual(created.tools, ["query_database", "execute_database"]);
+  assert.deepEqual(created.tools, ["execute_sql", "get_current_time"]);
   assert.equal(created.model?.provider, "test-provider");
   assert.equal(created.model?.id, "test-model");
 
   const piSession = await store.get(created.id);
-  assert.match(piSession.systemPrompt, /sqlite_master/u);
-  assert.doesNotMatch(piSession.systemPrompt, /CREATE TABLE|customers|orders/u);
+  assert.match(piSession.systemPrompt, /## 数据库结构/u);
+  assert.match(piSession.systemPrompt, /CREATE TABLE oee_availability/u);
+  assert.match(piSession.systemPrompt, /CREATE TABLE oee_dut_utilization/u);
+  assert.match(piSession.systemPrompt, /<database_schema dialect="sqlite">/u);
+  assert.match(piSession.systemPrompt, /execute_sql 只允许执行一条会返回结果集的只读 SQL/u);
+  assert.match(piSession.systemPrompt, /get_current_time/u);
 
   const listed = await store.list();
   assert.equal(listed.length, 1);

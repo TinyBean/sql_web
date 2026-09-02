@@ -13,7 +13,7 @@ const validSession = {
   id: "session-12345678",
   title: "测试会话",
   model: { provider: "test-provider", id: "test-model", name: "Test Model" },
-  tools: ["query_database", "execute_database"],
+  tools: ["execute_sql", "get_current_time"],
   streaming: false,
   messages: [{ id: "user-1", role: "user", text: "你好", timestamp: 1 }],
 };
@@ -40,7 +40,7 @@ test("decodes ordered turn events and persisted trace items", () => {
       text: "最终回答",
       trace: [
         { type: "text", text: "先查询" },
-        { type: "tool", id: "call-1", name: "query_database", isError: false },
+        { type: "tool", id: "call-1", name: "execute_sql", isError: false },
       ],
     }],
   };
@@ -54,8 +54,8 @@ test("decodes ordered turn events and persisted trace items", () => {
     data: { turn: 0, delta: "先查询" },
   });
   assert.deepEqual(
-    decodeSseEvent("tool_call", { turn: 0, id: "call-1", name: "query_database" }),
-    { event: "tool_call", data: { turn: 0, id: "call-1", name: "query_database" } },
+    decodeSseEvent("tool_call", { turn: 0, id: "call-1", name: "execute_sql" }),
+    { event: "tool_call", data: { turn: 0, id: "call-1", name: "execute_sql" } },
   );
   assert.deepEqual(decodeSseEvent("turn_end", { turn: 1, final: true }), {
     event: "turn_end",
@@ -72,7 +72,7 @@ test("rejects malformed nested API and SSE payloads", () => {
     () => decodeSseEvent("tool_end", {
       turn: 0,
       id: "call-1",
-      name: "query_database",
+      name: "execute_sql",
       isError: "false",
     }),
     /isError/u,
@@ -94,9 +94,9 @@ test("rejects nullable model state and private schema SQL", () => {
   assert.throws(
     () => decodeHealthResponse({
       ok: true,
-      database: { engine: "SQLite", path: "demo.sqlite" },
+      database: { engine: "SQLite", path: "oee.sqlite" },
       agent: {
-        tools: ["query_database", "execute_database"],
+        tools: ["execute_sql", "get_current_time"],
         model: { provider: null, model: null },
         availableModelCount: 0,
         activeSessionCount: 0,

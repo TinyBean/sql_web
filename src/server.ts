@@ -1,7 +1,7 @@
 import path from "node:path";
 import { AgentSessionStore } from "./agent-sessions.ts";
 import { loadConfig, loadProjectEnvironment } from "./config.ts";
-import { DemoDatabase } from "./database.ts";
+import { AppDatabase } from "./database.ts";
 import { createWebServer } from "./http-server.ts";
 import { DailyFileLogger } from "./logger.ts";
 
@@ -14,10 +14,9 @@ logger.info("system.starting", {
   provider: config.model.provider,
   model: config.model.model,
 });
-const database = DemoDatabase.open({
+const database = AppDatabase.open({
   filePath: config.databasePath,
   schemaPath: config.schemaPath,
-  seedPath: config.seedPath,
 });
 const sessions = await AgentSessionStore.open({
   database,

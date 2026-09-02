@@ -20,7 +20,7 @@ import type {
 } from "../shared/contracts.ts";
 import { SessionBusyError, SessionNotFoundError } from "./agent-sessions.ts";
 import { DatabaseInputError } from "./database.ts";
-import type { DemoDatabase } from "./database.ts";
+import type { AppDatabase } from "./database.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";
@@ -67,7 +67,7 @@ export interface StreamableAgentSession {
 }
 
 export interface WebServerOptions {
-  database: DemoDatabase;
+  database: AppDatabase;
   sessions: WebSessionPort;
   publicDir: string;
   vendorDir: string;

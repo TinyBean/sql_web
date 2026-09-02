@@ -14,7 +14,7 @@ import {
   parseJson,
   type Decoder,
 } from "../client/api-contracts.ts";
-import { DemoDatabase } from "../src/database.ts";
+import { AppDatabase } from "../src/database.ts";
 import {
   createWebServer,
   type StreamableAgentSession,
@@ -37,14 +37,13 @@ async function createFixture(
   sessionsOverride?: WebSessionPort,
 ): Promise<string> {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-http-"));
-  const database = DemoDatabase.open({
-    filePath: path.join(directory, "demo.sqlite"),
+  const database = AppDatabase.open({
+    filePath: path.join(directory, "oee.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-    seedPath: path.join(projectRoot, "sql", "seed.sql"),
   });
   const sessions: WebSessionPort = sessionsOverride ?? {
     status: () => ({
-      tools: ["query_database", "execute_database"],
+      tools: ["execute_sql", "get_current_time"],
       model: { provider: "test-provider", model: "test-model" },
       availableModelCount: 0,
       activeSessionCount: 0,
@@ -54,7 +53,7 @@ async function createFixture(
       id: "fake-session",
       title: "新会话",
       model: null,
-      tools: ["query_database", "execute_database"],
+      tools: ["execute_sql", "get_current_time"],
       streaming: false,
       messages: [],
     }),
@@ -131,10 +130,10 @@ test("serves the app with restrictive security headers", async (t) => {
 test("exposes health, schema, and session endpoints", async (t) => {
   const baseUrl = await createFixture(t);
   const health = await fetchContract(`${baseUrl}/api/health`, decodeHealthResponse);
-  assert.deepEqual(health.agent.tools, ["query_database", "execute_database"]);
+  assert.deepEqual(health.agent.tools, ["execute_sql", "get_current_time"]);
 
   const schema = await fetchContract(`${baseUrl}/api/schema`, decodeSchemaResponse);
-  assert.equal(schema.objects.some((object) => object.name === "orders"), true);
+  assert.equal(schema.objects.some((object) => object.name === "oee_availability"), true);
   assert.equal(schema.objects.some((object) => "sql" in object), false);
 
   const sessions = await fetchContract(`${baseUrl}/api/sessions`, decodeSessionsResponse);
@@ -158,7 +157,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     id: "fake-session",
     title: "统计销售额",
     model: null,
-    tools: ["query_database", "execute_database"],
+    tools: ["execute_sql", "get_current_time"],
     streaming: false,
     messages: [
       { id: "user-1", role: "user", text: "统计销售额" },
@@ -168,7 +167,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
         text: "上海最高。",
         trace: [
           { type: "text", text: "先查询。" },
-          { type: "tool", id: "call-1", name: "query_database", isError: false },
+          { type: "tool", id: "call-1", name: "execute_sql", isError: false },
         ],
       },
     ],
@@ -188,7 +187,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     role: "assistant",
     content: [
       { type: "text", text: "先查询。" },
-      { type: "toolCall", id: "call-1", name: "query_database", arguments: { sql: "SELECT 1" } },
+      { type: "toolCall", id: "call-1", name: "execute_sql", arguments: { sql: "SELECT 1" } },
     ],
     stopReason: "toolUse",
   };
@@ -199,7 +198,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
   };
   const sessions: WebSessionPort = {
     status: () => ({
-      tools: ["query_database", "execute_database"],
+      tools: ["execute_sql", "get_current_time"],
       model: { provider: "test-provider", model: "test-model" },
       availableModelCount: 0,
       activeSessionCount: 1,
@@ -220,7 +219,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
         type: "message_update",
         assistantMessageEvent: {
           type: "toolcall_end",
-          toolCall: { id: "call-1", name: "query_database" },
+          toolCall: { id: "call-1", name: "execute_sql" },
         },
         message: intermediateMessage,
       } as AgentSessionEvent);
@@ -228,13 +227,13 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
       emit({
         type: "tool_execution_start",
         toolCallId: "call-1",
-        toolName: "query_database",
+        toolName: "execute_sql",
         args: {},
       } as AgentSessionEvent);
       emit({
         type: "tool_execution_end",
         toolCallId: "call-1",
-        toolName: "query_database",
+        toolName: "execute_sql",
         result: {},
         isError: false,
       } as AgentSessionEvent);
@@ -285,6 +284,6 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
   ]);
   assert.deepEqual(events.find((event) => event.event === "tool_end"), {
     event: "tool_end",
-    data: { turn: 0, id: "call-1", name: "query_database", isError: false },
+    data: { turn: 0, id: "call-1", name: "execute_sql", isError: false },
   });
 });

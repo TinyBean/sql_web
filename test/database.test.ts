@@ -2,18 +2,19 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
-import { DatabaseInputError, DemoDatabase } from "../src/database.ts";
+import { getCurrentTime } from "../src/database-tools.ts";
+import { AppDatabase, DatabaseInputError } from "../src/database.ts";
 import type { QueryResult } from "../src/database.ts";
 
 const projectRoot = process.cwd();
 
-function createFixture(t: TestContext): DemoDatabase {
+function createFixture(t: TestContext): AppDatabase {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-test-"));
-  const database = DemoDatabase.open({
-    filePath: path.join(directory, "demo.sqlite"),
+  const database = AppDatabase.open({
+    filePath: path.join(directory, "oee.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-    seedPath: path.join(projectRoot, "sql", "seed.sql"),
   });
   t.after(() => {
     database.close();
@@ -28,81 +29,100 @@ function firstRow(result: QueryResult): QueryResult["rows"][number] {
   return row;
 }
 
-test("initializes the demo schema and seed data", (t) => {
+test("returns the current time with UTC and local timezone values", () => {
+  const instant = new Date("2026-09-02T06:07:08.000Z");
+  const result = getCurrentTime(instant);
+
+  assert.equal(result.utc, "2026-09-02T06:07:08.000Z");
+  assert.ok(result.local.length > 0);
+  assert.ok(result.timezone.length > 0);
+});
+
+test("initializes the OEE schema without demo seed data", (t) => {
   const database = createFixture(t);
   const result = database.query(
-    "SELECT (SELECT COUNT(*) FROM customers) AS customers, (SELECT COUNT(*) FROM orders) AS orders",
+    "SELECT (SELECT COUNT(*) FROM oee_availability) AS availability, " +
+      "(SELECT COUNT(*) FROM oee_dut_utilization) AS dut",
   );
 
-  assert.deepEqual(result.columns, ["customers", "orders"]);
-  assert.deepEqual(result.rows, [{ customers: 8, orders: 12 }]);
-  assert.equal(database.getSchema().some((item) => item.name === "order_details"), true);
+  assert.deepEqual(result.columns, ["availability", "dut"]);
+  assert.deepEqual(result.rows, [{ availability: 0, dut: 0 }]);
+  assert.equal(database.getSchema().some((item) => item.name === "oee_data_status"), true);
 });
 
 test("supports positional parameters and enforces the row cap", (t) => {
   const database = createFixture(t);
   const result = database.query(
-    "SELECT id, name FROM products WHERE price >= ? ORDER BY price DESC",
+    `WITH records(id, name, amount) AS (
+       VALUES (1, 'A', 10), (2, 'B', 30), (3, 'C', 20)
+     ) SELECT id, name FROM records WHERE amount >= ? ORDER BY amount DESC`,
     [100],
     { maxRows: 2 },
   );
 
-  assert.equal(result.rowCount, 2);
-  assert.equal(result.truncated, true);
-  assert.deepEqual(result.rows[0], { id: 4, name: "27 英寸显示器" });
+  assert.equal(result.rowCount, 0);
+  assert.equal(result.truncated, false);
+
+  const capped = database.query(
+    "SELECT value FROM json_each('[1,2,3]') ORDER BY value",
+    [],
+    { maxRows: 2 },
+  );
+  assert.equal(capped.rowCount, 2);
+  assert.equal(capped.truncated, true);
 });
 
-test("keeps query_database read-only", (t) => {
+test("keeps SQL execution read-only", (t) => {
   const database = createFixture(t);
   assert.throws(
-    () => database.query("DELETE FROM products WHERE id = 1"),
+    () => database.query("DELETE FROM oee_ingestion_runs"),
     (error) => error instanceof DatabaseInputError && /只读 SQL/u.test(error.message),
   );
-  assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM products"))["count"], 10);
+  assert.throws(
+    () => database.query("DELETE FROM oee_ingestion_runs RETURNING id"),
+    /readonly database/u,
+  );
+  assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM oee_ingestion_runs"))["count"], 0);
 });
 
-test("execute commits allowed writes and rolls back invalid writes", (t) => {
+test("does not expose a writable database operation", (t) => {
   const database = createFixture(t);
-  const result = database.execute("UPDATE products SET stock = stock - ? WHERE id = ?", [2, 1]);
-  assert.equal(result.changes, 1);
-  assert.equal(firstRow(database.query("SELECT stock FROM products WHERE id = ?", [1]))["stock"], 34);
-
-  assert.throws(
-    () => database.execute("UPDATE products SET stock = -1 WHERE id = 1"),
-    /CHECK constraint failed/u,
-  );
-  assert.equal(firstRow(database.query("SELECT stock FROM products WHERE id = 1"))["stock"], 34);
+  assert.equal("execute" in database, false);
 });
 
-test("rejects DDL and multiple statements while accepting semicolons in strings", (t) => {
+test("rejects writes and multiple statements while accepting semicolons in strings", (t) => {
   const database = createFixture(t);
   assert.throws(
-    () => database.execute("DROP TABLE products"),
-    (error) => error instanceof DatabaseInputError && /只允许/u.test(error.message),
+    () => database.query("DROP TABLE oee_availability"),
+    (error) => error instanceof DatabaseInputError && /只读 SQL/u.test(error.message),
   );
   assert.throws(
-    () => database.query("SELECT 1; DELETE FROM products"),
+    () => database.query("SELECT 1; DELETE FROM oee_availability"),
     (error) => error instanceof DatabaseInputError && /一条 SQL/u.test(error.message),
   );
   assert.deepEqual(database.query("SELECT ';' AS value; -- trailing comment").rows, [{ value: ";" }]);
 });
 
-test("seed initialization is idempotent and preserves later changes", (t) => {
+test("schema initialization is idempotent and preserves imported state", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-idempotent-"));
   const options = {
-    filePath: path.join(directory, "demo.sqlite"),
+    filePath: path.join(directory, "oee.sqlite"),
     schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-    seedPath: path.join(projectRoot, "sql", "seed.sql"),
   };
-  const first = DemoDatabase.open(options);
-  first.execute("UPDATE products SET stock = ? WHERE id = ?", [31, 1]);
+  const first = AppDatabase.open(options);
   first.close();
-  const second = DemoDatabase.open(options);
+  const importer = new DatabaseSync(options.filePath);
+  importer.prepare(
+    `INSERT INTO oee_ingestion_runs (
+       dataset, source_kind, source_ref, requested_start_date, requested_end_date, status, started_at
+     ) VALUES ('availability', 'file', 'fixture.json', '2026-08-20', '2026-08-20', 'running', '2026-09-02T00:00:00Z')`,
+  ).run();
+  importer.close();
+  const second = AppDatabase.open(options);
   t.after(() => {
     second.close();
     rmSync(directory, { recursive: true, force: true });
   });
 
-  assert.equal(firstRow(second.query("SELECT stock FROM products WHERE id = 1"))["stock"], 31);
-  assert.equal(firstRow(second.query("SELECT COUNT(*) AS count FROM customers"))["count"], 8);
+  assert.equal(firstRow(second.query("SELECT COUNT(*) AS count FROM oee_ingestion_runs"))["count"], 1);
 });

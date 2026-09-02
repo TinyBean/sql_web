@@ -11,7 +11,7 @@
 - `execute_database` 只接受单条 `INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`，并使用事务。
 - 自动创建 SQLite 演示库，包含客户、商品、订单、订单明细以及一个明细视图。
 - 记录 Agent 会话、轮次、工具调用、重试和服务生命周期日志，并按天滚动。
-- 响应式 Web UI、Schema 查看器、示例业务问题和持久会话列表。
+- 响应式 Web UI、Schema 查看器、示例业务问题和可删除的持久会话列表。
 
 ## 模块设计
 

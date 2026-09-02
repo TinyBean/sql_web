@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   createAgentSession,
@@ -15,6 +16,7 @@ import type {
 import type {
   AgentStatus,
   ChatMessage,
+  ChatTraceItem,
   DatabaseToolName,
   ModelSelection,
   SerializedSession,
@@ -27,7 +29,6 @@ import type { AppLogger } from "./logger.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
-type SessionMessage = AgentSession["messages"][number];
 
 export interface AgentSessionStoreOptions {
   readonly database: DemoDatabase;
@@ -39,6 +40,17 @@ export interface AgentSessionStoreOptions {
 }
 
 type AgentProcessLogger = Pick<AppLogger, "info" | "warn" | "error">;
+
+export interface TranscriptSourceMessage {
+  readonly role: string;
+  readonly content?: unknown;
+  readonly timestamp?: number;
+  readonly errorMessage?: string;
+  readonly stopReason?: string;
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly isError?: boolean;
+}
 
 const NOOP_LOGGER: AgentProcessLogger = {
   info: () => {},
@@ -94,29 +106,150 @@ function createLockedResourceLoader(systemPrompt: string): ResourceLoader {
   };
 }
 
-function messageText(message: SessionMessage | undefined): string {
+function messageText(message: TranscriptSourceMessage | undefined): string {
   if (!message || !("content" in message)) return "";
   const { content } = message;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .map((part) => (part.type === "text" ? part.text : ""))
+    .map((part) => (
+      typeof part === "object" && part !== null && "type" in part && part.type === "text" &&
+        "text" in part && typeof part.text === "string"
+        ? part.text
+        : ""
+    ))
     .join("");
 }
 
-function serializeMessages(messages: readonly SessionMessage[]): ChatMessage[] {
-  const transcript: ChatMessage[] = [];
-  for (const message of messages) {
-    if (message.role !== "user" && message.role !== "assistant") continue;
-    const text = messageText(message) || (message.role === "assistant" ? message.errorMessage : "");
-    if (!text?.trim()) continue;
-    transcript.push({
-      id: `${message.role}-${transcript.length + 1}`,
-      role: message.role,
-      text,
-      ...(message.timestamp === undefined ? {} : { timestamp: message.timestamp }),
-    });
+interface ToolCallSummary {
+  readonly id: string;
+  readonly name: string;
+}
+
+interface ResponseAccumulator {
+  readonly trace: ChatTraceItem[];
+  hasFinal: boolean;
+  finalText: string;
+  finalTimestamp: number | undefined;
+  fallbackText: string;
+  fallbackTimestamp: number | undefined;
+}
+
+function contentParts(message: TranscriptSourceMessage): readonly unknown[] {
+  return Array.isArray(message.content) ? message.content : [];
+}
+
+function toolCallSummary(part: unknown): ToolCallSummary | null {
+  if (
+    typeof part !== "object" || part === null || !("type" in part) ||
+    part.type !== "toolCall" || !("id" in part) || typeof part.id !== "string" ||
+    !("name" in part) || typeof part.name !== "string"
+  ) return null;
+  return { id: part.id, name: part.name };
+}
+
+function appendTraceText(trace: ChatTraceItem[], text: string): void {
+  if (!text) return;
+  const previous = trace.at(-1);
+  if (previous?.type === "text") {
+    trace[trace.length - 1] = { type: "text", text: previous.text + text };
+  } else {
+    trace.push({ type: "text", text });
   }
+}
+
+function newResponseAccumulator(): ResponseAccumulator {
+  return {
+    trace: [],
+    hasFinal: false,
+    finalText: "",
+    finalTimestamp: undefined,
+    fallbackText: "",
+    fallbackTimestamp: undefined,
+  };
+}
+
+export function serializeMessages(messages: readonly TranscriptSourceMessage[]): ChatMessage[] {
+  const transcript: ChatMessage[] = [];
+  const toolErrors = new Map<string, boolean>();
+  for (const message of messages) {
+    if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+      toolErrors.set(message.toolCallId, message.isError === true);
+    }
+  }
+
+  let response: ResponseAccumulator | null = null;
+  const flushResponse = (): void => {
+    if (!response) return;
+    const text = response.hasFinal ? response.finalText : response.fallbackText;
+    if (text.trim() || response.trace.length) {
+      const timestamp = response.hasFinal
+        ? response.finalTimestamp
+        : response.fallbackTimestamp;
+      transcript.push({
+        id: `assistant-${transcript.length + 1}`,
+        role: "assistant",
+        text,
+        ...(timestamp === undefined ? {} : { timestamp }),
+        ...(response.trace.length ? { trace: response.trace } : {}),
+      });
+    }
+    response = null;
+  };
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      flushResponse();
+      const text = messageText(message);
+      if (!text.trim()) continue;
+      transcript.push({
+        id: `user-${transcript.length + 1}`,
+        role: "user",
+        text,
+        ...(message.timestamp === undefined ? {} : { timestamp: message.timestamp }),
+      });
+      response = newResponseAccumulator();
+      continue;
+    }
+    if (message.role !== "assistant" || !response) continue;
+
+    const parts = contentParts(message);
+    const toolCalls = parts.map(toolCallSummary).filter((tool): tool is ToolCallSummary => tool !== null);
+    const text = messageText(message);
+    const successfulFinal = toolCalls.length === 0 &&
+      (message.stopReason === "stop" || message.stopReason === "length");
+    if (successfulFinal) {
+      response.hasFinal = true;
+      response.finalText = text;
+      response.finalTimestamp = message.timestamp;
+      continue;
+    }
+    if (toolCalls.length) {
+      for (const part of parts) {
+        const tool = toolCallSummary(part);
+        if (tool) {
+          response.trace.push({
+            type: "tool",
+            id: tool.id,
+            name: tool.name,
+            isError: toolErrors.get(tool.id) ?? true,
+          });
+        } else if (
+          typeof part === "object" && part !== null && "type" in part && part.type === "text" &&
+          "text" in part && typeof part.text === "string"
+        ) {
+          appendTraceText(response.trace, part.text);
+        }
+      }
+      continue;
+    }
+    const fallback = text || message.errorMessage || "";
+    if (fallback.trim()) {
+      response.fallbackText = fallback;
+      response.fallbackTimestamp = message.timestamp;
+    }
+  }
+  flushResponse();
   return transcript;
 }
 
@@ -142,6 +275,10 @@ function validatedDatabaseToolNames(names: readonly string[]): DatabaseToolName[
     throw new Error(`Agent 工具白名单校验失败：${names.join(", ")}`);
   }
   return names.filter(isDatabaseToolName);
+}
+
+function errorHasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 export class AgentSessionStore {
@@ -266,6 +403,48 @@ export class AgentSessionStore {
 
   async getSerialized(id: string): Promise<SerializedSession> {
     return this.serialize(await this.get(id));
+  }
+
+  async delete(id: string): Promise<void> {
+    this.#assertValidId(id);
+    const infos = await SessionManager.list(this.#cwd, this.#sessionDir);
+    const info = infos.find((candidate) => candidate.id === id);
+    const session = this.#sessions.get(id);
+    if (!info && !session) throw new SessionNotFoundError(id);
+    if (session?.isStreaming) throw new SessionBusyError();
+
+    const filePath = info ? path.resolve(info.path) : null;
+    if (filePath) {
+      const relativePath = path.relative(this.#sessionDir, filePath);
+      if (
+        !relativePath || relativePath === ".." ||
+        relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)
+      ) {
+        throw new Error(`会话文件不在持久化目录中：${filePath}`);
+      }
+    }
+
+    const unsubscribe = this.#unsubscribers.get(id);
+    if (unsubscribe) unsubscribe();
+    session?.dispose();
+    this.#unsubscribers.delete(id);
+    this.#sessions.delete(id);
+    this.#sessionTimes.delete(id);
+    for (const key of this.#toolStartedAt.keys()) {
+      if (key.startsWith(`${id}:`)) this.#toolStartedAt.delete(key);
+    }
+
+    if (filePath) {
+      try {
+        await unlink(filePath);
+      } catch (error) {
+        if (!errorHasCode(error, "ENOENT")) throw error;
+      }
+    }
+    this.#logger.info("agent.session.deleted", {
+      sessionId: id,
+      persisted: filePath !== null,
+    });
   }
 
   async prompt(id: string, text: string): Promise<void> {

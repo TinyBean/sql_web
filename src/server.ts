@@ -1,3 +1,4 @@
+import path from "node:path";
 import { AgentSessionStore } from "./agent-sessions.ts";
 import { loadConfig, loadProjectEnvironment } from "./config.ts";
 import { DemoDatabase } from "./database.ts";
@@ -30,7 +31,13 @@ const sessions = await AgentSessionStore.open({
   database.close();
   throw error;
 });
-const server = createWebServer({ database, sessions, publicDir: config.publicDir, logger });
+const server = createWebServer({
+  database,
+  sessions,
+  publicDir: config.publicDir,
+  vendorDir: path.join(config.projectRoot, "node_modules"),
+  logger,
+});
 
 server.once("error", (error) => {
   logger.error("system.server.error", error);
@@ -42,9 +49,6 @@ server.once("error", (error) => {
 server.listen(config.port, config.host, () => {
   logger.info("system.started", { host: config.host, port: config.port });
   console.log(`数据库问答网站已启动：http://${config.host}:${config.port}`);
-  console.log(`SQLite：${config.databasePath}`);
-  console.log(`模型：${config.model.provider}/${config.model.model}（${config.agentDir}）`);
-  console.log("Agent 工具：query_database, execute_database（原生工具已禁用）");
   console.log(`日志：${config.logDir}/sql-web-YYYY-MM-DD.log`);
 });
 

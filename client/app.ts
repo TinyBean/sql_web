@@ -1,6 +1,7 @@
 import type {
   ChatMessage,
   ChatRole,
+  ChatTraceItem,
   MessageRequest,
   ParsedSseEvent,
   SchemaObject,
@@ -9,6 +10,7 @@ import type {
 } from "../shared/contracts.ts";
 import {
   decodeAbortResponse,
+  decodeDeleteSessionResponse,
   decodeHealthResponse,
   decodeSchemaResponse,
   decodeSerializedSession,
@@ -18,6 +20,15 @@ import {
   parseJson,
   type Decoder,
 } from "./api-contracts.ts";
+import {
+  createStreamPresentation,
+  formatToolStatusText,
+  reduceStreamPresentation,
+  settleStreamPresentation,
+  type StreamPresentation,
+  type StreamToolStatus,
+} from "./stream-state.ts";
+import { renderMarkdownInto } from "./markdown.ts";
 
 interface ElementConstructor<ElementType extends Element> {
   readonly prototype: ElementType;
@@ -58,14 +69,17 @@ interface StreamNode {
   article: HTMLElement;
   body: HTMLDivElement;
   text: HTMLDivElement;
-  tools: HTMLDivElement;
-  typing: HTMLDivElement | null;
+  thoughts: HTMLDetailsElement;
+  thoughtSummary: HTMLElement;
+  thoughtItems: HTMLDivElement;
+  presentation: StreamPresentation | null;
 }
 
 interface ClientState {
   sessionId: string | null;
   sessions: readonly SessionSummary[];
   activeStream: ActiveStream | null;
+  deletingSessionId: string | null;
   toastTimer: number | null;
 }
 
@@ -78,6 +92,7 @@ const state: ClientState = {
   sessionId: null,
   sessions: [],
   activeStream: null,
+  deletingSessionId: null,
   toastTimer: null,
 };
 
@@ -150,6 +165,8 @@ function renderSessions(): void {
   }
 
   for (const session of state.sessions) {
+    const row = document.createElement("div");
+    row.className = "session-row";
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-item${session.id === state.sessionId ? " active" : ""}`;
@@ -158,7 +175,20 @@ function renderSessions(): void {
       createSvg([{ d: "M7 17.5 4 20v-4.5a8 8 0 1 1 3 2Z" }]),
       Object.assign(document.createElement("span"), { textContent: session.title || "新会话" }),
     );
-    elements.sessionList.append(button);
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "session-delete";
+    deleteButton.dataset["deleteSessionId"] = session.id;
+    deleteButton.title = `删除会话：${session.title || "新会话"}`;
+    deleteButton.setAttribute("aria-label", deleteButton.title);
+    deleteButton.disabled = state.deletingSessionId === session.id ||
+      state.activeStream?.sessionId === session.id;
+    deleteButton.append(createSvg([
+      { d: "M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" },
+      { d: "M10 11v5M14 11v5" },
+    ]));
+    row.append(button, deleteButton);
+    elements.sessionList.append(row);
   }
 }
 
@@ -205,7 +235,82 @@ function ensureMessageStream(): HTMLElement {
   return stream;
 }
 
-function appendMessage(role: ChatRole, text = "", streaming = false): StreamNode {
+function createToolChip(name: string, status: StreamToolStatus): HTMLSpanElement {
+  const chip = document.createElement("span");
+  chip.className = `tool-chip ${status}`;
+  const toolName = document.createElement("span");
+  toolName.className = "tool-name";
+  toolName.textContent = name;
+  const separator = document.createElement("span");
+  separator.className = "tool-separator";
+  separator.textContent = "·";
+  const toolStatus = document.createElement("span");
+  toolStatus.className = "tool-status";
+  toolStatus.textContent = formatToolStatusText(name, status);
+  chip.append(toolName, separator, toolStatus);
+  return chip;
+}
+
+function createTraceText(text: string): HTMLDivElement {
+  const item = document.createElement("div");
+  item.className = "thought-text markdown-content";
+  renderMarkdownInto(item, text);
+  return item;
+}
+
+function renderHistoricalTrace(node: StreamNode, trace: readonly ChatTraceItem[]): void {
+  node.thoughtItems.replaceChildren();
+  for (const item of trace) {
+    node.thoughtItems.append(
+      item.type === "text"
+        ? createTraceText(item.text)
+        : createToolChip(item.name, item.isError ? "error" : "done"),
+    );
+  }
+  node.thoughtSummary.textContent = "思考过程";
+  node.thoughts.hidden = trace.length === 0;
+  node.thoughts.open = false;
+}
+
+function renderStreamPresentation(
+  node: StreamNode,
+  previous: StreamPresentation | null,
+): void {
+  const presentation = node.presentation;
+  if (!presentation) return;
+  const children: HTMLElement[] = presentation.items.map((item) => (
+    item.type === "text"
+      ? createTraceText(item.text)
+      : createToolChip(item.name, item.status)
+  ));
+  if (presentation.waiting) {
+    const typing = document.createElement("div");
+    typing.className = "typing";
+    typing.setAttribute("aria-label", "正在思考");
+    typing.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
+    children.push(typing);
+  }
+  node.thoughtItems.replaceChildren(...children);
+  renderMarkdownInto(node.text, presentation.finalText);
+  node.thoughts.hidden = children.length === 0;
+  if (presentation.failed) {
+    node.thoughtSummary.textContent = "思考过程";
+    node.thoughts.open = true;
+  } else if (presentation.finalized) {
+    node.thoughtSummary.textContent = "思考过程";
+    if (!previous?.finalized) node.thoughts.open = false;
+  } else {
+    node.thoughtSummary.textContent = "思考中";
+    node.thoughts.open = true;
+  }
+}
+
+function appendMessage(
+  role: ChatRole,
+  text = "",
+  streaming = false,
+  trace: readonly ChatTraceItem[] = [],
+): StreamNode {
   const article = document.createElement("article");
   article.className = `message ${role}`;
   const avatar = document.createElement("div");
@@ -223,30 +328,36 @@ function appendMessage(role: ChatRole, text = "", streaming = false): StreamNode
   const label = document.createElement("div");
   label.className = "message-label";
   label.textContent = "DataLens";
-  const tools = document.createElement("div");
-  tools.className = "tool-events";
+  const thoughts = document.createElement("details");
+  thoughts.className = "thoughts";
+  thoughts.hidden = true;
+  const thoughtSummary = document.createElement("summary");
+  thoughtSummary.textContent = "思考过程";
+  const thoughtItems = document.createElement("div");
+  thoughtItems.className = "thought-items";
+  thoughts.append(thoughtSummary, thoughtItems);
   const messageText = document.createElement("div");
-  messageText.className = "message-text";
-  messageText.textContent = text;
-  body.append(label, tools, messageText);
-  let typing: HTMLDivElement | null = null;
-  if (streaming) {
-    typing = document.createElement("div");
-    typing.className = "typing";
-    typing.setAttribute("aria-label", "正在思考");
-    typing.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
-    body.append(typing);
-  }
+  messageText.className = role === "assistant" ? "message-text markdown-content" : "message-text";
+  if (role === "assistant") renderMarkdownInto(messageText, text);
+  else messageText.textContent = text;
+  body.append(label);
+  if (role === "assistant") body.append(thoughts);
+  body.append(messageText);
   article.append(avatar, body);
   ensureMessageStream().append(article);
   elements.messages.scrollTop = elements.messages.scrollHeight;
-  return {
+  const node: StreamNode = {
     article,
     body,
     text: messageText,
-    tools,
-    typing,
+    thoughts,
+    thoughtSummary,
+    thoughtItems,
+    presentation: streaming ? createStreamPresentation() : null,
   };
+  if (trace.length) renderHistoricalTrace(node, trace);
+  if (node.presentation) renderStreamPresentation(node, null);
+  return node;
 }
 
 function renderTranscript(messages: readonly ChatMessage[]): void {
@@ -258,7 +369,9 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
     elements.messages.replaceChildren(elements.welcome);
     return;
   }
-  for (const message of messages) appendMessage(message.role, message.text);
+  for (const message of messages) {
+    appendMessage(message.role, message.text, false, message.trace ?? []);
+  }
 }
 
 function setActiveStream(activeStream: ActiveStream | null): void {
@@ -268,6 +381,7 @@ function setActiveStream(activeStream: ActiveStream | null): void {
   elements.sendButton.setAttribute("aria-label", streaming ? "停止回答" : "发送问题");
   elements.input.disabled = streaming;
   elements.newChatButton.disabled = streaming;
+  renderSessions();
 }
 
 function applySession(session: SerializedSession): void {
@@ -306,6 +420,49 @@ async function loadSession(id: string): Promise<void> {
   closeSidebar();
 }
 
+function clearSessionView(): void {
+  state.sessionId = null;
+  history.replaceState(null, "", `${location.pathname}${location.search}`);
+  renderTranscript([]);
+  renderSessions();
+  closeSidebar();
+  elements.input.focus();
+}
+
+async function deleteSession(id: string): Promise<void> {
+  if (state.deletingSessionId) return;
+  if (state.activeStream?.sessionId === id) {
+    showToast("该会话正在回答，请先停止回答再删除");
+    return;
+  }
+  const session = state.sessions.find((item) => item.id === id);
+  if (!session) return;
+  if (!window.confirm(`确定删除会话“${session.title || "新会话"}”吗？此操作不可恢复。`)) return;
+
+  state.deletingSessionId = id;
+  renderSessions();
+  try {
+    await api(
+      `/api/sessions/${encodeURIComponent(id)}`,
+      decodeDeleteSessionResponse,
+      { method: "DELETE" },
+    );
+    const deletedCurrentSession = state.sessionId === id;
+    state.sessions = state.sessions.filter((item) => item.id !== id);
+    if (deletedCurrentSession) {
+      clearSessionView();
+      const nextSession = state.sessions[0];
+      if (nextSession) await loadSession(nextSession.id);
+    } else {
+      renderSessions();
+    }
+    showToast("会话已删除");
+  } finally {
+    state.deletingSessionId = null;
+    renderSessions();
+  }
+}
+
 function parseSseBlock(block: string): ParsedSseEvent | null {
   let event = "message";
   const dataLines: string[] = [];
@@ -321,31 +478,16 @@ function handleStreamEvent(
   parsed: Exclude<ParsedSseEvent, { event: "done" }>,
   node: StreamNode,
 ): void {
-  if (parsed.event === "text_delta") {
-    node.typing?.remove();
-    node.typing = null;
-    node.text.textContent += parsed.data.delta;
-  } else if (parsed.event === "tool_start") {
-    node.typing?.remove();
-    node.typing = null;
-    const chip = document.createElement("span");
-    chip.className = "tool-chip";
-    chip.dataset["toolId"] = parsed.data.id;
-    chip.textContent = parsed.data.name === "query_database" ? "正在查询数据库" : "正在修改数据库";
-    node.tools.append(chip);
-  } else if (parsed.event === "tool_end") {
-    const chip = node.tools.querySelector(
-      `[data-tool-id="${CSS.escape(parsed.data.id)}"]`,
-    );
-    if (chip) {
-      chip.classList.add(parsed.data.isError ? "error" : "done");
-      chip.textContent = parsed.data.isError ? "数据库操作失败" : "数据库操作完成";
-    }
-  } else if (parsed.event === "status") {
+  if (parsed.event === "status") {
     showToast(parsed.data.message);
-  } else if (parsed.event === "error") {
-    node.typing?.remove();
-    node.typing = null;
+  } else {
+    const previous = node.presentation ?? createStreamPresentation();
+    node.presentation = reduceStreamPresentation(previous, parsed);
+    renderStreamPresentation(node, previous);
+    if (parsed.event !== "error") {
+      elements.messages.scrollTop = elements.messages.scrollHeight;
+      return;
+    }
     const error = document.createElement("div");
     error.className = "message-error";
     error.textContent = parsed.data.message;
@@ -353,6 +495,13 @@ function handleStreamEvent(
     showToast(parsed.data.message);
   }
   elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+function settleStreamNode(node: StreamNode): void {
+  if (!node.presentation) return;
+  const previous = node.presentation;
+  node.presentation = settleStreamPresentation(previous);
+  renderStreamPresentation(node, previous);
 }
 
 async function streamQuestion(
@@ -404,9 +553,13 @@ async function submitQuestion(question: string): Promise<void> {
 
   try {
     const completed = await streamQuestion(message, activeStream);
-    streamNode.typing?.remove();
+    settleStreamNode(streamNode);
     if (completed) {
       state.sessionId = completed.id;
+      if (!streamNode.presentation?.finalText) {
+        const finalMessage = completed.messages.findLast((item) => item.role === "assistant");
+        if (finalMessage) renderMarkdownInto(streamNode.text, finalMessage.text);
+      }
       await refreshSessions();
     }
   } catch (error) {
@@ -476,6 +629,13 @@ elements.newChatButton.addEventListener("click", () => {
 });
 elements.sessionList.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
+  const deleteCandidate = event.target.closest("[data-delete-session-id]");
+  const deleteButton = deleteCandidate instanceof HTMLButtonElement ? deleteCandidate : null;
+  const deleteSessionId = deleteButton?.dataset["deleteSessionId"];
+  if (deleteSessionId) {
+    void deleteSession(deleteSessionId).catch((error) => showToast(messageFromUnknown(error)));
+    return;
+  }
   const candidate = event.target.closest("[data-session-id]");
   const button = candidate instanceof HTMLElement ? candidate : null;
   const sessionId = button?.dataset["sessionId"];

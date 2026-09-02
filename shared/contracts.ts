@@ -1,11 +1,26 @@
 export type ChatRole = "user" | "assistant";
 export type DatabaseToolName = "query_database" | "execute_database";
 
+export interface ChatTraceText {
+  readonly type: "text";
+  readonly text: string;
+}
+
+export interface ChatTraceTool {
+  readonly type: "tool";
+  readonly id: string;
+  readonly name: string;
+  readonly isError: boolean;
+}
+
+export type ChatTraceItem = ChatTraceText | ChatTraceTool;
+
 export interface ChatMessage {
   readonly id: string;
   readonly role: ChatRole;
   readonly text: string;
   readonly timestamp?: number;
+  readonly trace?: readonly ChatTraceItem[];
 }
 
 export interface ModelDescriptor {
@@ -86,10 +101,17 @@ export interface AbortResponse {
   readonly ok: true;
 }
 
+export interface DeleteSessionResponse {
+  readonly ok: true;
+}
+
 export interface SseEventMap {
-  text_delta: { delta: string };
-  tool_start: { id: string; name: string };
-  tool_end: { id: string; name: string; isError: boolean };
+  turn_start: { turn: number };
+  text_delta: { turn: number; delta: string };
+  tool_call: { turn: number; id: string; name: string };
+  tool_start: { turn: number; id: string; name: string };
+  tool_end: { turn: number; id: string; name: string; isError: boolean };
+  turn_end: { turn: number; final: boolean };
   status: { message: string };
   error: { message: string };
   done: SerializedSession;
@@ -104,6 +126,7 @@ export type ParsedSseEvent = {
 
 export type JsonResponseBody =
   | AbortResponse
+  | DeleteSessionResponse
   | ErrorResponse
   | HealthResponse
   | SchemaResponse

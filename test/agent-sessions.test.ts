@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { AgentSessionStore } from "../src/agent-sessions.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { AgentSessionStore, SessionNotFoundError } from "../src/agent-sessions.ts";
 import { DemoDatabase } from "../src/database.ts";
 
 const projectRoot = process.cwd();
@@ -56,4 +57,28 @@ test("maps a web session directly to a Pi session with only database tools", asy
   const listed = await store.list();
   assert.equal(listed.length, 1);
   assert.equal(listed[0]?.id, created.id);
+
+  await store.delete(created.id);
+  assert.deepEqual(await store.list(), []);
+  await assert.rejects(() => store.get(created.id), SessionNotFoundError);
+
+  const sessionDir = path.join(directory, "sessions");
+  const persistedManager = SessionManager.create(directory, sessionDir);
+  const persistedId = persistedManager.getSessionId();
+  const persistedPath = persistedManager.getSessionFile();
+  assert.ok(persistedPath);
+  writeFileSync(persistedPath, `${JSON.stringify({
+    type: "session",
+    version: 3,
+    id: persistedId,
+    timestamp: new Date().toISOString(),
+    cwd: directory,
+  })}\n`);
+  assert.equal(existsSync(persistedPath), true);
+  assert.equal((await store.list()).some((item) => item.id === persistedId), true);
+
+  await store.delete(persistedId);
+  assert.equal(existsSync(persistedPath), false);
+  assert.equal((await store.list()).some((item) => item.id === persistedId), false);
+  await assert.rejects(() => store.get(persistedId), SessionNotFoundError);
 });

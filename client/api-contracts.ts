@@ -2,7 +2,9 @@ import type {
   AbortResponse,
   ChatMessage,
   ChatRole,
+  ChatTraceItem,
   DatabaseToolName,
+  DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
   ModelDescriptor,
@@ -67,6 +69,25 @@ function chatRole(value: unknown, path: string): ChatRole {
   return value === "user" || value === "assistant" ? value : invalid(path, "聊天角色");
 }
 
+function chatTraceItem(value: unknown, path: string): ChatTraceItem {
+  const item = record(value, path);
+  if (item["type"] === "text") {
+    return {
+      type: "text",
+      text: string(item["text"], `${path}.text`),
+    };
+  }
+  if (item["type"] === "tool") {
+    return {
+      type: "tool",
+      id: string(item["id"], `${path}.id`),
+      name: string(item["name"], `${path}.name`),
+      isError: boolean(item["isError"], `${path}.isError`),
+    };
+  }
+  return invalid(`${path}.type`, "text 或 tool");
+}
+
 function databaseToolName(value: unknown, path: string): DatabaseToolName {
   return value === "query_database" || value === "execute_database"
     ? value
@@ -80,6 +101,7 @@ function schemaObjectType(value: unknown, path: string): "table" | "view" {
 function chatMessage(value: unknown, path: string): ChatMessage {
   const item = record(value, path);
   const timestamp = item["timestamp"];
+  const trace = item["trace"];
   return {
     id: string(item["id"], `${path}.id`),
     role: chatRole(item["role"], `${path}.role`),
@@ -87,6 +109,9 @@ function chatMessage(value: unknown, path: string): ChatMessage {
     ...(timestamp === undefined
       ? {}
       : { timestamp: nonNegativeInteger(timestamp, `${path}.timestamp`) }),
+    ...(trace === undefined
+      ? {}
+      : { trace: array(trace, `${path}.trace`, chatTraceItem) }),
   };
 }
 
@@ -195,6 +220,15 @@ export const decodeAbortResponse: Decoder<AbortResponse> = (value, path = "$abor
   return { ok: true };
 };
 
+export const decodeDeleteSessionResponse: Decoder<DeleteSessionResponse> = (
+  value,
+  path = "$deleteSession",
+) => {
+  const item = record(value, path);
+  if (item["ok"] !== true) invalid(`${path}.ok`, "true");
+  return { ok: true };
+};
+
 export const decodeErrorResponse: Decoder<ErrorResponse> = (value, path = "$error") => {
   const item = record(value, path);
   return { error: string(item["error"], `${path}.error`) };
@@ -212,13 +246,23 @@ export function errorMessageFromResponse(value: unknown): string | undefined {
 export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | null {
   const path = `$sse.${event}`;
   const data = record(value, path);
-  if (event === "text_delta") {
-    return { event, data: { delta: string(data["delta"], `${path}.delta`) } };
+  if (event === "turn_start") {
+    return { event, data: { turn: nonNegativeInteger(data["turn"], `${path}.turn`) } };
   }
-  if (event === "tool_start") {
+  if (event === "text_delta") {
     return {
       event,
       data: {
+        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
+        delta: string(data["delta"], `${path}.delta`),
+      },
+    };
+  }
+  if (event === "tool_call" || event === "tool_start") {
+    return {
+      event,
+      data: {
+        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
         id: string(data["id"], `${path}.id`),
         name: string(data["name"], `${path}.name`),
       },
@@ -228,9 +272,19 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
     return {
       event,
       data: {
+        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
         id: string(data["id"], `${path}.id`),
         name: string(data["name"], `${path}.name`),
         isError: boolean(data["isError"], `${path}.isError`),
+      },
+    };
+  }
+  if (event === "turn_end") {
+    return {
+      event,
+      data: {
+        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
+        final: boolean(data["final"], `${path}.final`),
       },
     };
   }

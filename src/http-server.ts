@@ -7,6 +7,7 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type {
   AbortResponse,
   AgentStatus,
+  DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
   JsonResponseBody,
@@ -22,11 +23,23 @@ import { DatabaseInputError } from "./database.ts";
 import type { DemoDatabase } from "./database.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
-const STATIC_FILES = new Map<string, readonly [filename: string, contentType: string]>([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/app.js", ["generated/client/app.js", "text/javascript; charset=utf-8"]],
-  ["/api-contracts.js", ["generated/client/api-contracts.js", "text/javascript; charset=utf-8"]],
-  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+type StaticFileRoot = "public" | "vendor";
+
+interface StaticFile {
+  readonly root: StaticFileRoot;
+  readonly filename: string;
+  readonly contentType: string;
+}
+
+const STATIC_FILES = new Map<string, StaticFile>([
+  ["/", { root: "public", filename: "index.html", contentType: "text/html; charset=utf-8" }],
+  ["/app.js", { root: "public", filename: "generated/client/app.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/api-contracts.js", { root: "public", filename: "generated/client/api-contracts.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/markdown.js", { root: "public", filename: "generated/client/markdown.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/stream-state.js", { root: "public", filename: "generated/client/stream-state.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/styles.css", { root: "public", filename: "styles.css", contentType: "text/css; charset=utf-8" }],
+  ["/vendor/marked.js", { root: "vendor", filename: "marked/lib/marked.umd.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/vendor/dompurify.js", { root: "vendor", filename: "dompurify/dist/purify.min.js", contentType: "text/javascript; charset=utf-8" }],
 ]);
 
 interface Logger {
@@ -43,6 +56,7 @@ export interface WebSessionPort {
   create(): Promise<SerializedSession>;
   get(id: string): Promise<StreamableAgentSession>;
   getSerialized(id: string): Promise<SerializedSession>;
+  delete(id: string): Promise<void>;
   prompt(id: string, text: string): Promise<void>;
   abort(id: string): Promise<void>;
 }
@@ -56,6 +70,7 @@ export interface WebServerOptions {
   database: DemoDatabase;
   sessions: WebSessionPort;
   publicDir: string;
+  vendorDir: string;
   logger?: Logger;
 }
 
@@ -130,25 +145,83 @@ function writeSse<EventName extends keyof SseEventMap>(
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-function streamAgentEvent(response: ServerResponse, event: AgentSessionEvent): void {
-  if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-    writeSse(response, "text_delta", { delta: event.assistantMessageEvent.delta });
-  } else if (event.type === "tool_execution_start") {
-    writeSse(response, "tool_start", {
-      id: event.toolCallId,
-      name: event.toolName,
-    });
-  } else if (event.type === "tool_execution_end") {
-    writeSse(response, "tool_end", {
-      id: event.toolCallId,
-      name: event.toolName,
-      isError: event.isError,
-    });
-  } else if (event.type === "auto_retry_start") {
-    writeSse(response, "status", {
-      message: `请求失败，正在进行第 ${event.attempt} 次重试…`,
-    });
+interface ToolCallEventData {
+  readonly id: string;
+  readonly name: string;
+}
+
+function messageToolCalls(message: unknown): ToolCallEventData[] {
+  if (
+    typeof message !== "object" || message === null || !("role" in message) ||
+    message.role !== "assistant" || !("content" in message) || !Array.isArray(message.content)
+  ) return [];
+  const calls: ToolCallEventData[] = [];
+  for (const part of message.content) {
+    if (
+      typeof part === "object" && part !== null && "type" in part && part.type === "toolCall" &&
+      "id" in part && typeof part.id === "string" &&
+      "name" in part && typeof part.name === "string"
+    ) calls.push({ id: part.id, name: part.name });
   }
+  return calls;
+}
+
+function isFinalTurnMessage(message: unknown): boolean {
+  return typeof message === "object" && message !== null &&
+    "role" in message && message.role === "assistant" &&
+    "stopReason" in message && (message.stopReason === "stop" || message.stopReason === "length") &&
+    messageToolCalls(message).length === 0;
+}
+
+function createAgentEventStreamer(response: ServerResponse): (event: AgentSessionEvent) => void {
+  let turn = -1;
+  let announcedToolCalls = new Set<string>();
+  const announceToolCall = (call: ToolCallEventData): void => {
+    if (announcedToolCalls.has(call.id)) return;
+    announcedToolCalls.add(call.id);
+    writeSse(response, "tool_call", { turn, ...call });
+  };
+
+  return (event) => {
+    if (event.type === "turn_start") {
+      turn += 1;
+      announcedToolCalls = new Set<string>();
+      writeSse(response, "turn_start", { turn });
+    } else if (event.type === "message_update") {
+      if (event.assistantMessageEvent.type === "text_delta") {
+        writeSse(response, "text_delta", { turn, delta: event.assistantMessageEvent.delta });
+      } else if (event.assistantMessageEvent.type === "toolcall_end") {
+        announceToolCall({
+          id: event.assistantMessageEvent.toolCall.id,
+          name: event.assistantMessageEvent.toolCall.name,
+        });
+      }
+    } else if (event.type === "message_end") {
+      for (const call of messageToolCalls(event.message)) announceToolCall(call);
+    } else if (event.type === "tool_execution_start") {
+      writeSse(response, "tool_start", {
+        turn,
+        id: event.toolCallId,
+        name: event.toolName,
+      });
+    } else if (event.type === "tool_execution_end") {
+      writeSse(response, "tool_end", {
+        turn,
+        id: event.toolCallId,
+        name: event.toolName,
+        isError: event.isError,
+      });
+    } else if (event.type === "turn_end") {
+      writeSse(response, "turn_end", {
+        turn,
+        final: isFinalTurnMessage(event.message),
+      });
+    } else if (event.type === "auto_retry_start") {
+      writeSse(response, "status", {
+        message: `请求失败，正在进行第 ${event.attempt} 次重试…`,
+      });
+    }
+  };
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -163,14 +236,19 @@ function errorStatus(error: unknown): number {
   return 500;
 }
 
-async function serveStatic(response: ServerResponse, publicDir: string, pathname: string): Promise<boolean> {
+async function serveStatic(
+  response: ServerResponse,
+  publicDir: string,
+  vendorDir: string,
+  pathname: string,
+): Promise<boolean> {
   const target = STATIC_FILES.get(pathname);
   if (!target) return false;
-  const [filename, contentType] = target;
-  const filePath = path.join(publicDir, filename);
+  const rootDir = target.root === "public" ? publicDir : vendorDir;
+  const filePath = path.join(rootDir, target.filename);
   const metadata = await stat(filePath);
   response.writeHead(200, {
-    ...securityHeaders(contentType),
+    ...securityHeaders(target.contentType),
     "Content-Length": metadata.size,
   });
   createReadStream(filePath).pipe(response);
@@ -187,11 +265,11 @@ function decodeSessionId(match: RegExpExecArray): string {
   }
 }
 
-export function createWebServer({ database, sessions, publicDir, logger = console }: WebServerOptions): Server {
+export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console }: WebServerOptions): Server {
   return http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     try {
-      if (request.method === "GET" && (await serveStatic(response, publicDir, url.pathname))) return;
+      if (request.method === "GET" && (await serveStatic(response, publicDir, vendorDir, url.pathname))) return;
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         const body = {
@@ -228,6 +306,11 @@ export function createWebServer({ database, sessions, publicDir, logger = consol
         json(response, 200, await sessions.getSerialized(decodeSessionId(sessionMatch)));
         return;
       }
+      if (request.method === "DELETE" && sessionMatch) {
+        await sessions.delete(decodeSessionId(sessionMatch));
+        json(response, 200, { ok: true } satisfies DeleteSessionResponse);
+        return;
+      }
 
       const messageMatch = /^\/api\/sessions\/([^/]+)\/messages$/u.exec(url.pathname);
       if (request.method === "POST" && messageMatch) {
@@ -242,7 +325,7 @@ export function createWebServer({ database, sessions, publicDir, logger = consol
           "X-Accel-Buffering": "no",
         });
         response.flushHeaders();
-        const unsubscribe = session.subscribe((event) => streamAgentEvent(response, event));
+        const unsubscribe = session.subscribe(createAgentEventStreamer(response));
         try {
           await sessions.prompt(id, body.message);
           writeSse(response, "done", await sessions.getSerialized(id));

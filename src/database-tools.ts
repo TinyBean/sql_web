@@ -33,7 +33,7 @@ export function createAgentTools(database: AppDatabase) {
     name: "execute_sql",
     label: "执行只读 SQL",
     description:
-      "Execute exactly one read-only SQLite SQL statement and return its columns and rows. This tool cannot insert, update, or delete data. Use ? placeholders with the optional parameters array. Results are capped at 200 rows.",
+      "Execute exactly one read-only SQLite query and return its columns and rows. The SQL is reviewed before execution; writes, DDL, and state-changing PRAGMAs are rejected. Use ? placeholders with the optional parameters array. Results are capped at 200 rows.",
     promptSnippet: "执行一条只读 SQLite 查询并返回结构化结果",
     executionMode: "sequential",
     parameters: Type.Object({

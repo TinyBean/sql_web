@@ -5,7 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { getCurrentTime } from "../src/database-tools.ts";
-import { AppDatabase, DatabaseInputError } from "../src/database.ts";
+import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../src/database.ts";
 import type { QueryResult } from "../src/database.ts";
 
 const projectRoot = process.cwd();
@@ -76,13 +76,52 @@ test("keeps SQL execution read-only", (t) => {
   const database = createFixture(t);
   assert.throws(
     () => database.query("DELETE FROM oee_ingestion_runs"),
-    (error) => error instanceof DatabaseInputError && /只读 SQL/u.test(error.message),
+    (error) => error instanceof DatabaseInputError && /仅允许执行/u.test(error.message),
   );
   assert.throws(
     () => database.query("DELETE FROM oee_ingestion_runs RETURNING id"),
-    /readonly database/u,
+    (error) => error instanceof DatabaseInputError && /仅允许执行/u.test(error.message),
   );
   assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM oee_ingestion_runs"))["count"], 0);
+});
+
+test("reviews SQL statement types before execution", () => {
+  const queries = [
+    "SELECT 1",
+    "-- leading comment\nWITH rows(value) AS (VALUES (1)) SELECT value FROM rows",
+    "WITH RECURSIVE numbers(value) AS (VALUES (1)) SELECT value FROM numbers",
+    "VALUES (1), (2)",
+    "EXPLAIN SELECT 1",
+    "EXPLAIN QUERY PLAN WITH rows(value) AS (VALUES (1)) SELECT value FROM rows",
+    "PRAGMA table_info('oee_availability')",
+    "PRAGMA main.index_list(oee_availability)",
+    "PRAGMA user_version",
+  ];
+  for (const sql of queries) assert.doesNotThrow(() => assertReadOnlyQuery(sql), sql);
+
+  const nonQueries = [
+    "INSERT INTO example VALUES (1)",
+    "UPDATE example SET value = 1 RETURNING value",
+    "DELETE FROM example RETURNING value",
+    "REPLACE INTO example VALUES (1)",
+    "WITH rows(value) AS (VALUES (1)) DELETE FROM example RETURNING value",
+    "EXPLAIN DELETE FROM example",
+    "CREATE TABLE example(value INTEGER)",
+    "ALTER TABLE example ADD COLUMN other INTEGER",
+    "DROP TABLE example",
+    "VACUUM",
+    "ATTACH DATABASE 'other.sqlite' AS other",
+    "PRAGMA user_version = 1",
+    "PRAGMA user_version(1)",
+    "PRAGMA foreign_keys = OFF",
+  ];
+  for (const sql of nonQueries) {
+    assert.throws(
+      () => assertReadOnlyQuery(sql),
+      (error) => error instanceof DatabaseInputError && /仅允许执行/u.test(error.message),
+      sql,
+    );
+  }
 });
 
 test("does not expose a writable database operation", (t) => {
@@ -94,7 +133,7 @@ test("rejects writes and multiple statements while accepting semicolons in strin
   const database = createFixture(t);
   assert.throws(
     () => database.query("DROP TABLE oee_availability"),
-    (error) => error instanceof DatabaseInputError && /只读 SQL/u.test(error.message),
+    (error) => error instanceof DatabaseInputError && /仅允许执行/u.test(error.message),
   );
   assert.throws(
     () => database.query("SELECT 1; DELETE FROM oee_availability"),

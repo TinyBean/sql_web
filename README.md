@@ -153,7 +153,7 @@ npm test
 
 ## 安全边界
 
-- `execute_sql` 使用只读 SQLite 连接，只接受一条返回结果集的查询，单次最多返回 200 行。
+- `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝，单次最多返回 200 行。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
 - 创建 Agent 会话时会把当前表和视图的 SQLite DDL 注入 system prompt；数据内容仍必须通过查询工具获取。
 - Agent 不加载项目工具、技能或上下文文件。

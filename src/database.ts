@@ -16,6 +16,12 @@ type ScannerState =
   | "backtick"
   | "bracket";
 
+interface SqlToken {
+  readonly kind: "word" | "symbol";
+  readonly value: string;
+  readonly depth: number;
+}
+
 export interface DatabaseOptions {
   readonly filePath: string;
   readonly schemaPath: string;
@@ -35,6 +41,35 @@ export interface QueryResult {
 const DEFAULT_MAX_ROWS = 100;
 const ABSOLUTE_MAX_ROWS = 200;
 const MAX_SQL_BYTES = 20_000;
+const QUERY_KEYWORDS = new Set(["SELECT", "VALUES"]);
+const STATEMENT_KEYWORDS = new Set(["SELECT", "VALUES", "INSERT", "UPDATE", "DELETE", "REPLACE"]);
+const READ_ONLY_PRAGMAS_WITHOUT_ARGUMENTS = new Set([
+  "APPLICATION_ID",
+  "COLLATION_LIST",
+  "COMPILE_OPTIONS",
+  "DATA_VERSION",
+  "DATABASE_LIST",
+  "FOREIGN_KEYS",
+  "FREELIST_COUNT",
+  "FUNCTION_LIST",
+  "MODULE_LIST",
+  "PAGE_COUNT",
+  "PRAGMA_LIST",
+  "SCHEMA_VERSION",
+  "USER_VERSION",
+]);
+const READ_ONLY_PRAGMAS_WITH_OPTIONAL_ARGUMENTS = new Set([
+  "FOREIGN_KEY_CHECK",
+  "FOREIGN_KEY_LIST",
+  "INDEX_INFO",
+  "INDEX_LIST",
+  "INDEX_XINFO",
+  "INTEGRITY_CHECK",
+  "QUICK_CHECK",
+  "TABLE_INFO",
+  "TABLE_LIST",
+  "TABLE_XINFO",
+]);
 
 export class DatabaseInputError extends Error {
   constructor(message: string) {
@@ -124,6 +159,162 @@ export function assertSingleStatement(sql: string): void {
   }
 }
 
+function tokenizeSql(sql: string): SqlToken[] {
+  const tokens: SqlToken[] = [];
+  let state: ScannerState = "normal";
+  let depth = 0;
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql.charAt(index);
+    const next = sql.charAt(index + 1);
+
+    if (state === "line-comment") {
+      if (char === "\n" || char === "\r") state = "normal";
+      continue;
+    }
+    if (state === "block-comment") {
+      if (char === "*" && next === "/") {
+        state = "normal";
+        index += 1;
+      }
+      continue;
+    }
+    if (state === "single-quote") {
+      if (char === "'" && next === "'") index += 1;
+      else if (char === "'") state = "normal";
+      continue;
+    }
+    if (state === "double-quote") {
+      if (char === '"' && next === '"') index += 1;
+      else if (char === '"') state = "normal";
+      continue;
+    }
+    if (state === "backtick") {
+      if (char === "`" && next === "`") index += 1;
+      else if (char === "`") state = "normal";
+      continue;
+    }
+    if (state === "bracket") {
+      if (char === "]") state = "normal";
+      continue;
+    }
+
+    if (char === "-" && next === "-") {
+      state = "line-comment";
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      state = "block-comment";
+      index += 1;
+      continue;
+    }
+    if (char === "'") {
+      state = "single-quote";
+      continue;
+    }
+    if (char === '"') {
+      state = "double-quote";
+      continue;
+    }
+    if (char === "`") {
+      state = "backtick";
+      continue;
+    }
+    if (char === "[") {
+      state = "bracket";
+      continue;
+    }
+    if (/[A-Za-z_]/u.test(char)) {
+      let end = index + 1;
+      while (/[A-Za-z0-9_$]/u.test(sql.charAt(end))) end += 1;
+      tokens.push({ kind: "word", value: sql.slice(index, end).toUpperCase(), depth });
+      index = end - 1;
+      continue;
+    }
+    if (char === "(") {
+      tokens.push({ kind: "symbol", value: char, depth });
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      tokens.push({ kind: "symbol", value: char, depth });
+      continue;
+    }
+    if (char === "." || char === "=" || char === ",") {
+      tokens.push({ kind: "symbol", value: char, depth });
+    }
+  }
+
+  return tokens;
+}
+
+function mainStatementKeyword(tokens: readonly SqlToken[], start: number): string | undefined {
+  const first = tokens[start];
+  if (first?.kind !== "word") return undefined;
+  if (first.value !== "WITH") return first.value;
+
+  for (let index = start + 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token?.kind === "word" && token.depth === 0 && STATEMENT_KEYWORDS.has(token.value)) {
+      return token.value;
+    }
+  }
+  return undefined;
+}
+
+function isReadOnlyPragma(tokens: readonly SqlToken[]): boolean {
+  let nameIndex = 1;
+  if (
+    tokens[1]?.kind === "word" && tokens[2]?.value === "." && tokens[3]?.kind === "word"
+  ) {
+    nameIndex = 3;
+  }
+  const name = tokens[nameIndex];
+  if (name?.kind !== "word") return false;
+
+  const remaining = tokens.slice(nameIndex + 1);
+  if (remaining.some((token) => token.value === "=")) return false;
+  if (remaining.length === 0) {
+    return READ_ONLY_PRAGMAS_WITHOUT_ARGUMENTS.has(name.value) ||
+      READ_ONLY_PRAGMAS_WITH_OPTIONAL_ARGUMENTS.has(name.value);
+  }
+  return READ_ONLY_PRAGMAS_WITH_OPTIONAL_ARGUMENTS.has(name.value) &&
+    remaining[0]?.value === "(" && remaining.at(-1)?.value === ")";
+}
+
+/** Reject every statement that is not an explicitly recognized read-only query. */
+export function assertReadOnlyQuery(sql: string): void {
+  assertSingleStatement(sql);
+  const tokens = tokenizeSql(sql);
+  const first = tokens[0];
+  let allowed = false;
+
+  if (first?.kind === "word" && first.value === "PRAGMA") {
+    allowed = isReadOnlyPragma(tokens);
+  } else {
+    let statementStart = 0;
+    if (first?.kind === "word" && first.value === "EXPLAIN") {
+      statementStart = 1;
+      if (tokens[statementStart]?.value === "QUERY") {
+        if (tokens[statementStart + 1]?.value !== "PLAN") statementStart = -1;
+        else statementStart += 2;
+      }
+    }
+    if (statementStart >= 0) {
+      const keyword = mainStatementKeyword(tokens, statementStart);
+      allowed = keyword !== undefined && QUERY_KEYWORDS.has(keyword);
+    }
+  }
+
+  if (!allowed) {
+    throw new DatabaseInputError(
+      "SQL 工具仅允许执行 SELECT、WITH、VALUES、只读 PRAGMA 或对应的 EXPLAIN 查询",
+    );
+  }
+}
+
 function normalizeParameter(value: SqlParameter): BoundSqlParameter {
   if (typeof value === "boolean") return value ? 1 : 0;
   return value;
@@ -201,7 +392,7 @@ export class AppDatabase {
 
   query(sql: string, parameters?: readonly SqlParameter[], options: QueryOptions = {}): QueryResult {
     const { reader } = this.#connections();
-    assertSingleStatement(sql);
+    assertReadOnlyQuery(sql);
     const requestedLimit = Number(options.maxRows ?? DEFAULT_MAX_ROWS);
     const maxRows = Number.isInteger(requestedLimit)
       ? Math.min(Math.max(requestedLimit, 1), ABSOLUTE_MAX_ROWS)

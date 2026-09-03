@@ -104,7 +104,7 @@ function buildSystemPrompt(schema: readonly SchemaObject[], codeInterpreterAvail
   const codeInterpreterRules = codeInterpreterAvailable
     ? `
 10. 少量查询结果优先使用 execute_sql 的默认 inline 模式。需要对大量明细做额外计算或渲染时，使用 output_format="json_file"，再把返回的 fileUri 原样传给 code_interpreter.input_json。
-11. 只有 SQL 和当前时间工具无法完成精确计算、统计方法或 PNG 渲染时才调用 code_interpreter。Python 中通过 input_data 读取输入，使用 print() 返回计算结果，使用 emit_image() 输出 Matplotlib Figure 或 Pillow Image；精确小数计算优先使用 decimal.Decimal。Matplotlib 已自动配置简体中文字体；Pillow 绘制中文时使用全局函数 chinese_font(size)，粗体使用 chinese_font(size, bold=True)。
+11. 只有 SQL 和当前时间工具无法完成精确计算、统计方法或 PNG 渲染时才调用 code_interpreter。
 12. code_interpreter 是禁网且与项目隔离的临时沙箱，不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
 13. emit_image() 生成的 PNG 会由前端自动附加并持久化。回答中不得虚构 artifact://image.png、sandbox 路径或其他 Markdown 图片地址。`
     : "";

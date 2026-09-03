@@ -69,6 +69,14 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
   assert.match(piSession.systemPrompt, /execute_sql 只允许执行一条会返回结果集的只读 SQL/u);
   assert.match(piSession.systemPrompt, /get_current_time/u);
   assert.match(piSession.systemPrompt, /code_interpreter\.input_json/u);
+  assert.doesNotMatch(piSession.systemPrompt, /SimHei|matplotlib_chinese_font|chinese_font/u);
+
+  const codeInterpreterDefinition = piSession.getToolDefinition("code_interpreter");
+  assert.ok(codeInterpreterDefinition);
+  assert.match(codeInterpreterDefinition.description, /Simplified Chinese system font/u);
+  assert.match(codeInterpreterDefinition.description, /do not replace.*SimHei/u);
+  assert.match(codeInterpreterDefinition.description, /matplotlib_chinese_font\(size\)/u);
+  assert.match(codeInterpreterDefinition.description, /chinese_font\(size\)/u);
 
   const listed = await store.list();
   assert.equal(listed.length, 1);

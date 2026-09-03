@@ -160,7 +160,7 @@ npm test
 - `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝。
 - 默认 `output_format="inline"` 直接返回最多 200 行。`output_format="json_file"` 会流式写入最多 100,000 行或 32 MiB 的 JSON，并返回当前会话专属的 `artifact://` 地址。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
-- `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址。输入在 Python 中为 `input_data`；文本通过 `print()` 返回，Matplotlib/Pillow 图片通过 `emit_image()` 返回。Matplotlib 会优先使用 `Noto Sans CJK SC` 简体中文字体；Pillow 可通过 `chinese_font(size)` 或 `chinese_font(size, bold=True)` 获取常规/粗体字体。
+- `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址。输入在 Python 中为 `input_data`；文本通过 `print()` 返回，Matplotlib/Pillow 图片通过 `emit_image()` 返回。Matplotlib 会优先使用系统的 `Noto Sans CJK SC` 简体中文字体，显式字体可通过 `matplotlib_chinese_font(size, bold=True)` 获取；Pillow 可通过 `chinese_font(size)` 或 `chinese_font(size, bold=True)` 获取常规/粗体字体。
 - Python 使用 bubblewrap、seccomp 和 prlimit 隔离：无法访问数据库、项目目录、其他会话产物或网络，并限制执行时间、内存、进程和输出大小。
 - SQL JSON 文件随会话跨轮次、跨重启保留，删除会话时同步删除；文件不通过 HTTP 提供下载。
 - 创建 Agent 会话时会把当前表和视图的 SQLite DDL 注入 system prompt；数据内容仍必须通过查询工具获取。

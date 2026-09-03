@@ -146,7 +146,7 @@ export function createAgentTools(
     name: "code_interpreter",
     label: "执行受限 Python",
     description:
-      "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text and emit_image() for Matplotlib Figure or Pillow Image output. Matplotlib is preconfigured with a Simplified Chinese font; use chinese_font(size) or chinese_font(size, bold=True) for Chinese Pillow text. Emitted PNGs are attached to the answer automatically; never invent a Markdown image URL. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
+      "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text and emit_image() for Matplotlib Figure or Pillow Image output. Matplotlib is preconfigured with a Simplified Chinese system font: do not replace it with hard-coded font families such as SimHei. When explicit Matplotlib font properties are needed, use matplotlib_chinese_font(size), or matplotlib_chinese_font(size, bold=True) for bold text. For Chinese Pillow text, use chinese_font(size), or chinese_font(size, bold=True) for bold text. Emitted PNGs are attached to the answer automatically; never invent a Markdown image URL. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
     promptSnippet: "在严格沙箱中执行 Python，进行额外计算、统计或 PNG 图表渲染",
     executionMode: "sequential",
     parameters: Type.Object({

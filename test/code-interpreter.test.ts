@@ -73,11 +73,14 @@ test("renders Chinese text with the sandbox-provided Matplotlib and Pillow fonts
   const result = await runtime.execute(
     [
       "import matplotlib.pyplot as plt",
+      "from matplotlib.font_manager import FontProperties",
       "from PIL import Image, ImageDraw",
       "figure, axis = plt.subplots(figsize=(4, 3))",
       "axis.bar(['运行', '停机'], [8, 2])",
-      "axis.set_title('设备时间分布', fontweight='bold')",
+      "axis.set_title('设备时间分布', fontproperties=FontProperties(family='SimHei', weight='bold'))",
       "axis.set_ylabel('小时')",
+      "axis.set_xlabel('生产日期', fontproperties=matplotlib_chinese_font(12, bold=True))",
+      "plt.tight_layout()",
       "emit_image(figure)",
       "canvas = Image.new('RGB', (320, 100), 'white')",
       "ImageDraw.Draw(canvas).text((12, 28), '中文设备状态', font=chinese_font(28, bold=True), fill='black')",
@@ -90,6 +93,7 @@ test("renders Chinese text with the sandbox-provided Matplotlib and Pillow fonts
   );
   assert.match(result.details.stdout, /Noto Sans CJK SC|Droid Sans Fallback|WenQuanYi/u);
   assert.doesNotMatch(result.details.stdout, /Noto Sans CJK JP/u);
+  assert.doesNotMatch(result.details.stderr, /Font family 'SimHei' not found/u);
   assert.doesNotMatch(result.details.stderr, /Glyph .* missing from current font/u);
   assert.equal(result.details.images.length, 2);
 });

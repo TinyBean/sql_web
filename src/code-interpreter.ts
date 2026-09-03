@@ -100,11 +100,13 @@ _CJK_REGULAR_FONT_PATH = "/fonts/chinese-regular.otf"
 _CJK_BOLD_FONT_PATH = "/fonts/chinese-bold.otf"
 
 def _configure_chinese_font():
+    import copy
     import matplotlib
     from matplotlib import font_manager
     from matplotlib.ft2font import FT2Font
 
     required_characters = "中文设备运行停机"
+    registered_fonts = []
     for font_path in (_CJK_REGULAR_FONT_PATH, _CJK_BOLD_FONT_PATH):
         if not os.path.isfile(font_path):
             raise RuntimeError("code_interpreter 中文字体文件不存在")
@@ -112,10 +114,21 @@ def _configure_chinese_font():
         if not all(ord(character) in character_map for character in required_characters):
             raise RuntimeError("code_interpreter 中文字体覆盖不完整")
         font_manager.fontManager.addfont(font_path)
+        registered_fonts.append(next(
+            entry for entry in reversed(font_manager.fontManager.ttflist)
+            if entry.fname == font_path
+        ))
     family = font_manager.FontProperties(fname=_CJK_REGULAR_FONT_PATH).get_name()
+    for alias_name in ("SimHei",):
+        for registered_font in registered_fonts:
+            alias = copy.copy(registered_font)
+            alias.name = alias_name
+            font_manager.fontManager.ttflist.append(alias)
+    font_manager.fontManager._findfont_cached.cache_clear()
     matplotlib.rcParams["font.family"] = "sans-serif"
     matplotlib.rcParams["font.sans-serif"] = [family, "DejaVu Sans"]
     matplotlib.rcParams["axes.unicode_minus"] = False
+    font_manager.fontManager.defaultFamily["ttf"] = family
     return family
 
 CJK_FONT_FAMILY = _configure_chinese_font()
@@ -127,6 +140,34 @@ def chinese_font(size=20, bold=False):
     from PIL import ImageFont
     font_path = CJK_BOLD_FONT_PATH if bold else CJK_FONT_PATH
     return ImageFont.truetype(font_path, size=int(size))
+
+def matplotlib_chinese_font(size=None, bold=False):
+    """Return Matplotlib font properties backed by the bundled system CJK font."""
+    from matplotlib.font_manager import FontProperties
+    font_path = CJK_BOLD_FONT_PATH if bold else CJK_FONT_PATH
+    return FontProperties(fname=font_path, size=size)
+
+def _contains_cjk_text(value):
+    return any(
+        "\u3400" <= character <= "\u4dbf"
+        or "\u4e00" <= character <= "\u9fff"
+        or "\uf900" <= character <= "\ufaff"
+        for character in value
+    )
+
+def _apply_chinese_font_to_figure(figure):
+    from matplotlib.text import Text
+
+    bold_names = {"bold", "heavy", "semibold", "demibold", "demi", "black", "extra bold"}
+    for artist in figure.findobj(match=Text):
+        if not _contains_cjk_text(artist.get_text()):
+            continue
+        weight = artist.get_fontweight()
+        bold = (
+            isinstance(weight, (int, float)) and weight >= 600
+            or str(weight).lower() in bold_names
+        )
+        artist.set_fontproperties(matplotlib_chinese_font(artist.get_fontsize(), bold=bold))
 
 _emitted_figure_ids = set()
 _image_count = 0
@@ -156,6 +197,7 @@ def emit_image(value):
     except ImportError:
         Image = None
     if Figure is not None and isinstance(value, Figure):
+        _apply_chinese_font_to_figure(value)
         value.savefig(filename, format="png", bbox_inches="tight", dpi=120)
         _emitted_figure_ids.add(id(value))
     elif Image is not None and isinstance(value, Image.Image):
@@ -174,6 +216,7 @@ namespace = {
     "CJK_BOLD_FONT_PATH": CJK_BOLD_FONT_PATH,
     "CJK_FONT_FAMILY": CJK_FONT_FAMILY,
     "chinese_font": chinese_font,
+    "matplotlib_chinese_font": matplotlib_chinese_font,
 }
 with open("/input/code.py", "r", encoding="utf-8") as code_file:
     source = code_file.read()

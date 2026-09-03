@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
-import { getCurrentTime } from "../src/database-tools.ts";
-import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../src/database.ts";
-import type { QueryResult } from "../src/database.ts";
+import { getCurrentTime } from "../../src/server/agent/database-tools.ts";
+import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../../src/server/data/database.ts";
+import type { QueryResult } from "../../src/server/data/database.ts";
 
 const projectRoot = process.cwd();
 

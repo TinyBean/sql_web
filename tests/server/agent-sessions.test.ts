@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { AgentSessionStore, SessionNotFoundError } from "../src/agent-sessions.ts";
-import { ArtifactStore } from "../src/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../src/code-interpreter.ts";
-import { AppDatabase } from "../src/database.ts";
+import { AgentSessionStore, SessionNotFoundError } from "../../src/server/agent/agent-sessions.ts";
+import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
+import { AppDatabase } from "../../src/server/data/database.ts";
 
 const projectRoot = process.cwd();
 

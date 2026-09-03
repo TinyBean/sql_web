@@ -13,15 +13,15 @@
     "build:client": "tsc -p tsconfig.client.json",
     "build": "npm run clean && npm run build:server && npm run build:client",
     "dev": "tsx scripts/dev.ts",
-    "dev:server": "tsx watch src/server.ts",
+    "dev:server": "tsx watch src/server/main.ts",
     "dev:client": "tsc -p tsconfig.client.json --watch --preserveWatchOutput",
     "data": "tsx scripts/oee-data.ts",
     "data:import": "tsx scripts/oee-data.ts import",
     "data:pull": "tsx scripts/oee-data.ts pull",
     "data:sync": "tsx scripts/oee-data.ts sync",
     "data:status": "tsx scripts/oee-data.ts status",
-    "start": "npm run build && node --enable-source-maps dist/src/server.js",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "start": "npm run build && node --enable-source-maps dist/src/server/main.js",
+    "test": "npm run build && node --test dist/tests/**/*.test.js",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "dependencies": {

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { DailyFileLogger, FileLogger } from "../src/logger.ts";
+import { DailyFileLogger, FileLogger } from "../../src/server/logger.ts";
 
 function readEntries(filename: string): unknown[] {
   return readFileSync(filename, "utf8")

@@ -6,7 +6,7 @@ import test from "node:test";
 import {
   assertModelInLocalCatalog,
   LocalModelCatalogError,
-} from "../src/local-model-catalog.ts";
+} from "../../src/server/agent/local-model-catalog.ts";
 
 test("accepts models declared in the project-local model store", (t) => {
   const agentDir = mkdtempSync(path.join(tmpdir(), "sqlite-qa-models-"));

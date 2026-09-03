@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { DatabaseSync } from "node:sqlite";
-import type { AppLogger } from "./logger.ts";
+import type { AppLogger } from "../logger.ts";
 
 export const OEE_DATASETS = ["availability", "dut_utilization"] as const;
 export type OeeDataset = (typeof OEE_DATASETS)[number];

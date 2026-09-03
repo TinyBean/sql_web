@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { SchemaObject } from "../shared/contracts.ts";
+import type { SchemaObject } from "../../shared/contracts.ts";
 
 export type SqlParameter = string | number | bigint | boolean | null | Uint8Array;
 type BoundSqlParameter = Exclude<SqlParameter, boolean>;

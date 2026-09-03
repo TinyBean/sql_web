@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isRuntimeImagePlaceholder } from "../client/image-placeholders.ts";
+import { isRuntimeImagePlaceholder } from "../../src/client/image-placeholders.ts";
 
 test("recognizes interpreter-only image placeholders without replacing real URLs", () => {
   assert.equal(isRuntimeImagePlaceholder("artifact://image.png"), true);

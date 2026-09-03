@@ -23,13 +23,13 @@ import type {
   SerializedSession,
   SessionSummary,
   SchemaObject,
-} from "../shared/contracts.ts";
-import type { AppDatabase } from "./database.ts";
+} from "../../shared/contracts.ts";
+import type { AppDatabase } from "../data/database.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import type { CodeInterpreterRuntime } from "./code-interpreter.ts";
 import { activeAgentToolNames, createAgentTools } from "./database-tools.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
-import type { AppLogger } from "./logger.ts";
+import type { AppLogger } from "../logger.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;

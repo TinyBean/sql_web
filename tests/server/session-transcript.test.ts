@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   serializeMessages,
   type TranscriptSourceMessage,
-} from "../src/agent-sessions.ts";
+} from "../../src/server/agent/agent-sessions.ts";
 
 test("groups agent turns into one answer with an ordered persisted trace", () => {
   const messages: TranscriptSourceMessage[] = [

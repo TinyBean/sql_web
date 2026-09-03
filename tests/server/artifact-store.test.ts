@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { ArtifactInputError, ArtifactStore } from "../src/artifact-store.ts";
+import { ArtifactInputError, ArtifactStore } from "../../src/server/agent/artifact-store.ts";
 
 test("creates durable session-scoped JSON artifacts and deletes them with the session", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-artifacts-"));

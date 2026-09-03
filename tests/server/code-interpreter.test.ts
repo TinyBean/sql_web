@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
-import { ArtifactStore } from "../src/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../src/code-interpreter.ts";
+import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
 
 const projectRoot = process.cwd();
 let runtime: CodeInterpreterRuntime;

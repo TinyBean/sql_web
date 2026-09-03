@@ -1,8 +1,8 @@
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
-import { FileLogger } from "../src/logger.ts";
-import { OeeDataStore, parseOeeDataset } from "../src/oee-data.ts";
+import { FileLogger } from "../src/server/logger.ts";
+import { OeeDataStore, parseOeeDataset } from "../src/server/data/oee-data.ts";
 
 const projectRoot = path.basename(path.resolve(import.meta.dirname, "..")) === "dist"
   ? path.resolve(import.meta.dirname, "../..")
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   }
   const databasePath = path.resolve(
     projectRoot,
-    process.env["SQL_WEB_DB_PATH"] ?? fileEnvironment["SQL_WEB_DB_PATH"] ?? ".data/oee.sqlite",
+    process.env["SQL_WEB_DB_PATH"] ?? fileEnvironment["SQL_WEB_DB_PATH"] ?? ".data/database/oee.sqlite",
   );
   const apiBaseUrl = process.env["OEE_API_BASE_URL"] ?? fileEnvironment["OEE_API_BASE_URL"];
   const store = OeeDataStore.open({

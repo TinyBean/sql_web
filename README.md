@@ -2,6 +2,27 @@
 
 一个使用严格 TypeScript 构建的本地 OEE 数据问答应用。浏览器中的每个会话对应一个持久化 Agent session；Agent 可以调用受限的只读 SQLite 查询、当前时间和严格隔离的 Python 代码解释器。
 
+## 项目结构
+
+```text
+src/
+├── client/          # 浏览器端交互、渲染和接口解码
+├── server/
+│   ├── agent/       # Agent 会话、工具、产物与代码解释器
+│   ├── data/        # SQLite 访问与 OEE 数据管道
+│   ├── config.ts    # 环境与运行配置
+│   ├── http-server.ts
+│   ├── logger.ts
+│   └── main.ts      # 服务端入口
+└── shared/          # 浏览器端与服务端共享的数据契约
+tests/
+├── client/          # 浏览器端测试
+└── server/          # 服务端测试
+public/              # HTML、样式及生成的浏览器脚本
+scripts/             # 开发、清理和数据命令入口
+sql/                 # SQLite schema
+```
+
 ## 数据链路
 
 ```text
@@ -16,7 +37,7 @@ OEE HTTP API / 本地 JSON
    └─ 月度汇总刷新
           │
           ▼
-   .data/oee.sqlite
+   .data/database/oee.sqlite
    ├─ OEE 事实表
    ├─ DUT 大字段 Payload 表
    ├─ 月度汇总表
@@ -143,7 +164,7 @@ npm test
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | HTTP 监听地址 |
 | `PORT` | `3000` | HTTP 端口 |
-| `SQL_WEB_DB_PATH` | `.data/oee.sqlite` | SQLite 文件位置 |
+| `SQL_WEB_DB_PATH` | `.data/database/oee.sqlite` | SQLite 文件位置 |
 | `SQL_WEB_SESSION_DIR` | `.data/sessions` | Agent session 目录 |
 | `SQL_WEB_ARTIFACT_DIR` | `.data/artifacts` | 会话级 SQL JSON 产物目录 |
 | `SQL_WEB_PYTHON_PATH` | `/usr/bin/python3` | 代码解释器使用的 Python |

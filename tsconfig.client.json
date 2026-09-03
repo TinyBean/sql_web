@@ -3,12 +3,12 @@
   "compilerOptions": {
     "module": "ES2022",
     "moduleResolution": "Bundler",
-    "rootDir": ".",
+    "rootDir": "src",
     "outDir": "public/generated",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": [],
     "sourceMap": false
   },
-  "include": ["client/**/*.ts", "shared/**/*.ts"],
+  "include": ["src/client/**/*.ts", "src/shared/**/*.ts"],
   "exclude": ["dist", "node_modules", "public/generated"]
 }

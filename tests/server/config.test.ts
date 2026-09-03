@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig, loadProjectEnvironment } from "../src/config.ts";
+import { loadConfig, loadProjectEnvironment } from "../../src/server/config.ts";
 
 test("loads the selected model from the project environment file", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));

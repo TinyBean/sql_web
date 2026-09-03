@@ -10,6 +10,6 @@
     "sourceMap": true,
     "inlineSources": true
   },
-  "include": ["src/**/*.ts", "shared/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
+  "include": ["src/server/**/*.ts", "src/shared/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

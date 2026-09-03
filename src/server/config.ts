@@ -37,9 +37,10 @@ export interface AppConfig {
 }
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.basename(path.dirname(moduleDirectory)) === "dist"
-  ? path.resolve(moduleDirectory, "../..")
-  : path.resolve(moduleDirectory, "..");
+const sourceRoot = path.resolve(moduleDirectory, "../..");
+const projectRoot = path.basename(sourceRoot) === "dist"
+  ? path.resolve(sourceRoot, "..")
+  : sourceRoot;
 
 function resolveProjectPath(value: string | undefined, fallback: string): string {
   return path.resolve(projectRoot, value ?? fallback);
@@ -94,7 +95,7 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     projectRoot,
     host: env.HOST?.trim() || "127.0.0.1",
     port: parsePort(env.PORT),
-    databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/oee.sqlite"),
+    databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/database/oee.sqlite"),
     sessionDir: resolveProjectPath(env.SQL_WEB_SESSION_DIR, ".data/sessions"),
     artifactDir: resolveProjectPath(env.SQL_WEB_ARTIFACT_DIR, ".data/artifacts"),
     publicDir: path.join(projectRoot, "public"),

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import type { ModelSelection } from "../shared/contracts.ts";
+import type { ModelSelection } from "../../shared/contracts.ts";
 
 export class LocalModelCatalogError extends Error {
   constructor(message: string, options?: ErrorOptions) {

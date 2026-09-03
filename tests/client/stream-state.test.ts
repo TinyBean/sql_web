@@ -4,7 +4,7 @@ import {
   createStreamPresentation,
   formatToolStatusText,
   reduceStreamPresentation,
-} from "../client/stream-state.ts";
+} from "../../src/client/stream-state.ts";
 
 test("formats raw tool names with every execution status", () => {
   assert.deepEqual(

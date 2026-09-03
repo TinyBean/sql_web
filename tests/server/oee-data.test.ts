@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import type { AppLogger } from "../src/logger.ts";
-import { FileLogger } from "../src/logger.ts";
-import { OeeDataStore } from "../src/oee-data.ts";
+import type { AppLogger } from "../../src/server/logger.ts";
+import { FileLogger } from "../../src/server/logger.ts";
+import { OeeDataStore } from "../../src/server/data/oee-data.ts";
 
 const projectRoot = process.cwd();
 

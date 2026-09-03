@@ -3,10 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ArtifactStore } from "../src/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../src/code-interpreter.ts";
-import { createAgentTools } from "../src/database-tools.ts";
-import { AppDatabase } from "../src/database.ts";
+import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
+import { createAgentTools } from "../../src/server/agent/database-tools.ts";
+import { AppDatabase } from "../../src/server/data/database.ts";
 
 const projectRoot = process.cwd();
 

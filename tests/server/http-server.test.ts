@@ -13,14 +13,14 @@ import {
   decodeSessionsResponse,
   parseJson,
   type Decoder,
-} from "../client/api-contracts.ts";
-import { AppDatabase } from "../src/database.ts";
+} from "../../src/client/api-contracts.ts";
+import { AppDatabase } from "../../src/server/data/database.ts";
 import {
   createWebServer,
   type StreamableAgentSession,
   type WebSessionPort,
-} from "../src/http-server.ts";
-import type { ParsedSseEvent, SerializedSession } from "../shared/contracts.ts";
+} from "../../src/server/http-server.ts";
+import type { ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
 
 const projectRoot = process.cwd();
 

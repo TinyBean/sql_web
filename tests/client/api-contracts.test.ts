@@ -7,7 +7,7 @@ import {
   decodeSchemaResponse,
   decodeSerializedSession,
   decodeSseEvent,
-} from "../client/api-contracts.ts";
+} from "../../src/client/api-contracts.ts";
 
 const validSession = {
   id: "session-12345678",

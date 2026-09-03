@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream, mkdirSync, readFileSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { mkdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { DatabaseSync } from "node:sqlite";
-import type { AppLogger } from "../logger.ts";
+import type { AppLogger } from "../../src/server/logger.ts";
 
 export const OEE_DATASETS = ["availability", "dut_utilization"] as const;
 export type OeeDataset = (typeof OEE_DATASETS)[number];
@@ -28,7 +28,6 @@ interface DateWindow {
 
 export interface OeeDataStoreOptions {
   readonly databasePath: string;
-  readonly schemaPath: string;
   readonly apiBaseUrl?: string;
   readonly requestTimeoutMs?: number;
   readonly fetchRetries?: number;
@@ -543,7 +542,6 @@ export class OeeDataStore {
   static open(options: OeeDataStoreOptions): OeeDataStore {
     const resolved: Required<OeeDataStoreOptions> = {
       databasePath: path.resolve(options.databasePath),
-      schemaPath: path.resolve(options.schemaPath),
       apiBaseUrl: options.apiBaseUrl ?? DEFAULT_API_BASE_URL,
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       fetchRetries: options.fetchRetries ?? DEFAULT_FETCH_RETRIES,
@@ -555,14 +553,22 @@ export class OeeDataStore {
     if (!Number.isInteger(resolved.fetchRetries) || resolved.fetchRetries < 0 || resolved.fetchRetries > 10) {
       throw new Error("fetchRetries 必须是 0 到 10 之间的整数");
     }
-    mkdirSync(path.dirname(resolved.databasePath), { recursive: true });
-    const database = new DatabaseSync(resolved.databasePath);
+    if (!existsSync(resolved.databasePath)) {
+      throw new Error(`数据库不存在 ${resolved.databasePath}；请先运行 npm run data:init`);
+    }
+    const database = new DatabaseSync(resolved.databasePath, {
+      timeout: 5_000,
+      enableForeignKeyConstraints: true,
+    });
     try {
-      database.exec(
-        "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; " +
-        "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;",
-      );
-      database.exec(readFileSync(resolved.schemaPath, "utf8"));
+      try {
+        database.prepare("SELECT 1 FROM oee_dataset_state LIMIT 0").all();
+      } catch (error) {
+        throw new Error(`数据库尚未初始化 ${resolved.databasePath}；请先运行 npm run data:init`, {
+          cause: error,
+        });
+      }
+      database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
       return new OeeDataStore(resolved, database);
     } catch (error) {
       database.close();

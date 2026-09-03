@@ -25,7 +25,6 @@ export interface AppConfig {
   readonly sessionDir: string;
   readonly artifactDir: string;
   readonly publicDir: string;
-  readonly schemaPath: string;
   readonly agentDir: string;
   readonly logDir: string;
   readonly model: ModelSelection;
@@ -99,7 +98,6 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     sessionDir: resolveProjectPath(env.SQL_WEB_SESSION_DIR, ".data/sessions"),
     artifactDir: resolveProjectPath(env.SQL_WEB_ARTIFACT_DIR, ".data/artifacts"),
     publicDir: path.join(projectRoot, "public"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     agentDir: path.join(projectRoot, ".data", "agent"),
     logDir: path.join(projectRoot, ".data", "logs"),
     model: { provider, model },

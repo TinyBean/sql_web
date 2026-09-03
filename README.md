@@ -9,7 +9,7 @@ src/
 ├── client/          # 浏览器端交互、渲染和接口解码
 ├── server/
 │   ├── agent/       # Agent 会话、工具、产物与代码解释器
-│   ├── data/        # SQLite 访问与 OEE 数据管道
+│   ├── data/        # SQLite 只读查询
 │   ├── config.ts    # 环境与运行配置
 │   ├── http-server.ts
 │   ├── logger.ts
@@ -17,10 +17,11 @@ src/
 └── shared/          # 浏览器端与服务端共享的数据契约
 tests/
 ├── client/          # 浏览器端测试
-└── server/          # 服务端测试
+├── scripts/         # 数据库初始化与数据命令测试
+└── server/          # 服务端只读行为测试
 public/              # HTML、样式及生成的浏览器脚本
-scripts/             # 开发、清理和数据命令入口
-sql/                 # SQLite schema
+scripts/
+└── database/        # 数据库初始化、Schema 与 OEE 写入实现
 ```
 
 ## 数据链路
@@ -83,6 +84,14 @@ ORDER BY dataset, data_date;
 
 ## 数据命令
 
+首次部署时显式创建数据库并执行 Schema。该命令可以安全重复运行，不会清空已有数据：
+
+```bash
+npm run data:init
+```
+
+其余数据命令只打开已经初始化的数据库；数据库不存在或未初始化时会直接失败。
+
 导入已经下载的 JSON：
 
 ```bash
@@ -103,7 +112,7 @@ npm run data:pull -- dut_utilization 2026-08-20 2026-08-30
 npm run data:sync -- all 2026-09-02
 ```
 
-空数据库首次同步需要提供起始日期：
+新初始化的空数据库首次同步需要提供起始日期：
 
 ```bash
 npm run data:sync -- all 2026-09-02 2026-08-20
@@ -145,6 +154,7 @@ npm run data:status
 ```bash
 npm install
 cp .env.example .env
+npm run data:init
 npm start
 ```
 

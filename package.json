@@ -16,6 +16,7 @@
     "dev:server": "tsx watch src/server/main.ts",
     "dev:client": "tsc -p tsconfig.client.json --watch --preserveWatchOutput",
     "data": "tsx scripts/oee-data.ts",
+    "data:init": "tsx scripts/oee-data.ts init",
     "data:import": "tsx scripts/oee-data.ts import",
     "data:pull": "tsx scripts/oee-data.ts pull",
     "data:sync": "tsx scripts/oee-data.ts sync",

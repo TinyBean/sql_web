@@ -1,21 +1,18 @@
 import assert from "node:assert/strict";
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
+import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { getCurrentTime } from "../../src/server/agent/database-tools.ts";
 import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../../src/server/data/database.ts";
 import type { QueryResult } from "../../src/server/data/database.ts";
 
-const projectRoot = process.cwd();
-
 function createFixture(t: TestContext): AppDatabase {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-test-"));
-  const database = AppDatabase.open({
-    filePath: path.join(directory, "oee.sqlite"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-  });
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+  const database = AppDatabase.open({ filePath });
   t.after(() => {
     database.close();
     rmSync(directory, { recursive: true, force: true });
@@ -38,7 +35,7 @@ test("returns the current time with UTC and local timezone values", () => {
   assert.ok(result.timezone.length > 0);
 });
 
-test("initializes the OEE schema without demo seed data", (t) => {
+test("opens a prepared OEE database without demo seed data", (t) => {
   const database = createFixture(t);
   const result = database.query(
     "SELECT (SELECT COUNT(*) FROM oee_availability) AS availability, " +
@@ -48,6 +45,16 @@ test("initializes the OEE schema without demo seed data", (t) => {
   assert.deepEqual(result.columns, ["availability", "dut"]);
   assert.deepEqual(result.rows, [{ availability: 0, dut: 0 }]);
   assert.equal(database.getSchema().some((item) => item.name === "oee_data_status"), true);
+});
+
+test("does not create a missing database or its parent directory", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-missing-"));
+  const filePath = path.join(directory, "database", "oee.sqlite");
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+
+  assert.throws(() => AppDatabase.open({ filePath }));
+  assert.equal(existsSync(filePath), false);
+  assert.equal(existsSync(path.dirname(filePath)), false);
 });
 
 test("supports positional parameters and enforces the row cap", (t) => {
@@ -185,28 +192,4 @@ test("rejects writes and multiple statements while accepting semicolons in strin
     (error) => error instanceof DatabaseInputError && /一条 SQL/u.test(error.message),
   );
   assert.deepEqual(database.query("SELECT ';' AS value; -- trailing comment").rows, [{ value: ";" }]);
-});
-
-test("schema initialization is idempotent and preserves imported state", (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-idempotent-"));
-  const options = {
-    filePath: path.join(directory, "oee.sqlite"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-  };
-  const first = AppDatabase.open(options);
-  first.close();
-  const importer = new DatabaseSync(options.filePath);
-  importer.prepare(
-    `INSERT INTO oee_ingestion_runs (
-       dataset, source_kind, source_ref, requested_start_date, requested_end_date, status, started_at
-     ) VALUES ('availability', 'file', 'fixture.json', '2026-08-20', '2026-08-20', 'running', '2026-09-02T00:00:00Z')`,
-  ).run();
-  importer.close();
-  const second = AppDatabase.open(options);
-  t.after(() => {
-    second.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  assert.equal(firstRow(second.query("SELECT COUNT(*) AS count FROM oee_ingestion_runs"))["count"], 1);
 });

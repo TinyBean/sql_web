@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import {
   decodeSseEvent,
   decodeDeleteSessionResponse,
@@ -37,10 +38,9 @@ async function createFixture(
   sessionsOverride?: WebSessionPort,
 ): Promise<string> {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-http-"));
-  const database = AppDatabase.open({
-    filePath: path.join(directory, "oee.sqlite"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-  });
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+  const database = AppDatabase.open({ filePath });
   const sessions: WebSessionPort = sessionsOverride ?? {
     status: () => ({
       tools: ["execute_sql", "get_current_time"],

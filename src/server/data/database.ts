@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeSync } from "node:fs";
+import { writeSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { SchemaObject } from "../../shared/contracts.ts";
@@ -24,7 +24,6 @@ interface SqlToken {
 
 export interface DatabaseOptions {
   readonly filePath: string;
-  readonly schemaPath: string;
 }
 
 export interface QueryOptions {
@@ -362,8 +361,7 @@ function normalizeRow(row: Record<string, unknown>): NormalizedRow {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeValue(value)]));
 }
 
-function configureConnection(database: DatabaseSync): void {
-  database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+function hardenConnection(database: DatabaseSync): void {
   // enableDefensive() exists in newer Node releases but not in the Node 22
   // type surface supported by this project. Keep the extra hardening when present.
   if ("enableDefensive" in database && typeof database.enableDefensive === "function") {
@@ -373,37 +371,26 @@ function configureConnection(database: DatabaseSync): void {
 
 export class AppDatabase {
   readonly filePath: string;
-  readonly schemaPath: string;
   #reader: DatabaseSync | null;
 
-  private constructor(options: DatabaseOptions, reader: DatabaseSync) {
-    this.filePath = options.filePath;
-    this.schemaPath = options.schemaPath;
+  private constructor(filePath: string, reader: DatabaseSync) {
+    this.filePath = filePath;
     this.#reader = reader;
   }
 
-  static open({ filePath, schemaPath }: DatabaseOptions): AppDatabase {
-    const options: DatabaseOptions = {
-      filePath: path.resolve(filePath),
-      schemaPath: path.resolve(schemaPath),
-    };
-    mkdirSync(path.dirname(options.filePath), { recursive: true });
-    let writer: DatabaseSync | undefined;
+  static open({ filePath }: DatabaseOptions): AppDatabase {
+    const resolvedFilePath = path.resolve(filePath);
     let reader: DatabaseSync | undefined;
     try {
-      writer = new DatabaseSync(options.filePath);
-      configureConnection(writer);
-      writer.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
-      writer.exec(readFileSync(options.schemaPath, "utf8"));
-      writer.close();
-      writer = undefined;
-
-      reader = new DatabaseSync(options.filePath, { readOnly: true });
-      configureConnection(reader);
-      return new AppDatabase(options, reader);
+      reader = new DatabaseSync(resolvedFilePath, {
+        readOnly: true,
+        timeout: 5_000,
+        enableForeignKeyConstraints: true,
+      });
+      hardenConnection(reader);
+      return new AppDatabase(resolvedFilePath, reader);
     } catch (error) {
       reader?.close();
-      writer?.close();
       throw error;
     }
   }

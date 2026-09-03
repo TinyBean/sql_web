@@ -2,7 +2,8 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
 import { FileLogger } from "../src/server/logger.ts";
-import { OeeDataStore, parseOeeDataset } from "../src/server/data/oee-data.ts";
+import { initializeOeeDatabase } from "./database/initialize.ts";
+import { OeeDataStore, parseOeeDataset } from "./database/oee-data-store.ts";
 
 const projectRoot = path.basename(path.resolve(import.meta.dirname, "..")) === "dist"
   ? path.resolve(import.meta.dirname, "../..")
@@ -18,6 +19,7 @@ function usage(): never {
   throw new Error(
     [
       "用法：",
+      "  npm run data:init",
       "  npm run data:import -- <dataset> <json-file> <start-date> <end-date>",
       "  npm run data:pull -- <dataset> <start-date> <end-date>",
       "  npm run data:sync -- <dataset|all> <through-date> [initial-start-date]",
@@ -42,9 +44,14 @@ async function main(): Promise<void> {
     process.env["SQL_WEB_DB_PATH"] ?? fileEnvironment["SQL_WEB_DB_PATH"] ?? ".data/database/oee.sqlite",
   );
   const apiBaseUrl = process.env["OEE_API_BASE_URL"] ?? fileEnvironment["OEE_API_BASE_URL"];
+  if (command === "init") {
+    initializeOeeDatabase(databasePath);
+    console.log(JSON.stringify({ databasePath, initialized: true }, null, 2));
+    logger.info("oee.command.completed", { command, databasePath });
+    return;
+  }
   const store = OeeDataStore.open({
     databasePath,
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
     logger,
   });

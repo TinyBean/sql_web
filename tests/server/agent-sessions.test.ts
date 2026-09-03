@@ -4,12 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore, SessionNotFoundError } from "../../src/server/agent/agent-sessions.ts";
 import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
 import { AppDatabase } from "../../src/server/data/database.ts";
-
-const projectRoot = process.cwd();
 
 test("maps a web session directly to a Pi session with only allowlisted tools", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-agent-"));
@@ -28,10 +27,9 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
       },
     }),
   );
-  const database = AppDatabase.open({
-    filePath: path.join(directory, "oee.sqlite"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-  });
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+  const database = AppDatabase.open({ filePath });
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
   const codeInterpreter = await CodeInterpreterRuntime.create({
     pythonPath: "/usr/bin/python3",

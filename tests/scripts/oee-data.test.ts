@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
+import { OeeDataStore } from "../../scripts/database/oee-data-store.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import { FileLogger } from "../../src/server/logger.ts";
-import { OeeDataStore } from "../../src/server/data/oee-data.ts";
-
-const projectRoot = process.cwd();
 
 function availabilityRow(dataDate: string, suffix: string, timeSpan = 60): Record<string, unknown> {
   return {
@@ -82,15 +81,26 @@ function dutResponse(rows: readonly Record<string, unknown>[]): string {
 }
 
 function createStore(directory: string, apiBaseUrl?: string, logger?: AppLogger): OeeDataStore {
+  const databasePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(databasePath);
   return OeeDataStore.open({
-    databasePath: path.join(directory, "oee.sqlite"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
+    databasePath,
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
     ...(logger ? { logger } : {}),
     requestTimeoutMs: 5_000,
     fetchRetries: 0,
   });
 }
+
+test("requires explicit database initialization", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "oee-missing-test-"));
+  const databasePath = path.join(directory, "database", "oee.sqlite");
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+
+  assert.throws(() => OeeDataStore.open({ databasePath }), /npm run data:init/u);
+  assert.equal(existsSync(databasePath), false);
+  assert.equal(existsSync(path.dirname(databasePath)), false);
+});
 
 test("imports idempotently, audits missing dates, and syncs gaps with overlap", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "oee-import-test-"));

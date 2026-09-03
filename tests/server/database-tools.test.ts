@@ -3,12 +3,11 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
 import { createAgentTools } from "../../src/server/agent/database-tools.ts";
 import { AppDatabase } from "../../src/server/data/database.ts";
-
-const projectRoot = process.cwd();
 
 interface ToolResult {
   readonly content: readonly { readonly type: string; readonly text?: string }[];
@@ -29,10 +28,9 @@ interface CallableTool {
 test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-tools-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const database = AppDatabase.open({
-    filePath: path.join(directory, "oee.sqlite"),
-    schemaPath: path.join(projectRoot, "sql", "schema.sql"),
-  });
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+  const database = AppDatabase.open({ filePath });
   t.after(() => database.close());
   const runtime = await CodeInterpreterRuntime.create({
     pythonPath: path.join(directory, "missing-python"),

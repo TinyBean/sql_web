@@ -16,10 +16,7 @@ logger.info("system.starting", {
   provider: config.model.provider,
   model: config.model.model,
 });
-const database = AppDatabase.open({
-  filePath: config.databasePath,
-  schemaPath: config.schemaPath,
-});
+const database = AppDatabase.open({ filePath: config.databasePath });
 const artifacts = new ArtifactStore(config.artifactDir);
 const codeInterpreter = await CodeInterpreterRuntime.create({
   ...config.codeInterpreter,

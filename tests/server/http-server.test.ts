@@ -114,6 +114,11 @@ test("serves the app with restrictive security headers", async (t) => {
   const contractModule = await fetch(`${baseUrl}/api-contracts.js`);
   assert.equal(contractModule.status, 200);
   assert.match(contractModule.headers.get("content-type") ?? "", /javascript/u);
+  assert.match(await contractModule.text(), /\.\.\/shared\/contracts\.js/u);
+  const sharedContractsModule = await fetch(`${baseUrl}/shared/contracts.js`);
+  assert.equal(sharedContractsModule.status, 200);
+  assert.match(sharedContractsModule.headers.get("content-type") ?? "", /javascript/u);
+  assert.match(await sharedContractsModule.text(), /isAgentToolName/u);
   const streamStateModule = await fetch(`${baseUrl}/stream-state.js`);
   assert.equal(streamStateModule.status, 200);
   assert.match(streamStateModule.headers.get("content-type") ?? "", /javascript/u);

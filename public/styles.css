@@ -296,21 +296,10 @@ svg {
   height: 17px;
 }
 
-.guard-card strong,
-.guard-card span {
-  display: block;
-}
-
 .guard-card strong {
+  display: block;
   color: #ccebe0;
   font-size: 11px;
-}
-
-.guard-card span {
-  margin-top: 3px;
-  color: var(--subtle);
-  font-size: 9px;
-  line-height: 1.4;
 }
 
 .main-panel {

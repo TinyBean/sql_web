@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { getCurrentTime } from "../../src/server/agent/database-tools.ts";
+import { getCurrentTime } from "../../src/server/tool/database-tools.ts";
 import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../../src/server/data/database.ts";
 import type { QueryResult } from "../../src/server/data/database.ts";
 

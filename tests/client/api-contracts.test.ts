@@ -13,7 +13,12 @@ const validSession = {
   id: "session-12345678",
   title: "测试会话",
   model: { provider: "test-provider", id: "test-model", name: "Test Model" },
-  tools: ["execute_sql", "get_current_time"],
+  tools: [
+    "read",
+    "execute_sql",
+    "get_current_time",
+    "example_skill__calculate",
+  ],
   streaming: false,
   messages: [{ id: "user-1", role: "user", text: "你好", timestamp: 1 }],
 };
@@ -66,7 +71,13 @@ test("decodes ordered turn events and persisted trace items", () => {
 test("decodes code interpreter tools and inline PNG images", () => {
   const session = {
     ...validSession,
-    tools: ["execute_sql", "get_current_time", "code_interpreter"],
+    tools: [
+      "read",
+      "execute_sql",
+      "get_current_time",
+      "example_skill__calculate",
+      "code_interpreter",
+    ],
     messages: [{
       id: "assistant-1",
       role: "assistant",
@@ -78,6 +89,10 @@ test("decodes code interpreter tools and inline PNG images", () => {
 });
 
 test("rejects malformed nested API and SSE payloads", () => {
+  assert.throws(
+    () => decodeSerializedSession({ ...validSession, tools: ["Invalid-Tool"] }),
+    /工具名/u,
+  );
   assert.throws(
     () => decodeSerializedSession({ ...validSession, messages: [{ role: "user" }] }),
     ContractValidationError,

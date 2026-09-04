@@ -9,7 +9,7 @@
   },
   "scripts": {
     "clean": "tsx scripts/clean.ts",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build:server": "tsc -p tsconfig.server.json && node dist/scripts/copy-skill-resources.js",
     "build:client": "tsc -p tsconfig.client.json",
     "build": "npm run clean && npm run build:server && npm run build:client",
     "dev": "tsx scripts/dev.ts",

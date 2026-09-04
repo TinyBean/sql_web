@@ -1,5 +1,11 @@
 export type ChatRole = "user" | "assistant";
-export type AgentToolName = "execute_sql" | "get_current_time" | "code_interpreter";
+export type AgentToolName = string;
+
+export const AGENT_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+
+export function isAgentToolName(value: unknown): value is AgentToolName {
+  return typeof value === "string" && AGENT_TOOL_NAME_PATTERN.test(value);
+}
 
 export interface ChatImage {
   readonly mimeType: "image/png";

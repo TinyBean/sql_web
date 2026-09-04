@@ -1,7 +1,7 @@
 import path from "node:path";
 import { AgentSessionStore } from "./agent/agent-sessions.ts";
-import { ArtifactStore } from "./agent/artifact-store.ts";
-import { CodeInterpreterRuntime } from "./agent/code-interpreter.ts";
+import { ArtifactStore } from "./tool/artifact-store.ts";
+import { CodeInterpreterRuntime } from "./tool/code-interpreter.ts";
 import { loadConfig, loadProjectEnvironment } from "./config.ts";
 import { AppDatabase } from "./data/database.ts";
 import { createWebServer } from "./http-server.ts";

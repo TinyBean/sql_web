@@ -18,6 +18,7 @@ import type {
   SessionSummary,
   SessionsResponse,
 } from "../shared/contracts.ts";
+import { isAgentToolName } from "../shared/contracts.ts";
 
 export type Decoder<Value> = (value: unknown, path?: string) => Value;
 
@@ -90,9 +91,7 @@ function chatTraceItem(value: unknown, path: string): ChatTraceItem {
 }
 
 function agentToolName(value: unknown, path: string): AgentToolName {
-  return value === "execute_sql" || value === "get_current_time" || value === "code_interpreter"
-    ? value
-    : invalid(path, "Agent 工具名");
+  return isAgentToolName(value) ? value : invalid(path, "合法的 Agent 工具名");
 }
 
 function chatImage(value: unknown, path: string): ChatImage {

@@ -65,7 +65,6 @@ const elements = {
   schemaList: requiredElement("#schemaList", HTMLElement),
   toast: requiredElement("#toast", HTMLElement),
   guardTitle: requiredElement("#guardTitle", HTMLElement),
-  guardCopy: requiredElement("#guardCopy", HTMLElement),
 };
 
 interface StreamNode {
@@ -640,10 +639,8 @@ async function initialize(): Promise<void> {
     elements.modelBadge.textContent = `${model.provider}/${model.model}`;
     if (health.agent.codeInterpreter.available) {
       elements.guardTitle.textContent = "严格工具隔离已开启";
-      elements.guardCopy.textContent = "只读 SQL、当前时间与禁网 Python 沙箱";
     } else {
       elements.guardTitle.textContent = "代码解释器不可用";
-      elements.guardCopy.textContent = health.agent.codeInterpreter.reason ?? "当前仅启用只读 SQL 与当前时间";
     }
     renderSchema(schema.objects);
     state.sessions = sessionPayload.sessions;

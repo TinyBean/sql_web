@@ -1,6 +1,6 @@
 # DataLens：OEE SQLite 数据问答网站
 
-一个使用严格 TypeScript 构建的本地 OEE 数据问答应用。浏览器中的每个会话对应一个持久化 Agent session；Agent 可以调用受限的只读 SQLite 查询、当前时间和严格隔离的 Python 代码解释器。
+一个使用严格 TypeScript 构建的本地 OEE 数据问答应用。浏览器中的每个会话对应一个持久化 Agent session；Agent 默认提供受限的 Skill 读取、只读 SQLite 查询、当前时间和严格隔离的 Python 代码解释器，Test OEE 等业务能力由 Skill 按会话加载。
 
 ## 项目结构
 
@@ -8,8 +8,11 @@
 src/
 ├── client/          # 浏览器端交互、渲染和接口解码
 ├── server/
-│   ├── agent/       # Agent 会话、工具、产物与代码解释器
+│   ├── agent/       # Agent 会话与模型配置
 │   ├── data/        # SQLite 只读查询
+│   ├── skills/      # 业务技能、规则参考与技能脚本
+│   │   └── test-oee-calculator/
+│   ├── tool/        # Agent 具体工具、产物与代码解释器
 │   ├── config.ts    # 环境与运行配置
 │   ├── http-server.ts
 │   ├── logger.ts
@@ -136,7 +139,7 @@ npm run data:status
 
 ## 启动
 
-环境要求：Node.js 22.19 或更高版本，以及 Linux x86_64 上的 Python 3.12、bubblewrap、prlimit、NumPy、SciPy、Matplotlib 和 Pillow。代码解释器依赖自检失败时网站仍可启动，但只启用 SQL 和当前时间工具。
+环境要求：Node.js 22.19 或更高版本，以及 Linux x86_64 上的 Python 3.12、bubblewrap、prlimit、NumPy、SciPy、Matplotlib 和 Pillow。代码解释器依赖自检失败时网站仍可启动，Skill catalog、SQL 和当前时间工具仍然可用。
 
 ```bash
 npm install
@@ -180,11 +183,15 @@ npm test
 - `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝。
 - 默认 `output_format="inline"` 直接返回最多 200 行。`output_format="json_file"` 会流式写入最多 100,000 行或 32 MiB 的 JSON，并返回当前会话专属的 `artifact://` 地址。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
+- `test-oee-calculator` 被加载后，当前会话才会注册 `test_oee_calculator__calculate_test_oee` 和 `test_oee_calculator__classify_test_oee_record`；计算器、业务规则、CLI 和工具定义都封装在该 Skill 目录内。
+- Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。启动时只扫描元数据并校验工具工厂，不会把专有工具注册到全局或暴露给新会话。
 - `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址。输入在 Python 中为 `input_data`；文本通过 `print()` 返回，Matplotlib/Pillow 图片通过 `emit_image()` 返回。Matplotlib 会优先使用系统的 `Noto Sans CJK SC` 简体中文字体，显式字体可通过 `matplotlib_chinese_font(size, bold=True)` 获取；Pillow 可通过 `chinese_font(size)` 或 `chinese_font(size, bold=True)` 获取常规/粗体字体。
 - Python 使用 bubblewrap、seccomp 和 prlimit 隔离：无法访问数据库、项目目录、其他会话产物或网络，并限制执行时间、内存、进程和输出大小。
 - SQL JSON 文件随会话跨轮次、跨重启保留，删除会话时同步删除；文件不通过 HTTP 提供下载。
 - 创建 Agent 会话时会把当前表和视图的 SQLite DDL 注入 system prompt；数据内容仍必须通过查询工具获取。
-- Agent 不加载项目工具、技能或上下文文件；代码沙箱只会挂载显式传入的单个 JSON 文件。
+- Agent 递归扫描 `src/server/skills` 并按 Pi 标准格式注入 Skill 名称、描述和入口路径；完整 `SKILL.md` 只在按需读取或执行 `/skill:<name>` 时进入当前会话上下文。
+- 通用 `read` 只能读取扫描到的 Skill 目录，拒绝目录穿越、Skill 外文件和符号链接逃逸。成功读取准确的 `SKILL.md` 后，专有工具才在该会话及当前分支内激活；其他会话不受影响。
+- 代码沙箱只会挂载显式传入的单个 JSON 文件。
 - 日志不记录用户问题正文、工具参数、查询结果或模型回答正文。
 
 应用仍是本地部署形态，不包含用户登录和租户隔离。正式开放给多用户前，应增加鉴权、限流和独立审计。

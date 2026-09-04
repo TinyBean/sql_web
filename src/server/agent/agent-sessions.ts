@@ -3,7 +3,7 @@ import { unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   createAgentSession,
-  createExtensionRuntime,
+  DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -13,23 +13,29 @@ import type {
   AgentSessionEvent,
   ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentStatus,
-  ChatImage,
-  ChatMessage,
-  ChatTraceItem,
-  AgentToolName,
-  ModelSelection,
-  SerializedSession,
-  SessionSummary,
-  SchemaObject,
+import {
+  isAgentToolName,
+  type AgentToolName,
+  type AgentStatus,
+  type ChatImage,
+  type ChatMessage,
+  type ChatTraceItem,
+  type ModelSelection,
+  type SerializedSession,
+  type SessionSummary,
+  type SchemaObject,
 } from "../../shared/contracts.ts";
 import type { AppDatabase } from "../data/database.ts";
-import type { ArtifactStore } from "./artifact-store.ts";
-import type { CodeInterpreterRuntime } from "./code-interpreter.ts";
-import { activeAgentToolNames, createAgentTools } from "./database-tools.ts";
+import type { ArtifactStore } from "../tool/artifact-store.ts";
+import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
+import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import type { AppLogger } from "../logger.ts";
+import {
+  loadAgentSkillCatalog,
+  SKILL_READ_TOOL_NAME,
+  type AgentSkillCatalog,
+} from "./skill-catalog.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
@@ -126,19 +132,16 @@ function buildSystemPrompt(schema: readonly SchemaObject[], codeInterpreterAvail
 10. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
 11. emit_image() 生成的 PNG 会由前端自动附加并持久化。回答中不得虚构 artifact://image.png、sandbox 路径或其他 Markdown 图片地址。`
     : "";
-  const availableTools = codeInterpreterAvailable
-    ? "execute_sql、get_current_time 和 code_interpreter"
-    : "execute_sql 和 get_current_time";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
 规则:
 1. 下方已经提供当前 SQLite 数据库结构。生成查询时必须严格使用其中的表和字段,不得猜测不存在的结构。
-2. 涉及数据库事实、统计或明细时,必须调用 execute_sql 获取真实结果;不得凭空猜测数据。
+2. 涉及数据库事实、统计或明细时,必须调用最合适的已加载工具获取真实结果,不得凭空猜测数据。
 3. 使用 SQLite 语法。优先执行范围明确、列名明确的查询,并明确说明统计口径。
 4. execute_sql 只允许执行一条会返回结果集的只读 SQL;不得尝试新增、修改、删除数据或执行 DDL。
 5. 用户询问当前日期、时间或相对时间范围时,先调用 get_current_time 获取真实的当前时间。
 6. 回答使用中文,先给结论,再简洁说明口径。比率说明分子与分母;没有数据时明确说明。
-7. 不要声称自己访问了未由工具提供的文件、终端或网络。你只有 ${availableTools}。${codeInterpreterRules}
+7. 不要声称自己访问了未由工具提供的文件、终端或网络。只能使用当前会话已注册并启用的工具。${codeInterpreterRules}
 
 ## 数据库结构
 
@@ -157,20 +160,32 @@ ${DATABASE_FIELD_DESCRIPTIONS}
 </database_field_descriptions>`;
 }
 
-function createLockedResourceLoader(systemPrompt: string): ResourceLoader {
-  return {
-    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => {},
-    reload: async () => {},
-  };
+async function createLockedResourceLoader(
+  systemPrompt: string,
+  skillCatalog: AgentSkillCatalog,
+  cwd: string,
+  agentDir: string,
+  settingsManager: SettingsManager,
+): Promise<ResourceLoader> {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    systemPrompt,
+    extensionFactories: [skillCatalog.createSessionExtension(cwd)],
+    skillsOverride: () => skillCatalog.resources,
+  });
+  await loader.reload();
+  const extensionErrors = loader.getExtensions().errors;
+  if (extensionErrors.length) {
+    throw new Error(extensionErrors.map((error) => `${error.path}:${error.error}`).join("\n"));
+  }
+  return loader;
 }
 
 function messageText(message: TranscriptSourceMessage | undefined): string {
@@ -363,20 +378,15 @@ function shortTitle(prompt: string): string {
   return Array.from(normalized).slice(0, 32).join("");
 }
 
-function isAgentToolName(name: string): name is AgentToolName {
-  return name === "execute_sql" || name === "get_current_time" || name === "code_interpreter";
-}
-
 function validatedAgentToolNames(
-  names: readonly string[],
-  expectedNames: readonly AgentToolName[],
+  session: AgentSession,
 ): AgentToolName[] {
+  const names = session.getActiveToolNames();
   if (
-    names.length !== expectedNames.length ||
     new Set(names).size !== names.length ||
-    names.some((name) => !isAgentToolName(name) || !expectedNames.includes(name))
+    names.some((name) => !isAgentToolName(name) || session.getToolDefinition(name) === undefined)
   ) {
-    throw new Error(`Agent 工具白名单校验失败:${names.join(", ")}`);
+    throw new Error(`Agent 工具注册表校验失败:${names.join(", ")}`);
   }
   return names.filter(isAgentToolName);
 }
@@ -411,6 +421,7 @@ export class AgentSessionStore {
   readonly #artifacts: ArtifactStore;
   readonly #codeInterpreter: CodeInterpreterRuntime;
   readonly #toolNames: readonly AgentToolName[];
+  readonly #skillCatalog: AgentSkillCatalog;
   readonly #sessions = new Map<string, AgentSession>();
   readonly #sessionTimes = new Map<string, SessionTimes>();
   readonly #modelRuntime: ModelRuntime;
@@ -422,6 +433,7 @@ export class AgentSessionStore {
     { database, cwd, sessionDir, agentDir, model, artifacts, codeInterpreter, logger }:
       AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
+    skillCatalog: AgentSkillCatalog,
   ) {
     this.#database = database;
     this.#cwd = cwd;
@@ -430,7 +442,8 @@ export class AgentSessionStore {
     this.#model = model;
     this.#artifacts = artifacts;
     this.#codeInterpreter = codeInterpreter;
-    this.#toolNames = activeAgentToolNames(codeInterpreter);
+    this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter)];
+    this.#skillCatalog = skillCatalog;
     this.#modelRuntime = modelRuntime;
     this.#logger = logger ?? NOOP_LOGGER;
   }
@@ -457,7 +470,8 @@ export class AgentSessionStore {
         `Pi 无法解析本地模型 ${resolvedOptions.model.provider}/${resolvedOptions.model.model},请检查模型文件格式`,
       );
     }
-    const store = new AgentSessionStore(resolvedOptions, modelRuntime);
+    const skillCatalog = await loadAgentSkillCatalog({ database: resolvedOptions.database });
+    const store = new AgentSessionStore(resolvedOptions, modelRuntime, skillCatalog);
     store.#logger.info("agent.store.opened", {
       provider: resolvedOptions.model.provider,
       model: resolvedOptions.model.model,
@@ -592,7 +606,7 @@ export class AgentSessionStore {
       promptLength: prompt.length,
     });
     try {
-      await session.prompt(prompt, { expandPromptTemplates: false });
+      await session.prompt(prompt, { expandPromptTemplates: true });
       const times = this.#sessionTimes.get(id);
       if (times) times.modified = new Date();
       this.#logger.info("agent.prompt.completed", {
@@ -623,7 +637,7 @@ export class AgentSessionStore {
       model: session.model
         ? { provider: session.model.provider, id: session.model.id, name: session.model.name }
         : null,
-      tools: validatedAgentToolNames(session.getActiveToolNames(), this.#toolNames),
+      tools: validatedAgentToolNames(session),
       streaming: session.isStreaming,
       messages: serializeMessages(session.messages),
     };
@@ -661,6 +675,13 @@ export class AgentSessionStore {
 
     const artifacts = this.#artifacts.forSession(sessionManager.getSessionId());
     const tools = createAgentTools(this.#database, artifacts, this.#codeInterpreter);
+    const resourceLoader = await createLockedResourceLoader(
+      buildSystemPrompt(this.#database.getSchema(), this.#codeInterpreter.status.available),
+      this.#skillCatalog,
+      this.#cwd,
+      this.#agentDir,
+      settingsManager,
+    );
     const { session } = await createAgentSession({
       cwd: this.#cwd,
       agentDir: this.#agentDir,
@@ -668,16 +689,21 @@ export class AgentSessionStore {
       modelRuntime: this.#modelRuntime,
       settingsManager,
       sessionManager,
-      resourceLoader: createLockedResourceLoader(
-        buildSystemPrompt(this.#database.getSchema(), this.#codeInterpreter.status.available),
-      ),
-      tools: [...this.#toolNames],
+      resourceLoader,
       customTools: tools,
       noTools: "builtin",
     });
 
     try {
-      validatedAgentToolNames(session.getActiveToolNames(), this.#toolNames);
+      await session.bindExtensions({
+        mode: "print",
+        onError: (error) => this.#logger.error(
+          "agent.extension.failed",
+          new Error(error.error),
+          { extensionPath: error.extensionPath, event: error.event },
+        ),
+      });
+      validatedAgentToolNames(session);
     } catch (error) {
       session.dispose();
       throw error;

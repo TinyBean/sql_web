@@ -6,11 +6,11 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore, SessionNotFoundError } from "../../src/server/agent/agent-sessions.ts";
-import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
+import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
 import { AppDatabase } from "../../src/server/data/database.ts";
 
-test("maps a web session directly to a Pi session with only allowlisted tools", async (t) => {
+test("keeps Skill tools session-local and activates them only after reading SKILL.md", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-agent-"));
   const agentDir = path.join(directory, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -55,9 +55,20 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
 
   const created = await store.create();
   assert.match(created.id, /^[A-Za-z0-9-]{8,100}$/u);
-  assert.deepEqual(created.tools, ["execute_sql", "get_current_time", "code_interpreter"]);
+  assert.deepEqual(created.tools, [
+    "read",
+    "execute_sql",
+    "get_current_time",
+    "code_interpreter",
+  ]);
   assert.equal(created.model?.provider, "test-provider");
   assert.equal(created.model?.id, "test-model");
+  assert.deepEqual(store.status().tools, [
+    "read",
+    "execute_sql",
+    "get_current_time",
+    "code_interpreter",
+  ]);
 
   const piSession = await store.get(created.id);
   assert.match(piSession.systemPrompt, /## 数据库结构/u);
@@ -65,19 +76,25 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
   assert.match(piSession.systemPrompt, /CREATE TABLE oee_dut_utilization/u);
   assert.match(piSession.systemPrompt, /<database_schema dialect="sqlite">/u);
   assert.match(piSession.systemPrompt, /<database_field_descriptions>/u);
-  assert.match(piSession.systemPrompt, /tool_name（TOOL_NAME）：机台号/u);
-  assert.match(piSession.systemPrompt, /lot_id（LOT_ID）：物料批次号/u);
-  assert.match(piSession.systemPrompt, /final_state（FINAL_STATE）：机台状态/u);
-  assert.match(piSession.systemPrompt, /step（STEP）：步骤/u);
-  assert.match(piSession.systemPrompt, /date（DATE）：日期/u);
-  assert.match(piSession.systemPrompt, /shift（SHIFT）：白班夜班的区分/u);
-  assert.match(piSession.systemPrompt, /time_span（TIME_SPAN）：机台状态对应的时间，单位秒/u);
-  assert.match(piSession.systemPrompt, /machine_id（MACHINE_ID）：机台号/u);
-  assert.match(piSession.systemPrompt, /in_qty（IN_QTY）：实际的 Socket 使用数量/u);
-  assert.match(piSession.systemPrompt, /out_qty（OUT_QTY）：好品数量（包含复测）/u);
-  assert.match(piSession.systemPrompt, /test_stage（TEST_STAGE）：1st 表示初测，Rescreen 表示复测/u);
-  assert.match(piSession.systemPrompt, /dut_num（DUT_NUM）：Socket 数量/u);
-  assert.match(piSession.systemPrompt, /step_id（STEP_ID）：步骤/u);
+  assert.match(piSession.systemPrompt, /tool_name\(TOOL_NAME\):机台号/u);
+  assert.match(piSession.systemPrompt, /lot_id\(LOT_ID\):物料批次号/u);
+  assert.match(piSession.systemPrompt, /final_state\(FINAL_STATE\):机台状态/u);
+  assert.match(piSession.systemPrompt, /step\(STEP\):步骤/u);
+  assert.match(piSession.systemPrompt, /date\(DATE\):日期/u);
+  assert.match(piSession.systemPrompt, /shift\(SHIFT\):白班夜班的区分/u);
+  assert.match(piSession.systemPrompt, /time_span\(TIME_SPAN\):机台状态对应的时间,单位秒/u);
+  assert.match(piSession.systemPrompt, /machine_id\(MACHINE_ID\):机台号/u);
+  assert.match(piSession.systemPrompt, /in_qty\(IN_QTY\):实际的 Socket 使用数量/u);
+  assert.match(piSession.systemPrompt, /out_qty\(OUT_QTY\):好品数量\(包含复测\)/u);
+  assert.match(piSession.systemPrompt, /test_stage\(TEST_STAGE\):1st 表示初测,Rescreen 表示复测/u);
+  assert.match(piSession.systemPrompt, /dut_num\(DUT_NUM\):Socket 数量/u);
+  assert.match(piSession.systemPrompt, /step_id\(STEP_ID\):步骤/u);
+  assert.match(piSession.systemPrompt, /<available_skills>/u);
+  assert.match(piSession.systemPrompt, /<name>test-oee-calculator<\/name>/u);
+  assert.match(piSession.systemPrompt, /<description>Precisely calculate or explain MT\/ST Test OEE/u);
+  assert.doesNotMatch(piSession.systemPrompt, /## Test OEE 固定计算口径/u);
+  assert.doesNotMatch(piSession.systemPrompt, /test_oee_calculator__calculate_test_oee/u);
+  assert.doesNotMatch(piSession.systemPrompt, /Machine_Running、全部机台 Availability/u);
   assert.match(piSession.systemPrompt, /execute_sql 只允许执行一条会返回结果集的只读 SQL/u);
   assert.match(piSession.systemPrompt, /get_current_time/u);
   assert.match(piSession.systemPrompt, /code_interpreter\.input_json/u);
@@ -89,6 +106,125 @@ test("maps a web session directly to a Pi session with only allowlisted tools", 
   assert.match(codeInterpreterDefinition.description, /do not replace.*SimHei/u);
   assert.match(codeInterpreterDefinition.description, /matplotlib_chinese_font\(size\)/u);
   assert.match(codeInterpreterDefinition.description, /chinese_font\(size\)/u);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+
+  const skillLocation = /<location>([^<]+)<\/location>/u.exec(piSession.systemPrompt)?.[1];
+  assert.ok(skillLocation);
+  const readTool = piSession.getToolDefinition("read");
+  assert.ok(readTool);
+  await assert.rejects(
+    () => readTool.execute(
+      "read-outside",
+      { path: path.join(agentDir, "models.json") },
+      undefined,
+      undefined,
+      undefined as never,
+    ),
+    /仅允许访问已扫描到的 Skill 目录/u,
+  );
+  await readTool.execute(
+    "read-reference",
+    { path: path.join(path.dirname(skillLocation), "references", "business-rules.md") },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+
+  const beforeSkillEntryId = piSession.sessionManager.appendCustomEntry("test.before-skill");
+  await readTool.execute(
+    "read-skill",
+    { path: skillLocation },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"));
+  assert.deepEqual(piSession.getActiveToolNames(), [
+    "read",
+    "execute_sql",
+    "get_current_time",
+    "code_interpreter",
+    "test_oee_calculator__calculate_test_oee",
+    "test_oee_calculator__classify_test_oee_record",
+  ]);
+  await readTool.execute(
+    "read-skill-again",
+    { path: skillLocation },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  assert.equal(new Set(piSession.getActiveToolNames()).size, piSession.getActiveToolNames().length);
+
+  const sessionFile = piSession.sessionFile;
+  assert.ok(sessionFile);
+  piSession.sessionManager.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text: "test persistence marker" }],
+    api: "openai-completions",
+    provider: "test-provider",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  } as never);
+  const persistedBranch = piSession.sessionManager.getEntries();
+  const loadedEntry = persistedBranch.find((entry) => (
+    entry.type === "custom" && entry.customType === "sql_web.skill.loaded"
+  ));
+  assert.equal(loadedEntry?.parentId, beforeSkillEntryId);
+  await piSession.navigateTree(beforeSkillEntryId, { summarize: false });
+  assert.equal(
+    piSession.getActiveToolNames().includes("test_oee_calculator__calculate_test_oee"),
+    false,
+  );
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"));
+  await piSession.navigateTree(loadedEntry.id, { summarize: false });
+  assert.equal(
+    piSession.getActiveToolNames().includes("test_oee_calculator__calculate_test_oee"),
+    true,
+  );
+
+  const restoredRuntime = await CodeInterpreterRuntime.create({
+    pythonPath: path.join(directory, "missing-python"),
+    bwrapPath: path.join(directory, "missing-bwrap"),
+    prlimitPath: path.join(directory, "missing-prlimit"),
+    projectRoot: directory,
+  });
+  const restoredStore = await AgentSessionStore.open({
+    database,
+    artifacts,
+    codeInterpreter: restoredRuntime,
+    cwd: directory,
+    sessionDir: path.join(directory, "sessions"),
+    agentDir,
+    model: { provider: "test-provider", model: "test-model" },
+  });
+  const restoredSession = await restoredStore.get(created.id);
+  assert.equal(
+    restoredSession.getActiveToolNames().includes("test_oee_calculator__calculate_test_oee"),
+    true,
+  );
+  restoredStore.dispose();
+
+  const isolated = await store.create();
+  assert.deepEqual(isolated.tools, ["read", "execute_sql", "get_current_time", "code_interpreter"]);
+  const isolatedSession = await store.get(isolated.id);
+  assert.equal(
+    isolatedSession.getToolDefinition("test_oee_calculator__calculate_test_oee"),
+    undefined,
+  );
+  await store.delete(isolated.id);
 
   const listed = await store.list();
   assert.equal(listed.length, 1);

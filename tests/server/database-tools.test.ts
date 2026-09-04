@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { ArtifactStore } from "../../src/server/agent/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../../src/server/agent/code-interpreter.ts";
-import { createAgentTools } from "../../src/server/agent/database-tools.ts";
+import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
+import { createAgentTools } from "../../src/server/tool/database-tools.ts";
 import { AppDatabase } from "../../src/server/data/database.ts";
 
 interface ToolResult {
@@ -42,6 +42,7 @@ test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts",
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"))
     .forSession("session-12345678");
   const tools = createAgentTools(database, artifacts, runtime) as readonly CallableTool[];
+  assert.deepEqual(tools.map((tool) => tool.name), ["execute_sql", "get_current_time"]);
   const executeSql = tools.find((tool) => tool.name === "execute_sql");
   assert.ok(executeSql);
 

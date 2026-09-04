@@ -2,16 +2,11 @@ import type { ParsedSseEvent } from "../shared/contracts.ts";
 
 export type StreamToolStatus = "queued" | "running" | "done" | "error";
 
-export function formatToolStatusText(name: string, status: StreamToolStatus): string {
-  const operation = name === "get_current_time"
-    ? "查询当前时间"
-    : name === "code_interpreter"
-    ? "执行代码计算"
-    : "执行 SQL 查询";
-  if (status === "queued") return `准备${operation}`;
-  if (status === "running") return `正在${operation}`;
-  if (status === "error") return `${operation}失败`;
-  return `${operation}完成`;
+export function formatToolStatusText(_name: string, status: StreamToolStatus): string {
+  if (status === "queued") return "准备执行工具";
+  if (status === "running") return "正在执行工具";
+  if (status === "error") return "工具执行失败";
+  return "工具执行完成";
 }
 
 export interface StreamTextItem {

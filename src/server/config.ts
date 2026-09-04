@@ -48,7 +48,7 @@ function resolveProjectPath(value: string | undefined, fallback: string): string
 function parsePort(value: string | undefined): number {
   const port = Number(value ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`PORT 必须是 1 到 65535 之间的整数，当前值为 ${value}`);
+    throw new Error(`PORT 必须是 1 到 65535 之间的整数,当前值为 ${value}`);
   }
   return port;
 }
@@ -75,7 +75,7 @@ export function loadProjectEnvironment(
     };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error(`找不到环境配置文件 ${envFilePath}，请复制 .env.example 并填写模型配置`, {
+      throw new Error(`找不到环境配置文件 ${envFilePath},请复制 .env.example 并填写模型配置`, {
         cause: error,
       });
     }

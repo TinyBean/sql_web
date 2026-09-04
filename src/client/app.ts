@@ -117,7 +117,7 @@ function showToast(message: string): void {
   if (state.toastTimer !== null) clearTimeout(state.toastTimer);
   elements.toast.textContent = message;
   elements.toast.classList.add("visible");
-  state.toastTimer = setTimeout(() => elements.toast.classList.remove("visible"), 4_500);
+  state.toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 4_500);
 }
 
 function messageFromUnknown(error: unknown, fallback = "请求失败"): string {
@@ -183,7 +183,7 @@ function renderSessions(): void {
     deleteButton.type = "button";
     deleteButton.className = "session-delete";
     deleteButton.dataset["deleteSessionId"] = session.id;
-    deleteButton.title = `删除会话：${session.title || "新会话"}`;
+    deleteButton.title = `删除会话:${session.title || "新会话"}`;
     deleteButton.setAttribute("aria-label", deleteButton.title);
     deleteButton.disabled = state.deletingSessionId === session.id ||
       state.activeStream?.sessionId === session.id;
@@ -466,7 +466,7 @@ function clearSessionView(): void {
 async function deleteSession(id: string): Promise<void> {
   if (state.deletingSessionId) return;
   if (state.activeStream?.sessionId === id) {
-    showToast("该会话正在回答，请先停止回答再删除");
+    showToast("该会话正在回答,请先停止回答再删除");
     return;
   }
   const session = state.sessions.find((item) => item.id === id);
@@ -653,7 +653,7 @@ async function initialize(): Promise<void> {
     const initialId = requestedId || state.sessions[0]?.id;
     if (initialId) await loadSession(initialId);
   } catch (error) {
-    showToast(`初始化失败：${messageFromUnknown(error)}`);
+    showToast(`初始化失败:${messageFromUnknown(error)}`);
     elements.modelBadge.textContent = "服务不可用";
     elements.modelBadge.classList.add("warning");
   }

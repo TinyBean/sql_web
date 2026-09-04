@@ -18,13 +18,13 @@ function requiredArgument(value: string | undefined, name: string): string {
 function usage(): never {
   throw new Error(
     [
-      "用法：",
+      "用法:",
       "  npm run data:init",
       "  npm run data:import -- <dataset> <json-file> <start-date> <end-date>",
       "  npm run data:pull -- <dataset> <start-date> <end-date>",
       "  npm run data:sync -- <dataset|all> <through-date> [initial-start-date]",
       "  npm run data:status",
-      "dataset: availability | dut_utilization；日期格式：YYYY-MM-DD",
+      "dataset: availability | dut_utilization;日期格式:YYYY-MM-DD",
     ].join("\n"),
   );
 }
@@ -44,6 +44,8 @@ async function main(): Promise<void> {
     process.env["SQL_WEB_DB_PATH"] ?? fileEnvironment["SQL_WEB_DB_PATH"] ?? ".data/database/oee.sqlite",
   );
   const apiBaseUrl = process.env["OEE_API_BASE_URL"] ?? fileEnvironment["OEE_API_BASE_URL"];
+  const apiUsername = process.env["API_USER"] ?? fileEnvironment["API_USER"];
+  const apiPassword = process.env["API_PWD"] ?? fileEnvironment["API_PWD"];
   if (command === "init") {
     initializeOeeDatabase(databasePath);
     console.log(JSON.stringify({ databasePath, initialized: true }, null, 2));
@@ -53,6 +55,8 @@ async function main(): Promise<void> {
   const store = OeeDataStore.open({
     databasePath,
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    ...(apiUsername !== undefined ? { apiUsername } : {}),
+    ...(apiPassword !== undefined ? { apiPassword } : {}),
     logger,
   });
 

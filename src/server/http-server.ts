@@ -219,7 +219,7 @@ function createAgentEventStreamer(response: ServerResponse): (event: AgentSessio
       });
     } else if (event.type === "auto_retry_start") {
       writeSse(response, "status", {
-        message: `请求失败，正在进行第 ${event.attempt} 次重试…`,
+        message: `请求失败,正在进行第 ${event.attempt} 次重试…`,
       });
     }
   };

@@ -44,7 +44,10 @@ test("opens a prepared OEE database without demo seed data", (t) => {
 
   assert.deepEqual(result.columns, ["availability", "dut"]);
   assert.deepEqual(result.rows, [{ availability: 0, dut: 0 }]);
-  assert.equal(database.getSchema().some((item) => item.name === "oee_data_status"), true);
+  assert.deepEqual(
+    database.getSchema().filter((item) => item.type === "table").map((item) => item.name).sort(),
+    ["oee_availability", "oee_dut_utilization"],
+  );
 });
 
 test("does not create a missing database or its parent directory", (t) => {
@@ -127,14 +130,14 @@ test("defaults inline queries to 200 rows and streams bounded JSON exports", (t)
 test("keeps SQL execution read-only", (t) => {
   const database = createFixture(t);
   assert.throws(
-    () => database.query("DELETE FROM oee_ingestion_runs"),
+    () => database.query("DELETE FROM oee_availability"),
     (error) => error instanceof DatabaseInputError && /仅允许执行/u.test(error.message),
   );
   assert.throws(
-    () => database.query("DELETE FROM oee_ingestion_runs RETURNING id"),
+    () => database.query("DELETE FROM oee_availability RETURNING id"),
     (error) => error instanceof DatabaseInputError && /仅允许执行/u.test(error.message),
   );
-  assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM oee_ingestion_runs"))["count"], 0);
+  assert.equal(firstRow(database.query("SELECT COUNT(*) AS count FROM oee_availability"))["count"], 0);
 });
 
 test("reviews SQL statement types before execution", () => {

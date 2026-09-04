@@ -63,7 +63,7 @@ export function createAgentTools(
     label: "执行只读 SQL",
     description:
       "Execute exactly one read-only SQLite query. output_format=inline returns up to 200 rows. output_format=json_file streams up to 100,000 rows or 32 MiB into a session-scoped JSON artifact and returns its artifact:// URI for code_interpreter. Writes, DDL, and state-changing PRAGMAs are rejected.",
-    promptSnippet: "执行只读 SQLite 查询，可返回少量结果或生成供代码解释器读取的 JSON 文件",
+    promptSnippet: "执行只读 SQLite 查询,可返回少量结果或生成供代码解释器读取的 JSON 文件",
     executionMode: "sequential",
     parameters: Type.Object({
       sql: Type.String({ description: "A single read-only SQLite SELECT, WITH, PRAGMA, or EXPLAIN query." }),
@@ -147,7 +147,7 @@ export function createAgentTools(
     label: "执行受限 Python",
     description:
       "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text and emit_image() for Matplotlib Figure or Pillow Image output. Matplotlib is preconfigured with a Simplified Chinese system font: do not replace it with hard-coded font families such as SimHei. When explicit Matplotlib font properties are needed, use matplotlib_chinese_font(size), or matplotlib_chinese_font(size, bold=True) for bold text. For Chinese Pillow text, use chinese_font(size), or chinese_font(size, bold=True) for bold text. Emitted PNGs are attached to the answer automatically; never invent a Markdown image URL. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
-    promptSnippet: "在严格沙箱中执行 Python，进行额外计算、统计或 PNG 图表渲染",
+    promptSnippet: "在严格沙箱中执行 Python,进行额外计算、统计或 PNG 图表渲染",
     executionMode: "sequential",
     parameters: Type.Object({
       code: Type.String({ description: "Python source code to execute.", maxLength: 20_000 }),

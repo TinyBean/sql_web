@@ -32,17 +32,13 @@ OEE HTTP API / 本地 JSON
           ▼
    OeeDataStore
    ├─ 流式下载与解析
-   ├─ 请求日期和响应日期审计
-   ├─ 业务主键去重与幂等更新
-   ├─ 缺失/部分响应记录
-   └─ 月度汇总刷新
+   ├─ 必填字段校验
+   └─ API 原始行逐条追加
           │
           ▼
    .data/database/oee.sqlite
-   ├─ OEE 事实表
-   ├─ DUT 大字段 Payload 表
-   ├─ 月度汇总表
-   └─ 导入批次、覆盖范围和缺口
+   ├─ oee_availability
+   └─ oee_dut_utilization
           │
           ▼
        Agent 问答
@@ -53,33 +49,27 @@ OEE API 默认地址：
 - `R_OEE_MT_TOP_AVAILABILITY_2W`
 - `R_OEE_MT_TOP_DUT_UTILIZATION_2W`
 
-参数使用 `pSTARTDAY=YYYYMMDD&pENDDAY=YYYYMMDD`。单次自动拉取最多 14 天，避免超出接口窗口。
+参数使用 `pSTARTDAY=YYYYMMDD&pENDDAY=YYYYMMDD`。开始和结束日期均包含在查询范围内，单次 API 拉取最多 3 个自然日。`data:sync` 会自动将更长范围拆成最多 3 天的串行请求。如果 API 要求 HTTP Basic 鉴权，在 `.env` 中同时配置 `API_USER` 和 `API_PWD`；鉴权信息只会通过请求头发送，不会写入 URL 或日志。
+
+DUT 接口返回的 UTC `DATE` 比请求业务日期早一天；增量同步规划会应用这一固定偏移，但事实表始终保存接口返回的原始 `DATE`，不会改写或裁剪记录。
 
 ## 数据完整性
 
-每次导入都会记录：
+每次导入的命令结果和 JSON Lines 日志会包含：
 
 - 请求的开始、结束日期。
 - 响应实际包含的最小、最大日期。
-- 接收、新增、更新、未变化和响应内重复行数。
-- 请求窗口内完全缺失的日期。
-- 重复拉取时，响应行数低于数据库已有行数的日期。
-- 响应中超出请求窗口的日期。
-- 单条记录中结束时间早于开始时间等字段级质量问题。
+- 接收和新增行数。
 - 当前数据库的最小日期、最大日期、总行数和日期数。
 - 原始响应 SHA-256。
 
-事实表使用稳定业务字段生成 `record_key`。重叠窗口再次导入不会制造重复记录；相同业务记录内容发生变化时会更新。`oee_data_gaps` 保存未解决缺口，后续 `data:sync` 会优先补拉缺口，并额外重拉最近两天以接收迟到或修正数据。
+Availability 和 DUT 两个事实表都使用自增 `id` 作为主键。API 返回的每一行都会独立写入，即使所有源字段完全相同也不会比对、合并或删除；因此重复拉取同一窗口会再次保存原始行。Availability 的 `tool_name`、`lot_id`、`final_state`、`step`、`date`、`time_span` 为非空字段，`shift` 允许为空。DUT 的 `machine_id`、`lot_id`、`in_qty`、`out_qty`、`test_stage`、`dut_num`、`step_id` 为非空字段，其他源字段允许为空且暂不校验。DUT 长字段直接保存在事实表中。
 
-数据库状态可以直接查询：
+数据库只保留两张用户表。SQLite 因 `AUTOINCREMENT` 自动维护的内部表 `sqlite_sequence` 不属于业务表。覆盖状态由 `data:status` 直接扫描事实表计算，也可以直接查询：
 
 ```sql
-SELECT * FROM oee_data_status;
-
-SELECT *
-FROM oee_data_gaps
-WHERE status = 'open'
-ORDER BY dataset, data_date;
+SELECT MIN(substr(date, 1, 10)), MAX(substr(date, 1, 10)), COUNT(*)
+FROM oee_availability;
 ```
 
 ## 数据命令
@@ -102,21 +92,29 @@ npm run data:import -- dut_utilization .data/dut.json 2026-08-20 2026-08-30
 直接拉取并导入一个窗口：
 
 ```bash
-npm run data:pull -- availability 2026-08-20 2026-08-30
-npm run data:pull -- dut_utilization 2026-08-20 2026-08-30
+npm run data:pull -- availability 2026-08-20 2026-08-22
+npm run data:pull -- dut_utilization 2026-08-20 2026-08-22
 ```
 
-根据数据库覆盖范围、未解决缺口和两天重叠窗口同步到指定日期：
+根据事实表的最大日期和两天重叠窗口增量同步到指定日期：
 
 ```bash
 npm run data:sync -- all 2026-09-02
 ```
 
-新初始化的空数据库首次同步需要提供起始日期：
+空数据库首次同步或现有数据库历史回填时，提供明确的起始日期：
 
 ```bash
 npm run data:sync -- all 2026-09-02 2026-08-20
 ```
+
+例如，在保留现有数据的前提下回填 2026 年 1 月 1 日至 9 月 2 日的两个数据集：
+
+```bash
+npm run data:sync -- all 2026-09-02 2026-01-01
+```
+
+显式提供起始日期时，同步会完整拉取从起始日期到结束日期的所有窗口。数据库不保存导入批次或逐日进度，因此中途失败后原样重试会再次追加先前已完成窗口的原始行；如需避免重拉，应把起始日期调整到失败窗口。所有重复响应行仍会保留。
 
 查看状态：
 
@@ -125,27 +123,16 @@ npm run data:status
 ```
 
 生产环境可定期执行 `data:sync`。命令失败时返回非零退出码，可以由 cron、systemd timer 或调度平台告警。
+同步完成后运行 `npm run data:status` 检查两个数据集的最小日期、最大日期、总行数和不同日期数。
 
 数据拉取、重试、导入和同步结果以 JSON Lines 格式持续追加到 `.data/logs/oee-data.log`，该文件不按日期滚动。网站服务日志与数据日志分开，按上海自然日写入 `.data/logs/sql_web-YYYY-MM-DD.log`；两类日志的时间戳均使用上海时区（`+08:00`）。
 
 ## 表结构
 
-主要查询表：
+数据库中的两张用户表：
 
-- `oee_availability`：Availability 事实数据。
-- `oee_dut_utilization`：DUT 统计事实数据。
-- `oee_dut_payload`：不参与常规统计的长位图字段。
-- `oee_availability_monthly_stats`：Availability 月度汇总。
-- `oee_dut_monthly_stats`：DUT 月度汇总。
-
-数据治理表：
-
-- `oee_ingestion_runs`：每次文件导入或 API 拉取批次。
-- `oee_ingestion_run_days`：每个请求日期的行数和质量状态。
-- `oee_data_gaps`：需要补拉或人工确认的日期。
-- `oee_record_issues`：需要修复或人工接受的记录级质量问题。
-- `oee_dataset_state`：当前数据库覆盖范围。
-- `oee_data_status`：面向 Agent 的覆盖状态视图。
+- `oee_availability`：Availability 原始事实数据，自增 `id` 主键加七个源字段。
+- `oee_dut_utilization`：DUT 原始事实数据，自增 `id` 主键加 37 个源字段（包括长位图字段）。
 
 ## 启动
 
@@ -181,6 +168,8 @@ npm test
 | `SQL_WEB_BWRAP_PATH` | `/usr/bin/bwrap` | bubblewrap 可执行文件 |
 | `SQL_WEB_PRLIMIT_PATH` | `/usr/bin/prlimit` | 资源限制工具 |
 | `OEE_API_BASE_URL` | 内部 OEE 地址 | 数据拉取根地址 |
+| `API_USER` | 未配置 | OEE API HTTP Basic 用户名，必须与 `API_PWD` 同时配置 |
+| `API_PWD` | 未配置 | OEE API HTTP Basic 密码，必须与 `API_USER` 同时配置 |
 | `SQL_WEB_PROVIDER` | 必填 | 模型提供方 |
 | `SQL_WEB_MODEL` | 必填 | 模型 ID |
 

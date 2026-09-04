@@ -7,3 +7,4 @@ public/generated/
 .env
 npm-debug.log*
 coverage/
+.vscode

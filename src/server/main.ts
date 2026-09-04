@@ -63,8 +63,8 @@ server.once("error", (error) => {
 
 server.listen(config.port, config.host, () => {
   logger.info("system.started", { host: config.host, port: config.port });
-  console.log(`数据库问答网站已启动：http://${config.host}:${config.port}`);
-  console.log(`日志：${config.logDir}/sql_web-YYYY-MM-DD.log`);
+  console.log(`数据库问答网站已启动:http://${config.host}:${config.port}`);
+  console.log(`日志:${config.logDir}/sql_web-YYYY-MM-DD.log`);
 });
 
 let closing = false;
@@ -72,7 +72,7 @@ function shutdown(signal: NodeJS.Signals): void {
   if (closing) return;
   closing = true;
   logger.info("system.stopping", { signal });
-  console.log(`\n收到 ${signal}，正在关闭…`);
+  console.log(`\n收到 ${signal},正在关闭…`);
   server.close(() => {
     sessions.dispose();
     database.close();

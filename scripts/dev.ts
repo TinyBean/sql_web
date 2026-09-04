@@ -1,7 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-const children: ChildProcess[] = [
+const children = [
   spawn(npmCommand, ["run", "dev:server"], { stdio: "inherit" }),
   spawn(npmCommand, ["run", "dev:client"], { stdio: "inherit" }),
 ];

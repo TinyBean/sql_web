@@ -159,7 +159,7 @@ function schemaColumn(value: unknown, path: string): SchemaColumn {
 
 function publicSchemaObject(value: unknown, path: string): PublicSchemaObject {
   const item = record(value, path);
-  if ("sql" in item) invalid(`${path}.sql`, "不存在（公开响应不得包含建表 SQL）");
+  if ("sql" in item) invalid(`${path}.sql`, "不存在(公开响应不得包含建表 SQL)");
   return {
     type: schemaObjectType(item["type"], `${path}.type`),
     name: string(item["name"], `${path}.name`),

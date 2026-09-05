@@ -30,7 +30,9 @@ function writeSkill(
     path.join(directory, "SKILL.md"),
     `---\nname: ${skillName}\ndescription: A fixture skill used to validate catalog discovery behavior.\n---\n\n# Fixture\n`,
   );
-  writeFileSync(path.join(directory, "tools.js"), toolModule);
+  const assetsDirectory = path.join(directory, "assets");
+  mkdirSync(assetsDirectory);
+  writeFileSync(path.join(assetsDirectory, "tools.js"), toolModule);
 }
 
 function fixtureRoot(t: TestContext): string {
@@ -93,6 +95,22 @@ test("discovers namespaced Skill tools without exposing a global registry", asyn
     undefined as never,
   );
   assert.equal(persisted.length, 1);
+});
+
+test("rejects Skill tools in the legacy root directory", async (t) => {
+  const root = fixtureRoot(t);
+  const directory = path.join(root, "legacy-calculator");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    path.join(directory, "SKILL.md"),
+    "---\nname: legacy-calculator\ndescription: A legacy fixture with a root-level tool module.\n---\n\n# Legacy fixture\n",
+  );
+  writeFileSync(path.join(directory, "tools.js"), VALID_TOOL_MODULE);
+
+  await assert.rejects(
+    () => loadAgentSkillCatalog({ directory: root }),
+    /工具模块必须放在 assets\//u,
+  );
 });
 
 test("rejects duplicate local names and overlong published names", async (t) => {

@@ -311,9 +311,18 @@ export async function loadAgentSkillCatalog({
       throw new Error(`Skill 命名空间冲突:${namespaceOwner} 与 ${skill.name} -> ${namespace}`);
     }
     seenNamespaces.set(namespace, skill.name);
-    const moduleCandidates = [
+    const legacyModulePath = [
       path.join(canonicalBaseDir, "tools.js"),
       path.join(canonicalBaseDir, "tools.ts"),
+    ].find(existsSync);
+    if (legacyModulePath) {
+      throw new Error(
+        `Skill ${skill.name} 的工具模块必须放在 assets/，不支持根目录文件:${legacyModulePath}`,
+      );
+    }
+    const moduleCandidates = [
+      path.join(canonicalBaseDir, "assets", "tools.js"),
+      path.join(canonicalBaseDir, "assets", "tools.ts"),
     ];
     const modulePath = moduleCandidates.find(existsSync);
     let factory: SkillToolFactory | null = null;

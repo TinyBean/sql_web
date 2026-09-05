@@ -1,10 +1,10 @@
 import path from "node:path";
-import { AppDatabase } from "../../data/database.ts";
+import { AppDatabase } from "../../../data/database.ts";
 
 const DEFAULT_DATABASE_PATH = ".data/database/oee.sqlite";
 
 export function resolveTestOeeProjectRoot(moduleDirectory = import.meta.dirname): string {
-  const sourceRoot = path.resolve(moduleDirectory, "../../../..");
+  const sourceRoot = path.resolve(moduleDirectory, "../../../../..");
   return path.basename(sourceRoot) === "dist"
     ? path.resolve(sourceRoot, "..")
     : sourceRoot;

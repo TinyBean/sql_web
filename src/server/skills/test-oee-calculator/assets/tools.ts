@@ -1,4 +1,5 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { withTestOeeDatabase } from "./database.ts";
 import {
@@ -7,7 +8,7 @@ import {
   type TestOeeKindFilter,
 } from "./test-oee-calculator.ts";
 
-export function createTools() {
+export function createTools(): ToolDefinition[] {
   const calculateTestOeeTool = defineTool({
     name: "calculate_test_oee",
     label: "计算 Test OEE",

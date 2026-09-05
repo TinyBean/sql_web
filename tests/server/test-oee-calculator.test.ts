@@ -11,7 +11,7 @@ import {
   resolveTestOeeDatabasePath,
   resolveTestOeeProjectRoot,
   withTestOeeDatabase,
-} from "../../src/server/skills/test-oee-calculator/database.ts";
+} from "../../src/server/skills/test-oee-calculator/assets/database.ts";
 import {
   calculateTestOee,
   classifyAvailabilityState,
@@ -20,8 +20,8 @@ import {
   inclusiveCalendarDays,
   isValidOeeLotId,
   TestOeeInputError,
-} from "../../src/server/skills/test-oee-calculator/test-oee-calculator.ts";
-import { createTools } from "../../src/server/skills/test-oee-calculator/tools.ts";
+} from "../../src/server/skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { createTools } from "../../src/server/skills/test-oee-calculator/assets/tools.ts";
 
 interface CallableSkillTool {
   readonly name: string;
@@ -95,11 +95,11 @@ test("resolves Test OEE database paths from source and build locations", (t) => 
   const projectRoot = path.resolve(".");
   const sourceModuleDirectory = path.join(
     projectRoot,
-    "src/server/skills/test-oee-calculator",
+    "src/server/skills/test-oee-calculator/assets",
   );
   const buildModuleDirectory = path.join(
     projectRoot,
-    "dist/src/server/skills/test-oee-calculator",
+    "dist/src/server/skills/test-oee-calculator/assets",
   );
   assert.equal(resolveTestOeeProjectRoot(sourceModuleDirectory), projectRoot);
   assert.equal(resolveTestOeeProjectRoot(buildModuleDirectory), projectRoot);

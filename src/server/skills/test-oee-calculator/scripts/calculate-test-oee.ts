@@ -1,9 +1,9 @@
 import { parseArgs } from "node:util";
-import { withTestOeeDatabase } from "../database.ts";
+import { withTestOeeDatabase } from "../assets/database.ts";
 import {
   calculateTestOee,
   type TestOeeKindFilter,
-} from "../test-oee-calculator.ts";
+} from "../assets/test-oee-calculator.ts";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,

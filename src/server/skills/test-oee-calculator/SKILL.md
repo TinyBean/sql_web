@@ -23,7 +23,9 @@ Run the bundled deterministic CLI:
 node --import tsx src/server/skills/test-oee-calculator/scripts/calculate-test-oee.ts START_DATE END_DATE [all|MT|ST]
 ```
 
-The namespaced application tools and CLI both call the canonical implementation in `test-oee-calculator.ts`.
+The namespaced application tools and CLI both call the canonical implementation in
+`assets/test-oee-calculator.ts`. Runtime source modules and other code resources live in
+`assets/`; directly executable entrypoints live in `scripts/`.
 
 ## Explain or audit
 

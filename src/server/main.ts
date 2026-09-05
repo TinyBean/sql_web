@@ -3,7 +3,7 @@ import { AgentSessionStore } from "./agent/agent-sessions.ts";
 import { ArtifactStore } from "./tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "./tool/code-interpreter.ts";
 import { loadConfig, loadProjectEnvironment } from "./config.ts";
-import { AppDatabase } from "./data/database.ts";
+import { AppDatabase } from "./database/database.ts";
 import { createWebServer } from "./http-server.ts";
 import { DailyFileLogger } from "./logger.ts";
 

@@ -15,7 +15,7 @@ import {
   parseJson,
   type Decoder,
 } from "../../src/client/api-contracts.ts";
-import { AppDatabase } from "../../src/server/data/database.ts";
+import { AppDatabase } from "../../src/server/database/database.ts";
 import {
   createWebServer,
   type StreamableAgentSession,

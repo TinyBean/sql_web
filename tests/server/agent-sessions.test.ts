@@ -16,7 +16,7 @@ import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore, SessionNotFoundError } from "../../src/server/agent/agent-sessions.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
-import { AppDatabase } from "../../src/server/data/database.ts";
+import { AppDatabase } from "../../src/server/database/database.ts";
 
 test("keeps Skill tools session-local and activates them only after reading SKILL.md", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-agent-"));

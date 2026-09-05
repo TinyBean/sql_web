@@ -19,8 +19,8 @@ import type {
   SseEventMap,
 } from "../shared/contracts.ts";
 import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.ts";
-import { DatabaseInputError } from "./data/database.ts";
-import type { AppDatabase } from "./data/database.ts";
+import { DatabaseInputError } from "./database/database.ts";
+import type { AppDatabase } from "./database/database.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";

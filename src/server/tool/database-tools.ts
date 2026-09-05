@@ -5,8 +5,8 @@ import type { AgentToolName } from "../../shared/contracts.ts";
 import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
 import type { SessionArtifactStore } from "./artifact-store.ts";
 import type { CodeInterpreterRuntime } from "./code-interpreter.ts";
-import type { AppDatabase } from "../data/database.ts";
-import type { QueryResult, QueryTruncationReason } from "../data/database.ts";
+import type { AppDatabase } from "../database/database.ts";
+import type { QueryResult, QueryTruncationReason } from "../database/database.ts";
 
 export const BASE_AGENT_TOOL_NAMES = ["execute_sql", "get_current_time"] as const satisfies
   readonly AgentToolName[];

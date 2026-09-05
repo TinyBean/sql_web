@@ -7,7 +7,7 @@ import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
 import { createAgentTools } from "../../src/server/tool/database-tools.ts";
-import { AppDatabase } from "../../src/server/data/database.ts";
+import { AppDatabase } from "../../src/server/database/database.ts";
 
 interface ToolResult {
   readonly content: readonly { readonly type: string; readonly text?: string }[];

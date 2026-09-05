@@ -1,4 +1,4 @@
-import type { AppDatabase } from "../../../data/database.ts";
+import type { AppDatabase } from "../../../database/database.ts";
 
 export type TestOeeKind = "MT" | "ST";
 export type TestOeeKindFilter = TestOeeKind | "all";

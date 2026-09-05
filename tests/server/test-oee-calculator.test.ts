@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { AppDatabase } from "../../src/server/data/database.ts";
+import { AppDatabase } from "../../src/server/database/database.ts";
 import {
   resolveTestOeeDatabasePath,
   resolveTestOeeProjectRoot,

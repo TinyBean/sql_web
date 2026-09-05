@@ -5,8 +5,8 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { getCurrentTime } from "../../src/server/tool/database-tools.ts";
-import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../../src/server/data/database.ts";
-import type { QueryResult } from "../../src/server/data/database.ts";
+import { AppDatabase, assertReadOnlyQuery, DatabaseInputError } from "../../src/server/database/database.ts";
+import type { QueryResult } from "../../src/server/database/database.ts";
 
 function createFixture(t: TestContext): AppDatabase {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-test-"));

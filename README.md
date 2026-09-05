@@ -9,7 +9,7 @@ src/
 ├── client/          # 浏览器端交互、渲染和接口解码
 ├── server/
 │   ├── agent/       # Agent 会话与模型配置
-│   ├── data/        # SQLite 只读查询
+│   ├── database/    # SQLite 只读查询
 │   ├── skills/      # 业务技能、规则参考与技能脚本
 │   │   └── test-oee-calculator/
 │   │       ├── assets/      # 工具定义、计算器与数据库辅助代码

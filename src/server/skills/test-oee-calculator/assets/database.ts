@@ -1,5 +1,5 @@
 import path from "node:path";
-import { AppDatabase } from "../../../data/database.ts";
+import { AppDatabase } from "../../../database/database.ts";
 
 const DEFAULT_DATABASE_PATH = ".data/database/oee.sqlite";
 

@@ -24,7 +24,7 @@ import {
   type SerializedSession,
   type SessionSummary,
 } from "../../shared/contracts.ts";
-import type { AppDatabase } from "../data/database.ts";
+import type { AppDatabase } from "../database/database.ts";
 import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";

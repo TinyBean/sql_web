@@ -1,13 +1,13 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AppDatabase } from "../../data/database.ts";
+import { withTestOeeDatabase } from "./database.ts";
 import {
   calculateTestOee,
   classifyTestOeeRecord,
   type TestOeeKindFilter,
 } from "./test-oee-calculator.ts";
 
-export function createTools({ database }: { readonly database: AppDatabase }) {
+export function createTools() {
   const calculateTestOeeTool = defineTool({
     name: "calculate_test_oee",
     label: "计算 Test OEE",
@@ -31,11 +31,13 @@ export function createTools({ database }: { readonly database: AppDatabase }) {
     }),
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
-      const result = calculateTestOee(
-        database,
-        params.start_date,
-        params.end_date,
-        (params.kind ?? "all") as TestOeeKindFilter,
+      const result = withTestOeeDatabase((database) =>
+        calculateTestOee(
+          database,
+          params.start_date,
+          params.end_date,
+          (params.kind ?? "all") as TestOeeKindFilter,
+        ),
       );
       signal?.throwIfAborted();
       return {

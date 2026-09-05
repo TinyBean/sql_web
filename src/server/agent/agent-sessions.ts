@@ -470,7 +470,7 @@ export class AgentSessionStore {
         `Pi 无法解析本地模型 ${resolvedOptions.model.provider}/${resolvedOptions.model.model},请检查模型文件格式`,
       );
     }
-    const skillCatalog = await loadAgentSkillCatalog({ database: resolvedOptions.database });
+    const skillCatalog = await loadAgentSkillCatalog();
     const store = new AgentSessionStore(resolvedOptions, modelRuntime, skillCatalog);
     store.#logger.info("agent.store.opened", {
       provider: resolvedOptions.model.provider,
@@ -606,7 +606,7 @@ export class AgentSessionStore {
       promptLength: prompt.length,
     });
     try {
-      await session.prompt(prompt, { expandPromptTemplates: true });
+      await session.prompt(prompt, { expandPromptTemplates: false });
       const times = this.#sessionTimes.get(id);
       if (times) times.modified = new Date();
       this.#logger.info("agent.prompt.completed", {

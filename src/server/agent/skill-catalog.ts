@@ -15,7 +15,6 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AppDatabase } from "../data/database.ts";
 
 export const SKILL_LOADED_ENTRY_TYPE = "sql_web.skill.loaded";
 export const SKILL_READ_TOOL_NAME = "read";
@@ -29,11 +28,7 @@ interface SkillLoadedEntryData {
   readonly name: string;
 }
 
-interface SkillToolFactoryContext {
-  readonly database: AppDatabase;
-}
-
-type SkillToolFactory = (context: SkillToolFactoryContext) => readonly ToolDefinition[];
+type SkillToolFactory = () => readonly ToolDefinition[];
 
 interface CatalogSkill {
   readonly skill: Skill;
@@ -53,7 +48,6 @@ export interface AgentSkillCatalog {
 }
 
 export interface LoadAgentSkillCatalogOptions {
-  readonly database: AppDatabase;
   readonly directory?: string;
 }
 
@@ -81,7 +75,7 @@ function asToolFactory(moduleValue: unknown, modulePath: string): SkillToolFacto
     typeof moduleValue !== "object" || moduleValue === null ||
     !("createTools" in moduleValue) || typeof moduleValue.createTools !== "function"
   ) {
-    throw new Error(`Skill 工具模块必须导出 createTools(context):${modulePath}`);
+    throw new Error(`Skill 工具模块必须导出 createTools():${modulePath}`);
   }
   return moduleValue.createTools as SkillToolFactory;
 }
@@ -125,10 +119,9 @@ function validateToolDefinitions(
 
 function definitionsForRegistration(
   catalogSkill: CatalogSkill,
-  database: AppDatabase,
 ): ToolDefinition[] {
   if (!catalogSkill.factory) return [];
-  const definitions = catalogSkill.factory({ database });
+  const definitions = catalogSkill.factory();
   const validated = validateToolDefinitions(
     catalogSkill.skill.name,
     catalogSkill.namespace,
@@ -159,10 +152,6 @@ function loadedSkillsFromBranch(
   return loaded;
 }
 
-function explicitSkillName(text: string): string | null {
-  return /^\/skill:([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s|$)/u.exec(text.trimStart())?.[1] ?? null;
-}
-
 async function resolveReadableFile(
   requestedPath: string,
   cwd: string,
@@ -184,7 +173,6 @@ async function resolveReadableFile(
 
 function createSkillRuntimeExtension(
   catalogSkills: readonly CatalogSkill[],
-  database: AppDatabase,
   cwd: string,
 ): ExtensionFactory {
   const skillsByName = new Map(catalogSkills.map((catalogSkill) => [
@@ -210,7 +198,7 @@ function createSkillRuntimeExtension(
       }
       const catalogSkill = skillsByName.get(skillName);
       if (!catalogSkill) throw new Error(`未知 Skill:${skillName}`);
-      for (const definition of definitionsForRegistration(catalogSkill, database)) {
+      for (const definition of definitionsForRegistration(catalogSkill)) {
         pi.registerTool(definition);
       }
       registeredSkills.add(skillName);
@@ -272,20 +260,14 @@ function createSkillRuntimeExtension(
       },
     }));
 
-    pi.on("input", (event) => {
-      const skillName = explicitSkillName(event.text);
-      if (skillName && knownSkills.has(skillName)) activate(skillName, true);
-      return { action: "continue" };
-    });
     pi.on("session_start", (_event, ctx) => reconcile(loadedSkillsFromBranch(ctx, knownSkills)));
     pi.on("session_tree", (_event, ctx) => reconcile(loadedSkillsFromBranch(ctx, knownSkills)));
   };
 }
 
 export async function loadAgentSkillCatalog({
-  database,
   directory = defaultSkillsDirectory(),
-}: LoadAgentSkillCatalogOptions): Promise<AgentSkillCatalog> {
+}: LoadAgentSkillCatalogOptions = {}): Promise<AgentSkillCatalog> {
   const configuredDirectory = path.resolve(directory);
   if (!existsSync(configuredDirectory)) {
     throw new Error(`Skill 目录不存在:${configuredDirectory}`);
@@ -343,7 +325,7 @@ export async function loadAgentSkillCatalog({
         throw new Error(`Skill 工具模块通过符号链接逃逸 Skill 目录:${modulePath}`);
       }
       factory = asToolFactory(await import(pathToFileURL(canonicalModulePath).href), modulePath);
-      const validated = validateToolDefinitions(skill.name, namespace, factory({ database }));
+      const validated = validateToolDefinitions(skill.name, namespace, factory());
       localToolNames = validated.localNames;
       publishedToolNames = validated.publishedNames;
       for (const publishedName of publishedToolNames) {
@@ -376,7 +358,7 @@ export async function loadAgentSkillCatalog({
     createSessionExtension: (cwd) => ({
       name: "sql-web-skill-runtime",
       hidden: true,
-      factory: createSkillRuntimeExtension(catalogSkills, database, path.resolve(cwd)),
+      factory: createSkillRuntimeExtension(catalogSkills, path.resolve(cwd)),
     }),
   };
 }

@@ -1,6 +1,5 @@
-import path from "node:path";
 import { parseArgs } from "node:util";
-import { AppDatabase } from "../../../data/database.ts";
+import { withTestOeeDatabase } from "../database.ts";
 import {
   calculateTestOee,
   type TestOeeKindFilter,
@@ -21,21 +20,13 @@ if (!startDate || !endDate || !["all", "MT", "ST"].includes(kindArgument)) {
   );
 }
 
-const projectRoot = path.resolve(import.meta.dirname, "../../../../..");
-const databasePath = path.resolve(
-  projectRoot,
-  values.database ?? process.env["SQL_WEB_DB_PATH"] ?? ".data/database/oee.sqlite",
-);
-const database = AppDatabase.open({ filePath: databasePath });
-
-try {
-  const result = calculateTestOee(
+const result = withTestOeeDatabase(
+  (database) => calculateTestOee(
     database,
     startDate,
     endDate,
     kindArgument as TestOeeKindFilter,
-  );
-  console.log(JSON.stringify(result, null, 2));
-} finally {
-  database.close();
-}
+  ),
+  values.database,
+);
+console.log(JSON.stringify(result, null, 2));

@@ -257,3 +257,67 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal((await store.list()).some((item) => item.id === persistedId), false);
   await assert.rejects(() => store.get(persistedId), SessionNotFoundError);
 });
+
+test("forwards explicit Skill syntax as ordinary prompt text", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-agent-prompt-"));
+  const agentDir = path.join(directory, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(
+    path.join(agentDir, "models.json"),
+    JSON.stringify({
+      providers: {
+        "test-provider": {
+          baseUrl: "http://127.0.0.1:1/v1",
+          api: "openai-completions",
+          apiKey: "test-only",
+          models: [{ id: "test-model", name: "Test Model" }],
+        },
+      },
+    }),
+  );
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+  const database = AppDatabase.open({ filePath });
+  const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
+  const codeInterpreter = await CodeInterpreterRuntime.create({
+    pythonPath: path.join(directory, "missing-python"),
+    bwrapPath: path.join(directory, "missing-bwrap"),
+    prlimitPath: path.join(directory, "missing-prlimit"),
+    projectRoot: directory,
+  });
+  const store = await AgentSessionStore.open({
+    database,
+    artifacts,
+    codeInterpreter,
+    cwd: directory,
+    sessionDir: path.join(directory, "sessions"),
+    agentDir,
+    model: { provider: "test-provider", model: "test-model" },
+  });
+  t.after(() => {
+    store.dispose();
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  const created = await store.create();
+  const piSession = await store.get(created.id);
+  let forwardedPrompt:
+    | { readonly text: string; readonly expandPromptTemplates: boolean | undefined }
+    | undefined;
+  const originalPrompt = piSession.prompt;
+  piSession.prompt = async (text, options) => {
+    forwardedPrompt = { text, expandPromptTemplates: options?.expandPromptTemplates };
+  };
+  try {
+    await store.prompt(created.id, "/skill:test-oee-calculator audit");
+  } finally {
+    piSession.prompt = originalPrompt;
+  }
+
+  assert.deepEqual(forwardedPrompt, {
+    text: "/skill:test-oee-calculator audit",
+    expandPromptTemplates: false,
+  });
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+});

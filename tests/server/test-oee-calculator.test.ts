@@ -8,6 +8,11 @@ import test from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AppDatabase } from "../../src/server/data/database.ts";
 import {
+  resolveTestOeeDatabasePath,
+  resolveTestOeeProjectRoot,
+  withTestOeeDatabase,
+} from "../../src/server/skills/test-oee-calculator/database.ts";
+import {
   calculateTestOee,
   classifyAvailabilityState,
   classifyTestOeeKind,
@@ -86,6 +91,56 @@ test("validates and counts inclusive date ranges", () => {
   );
 });
 
+test("resolves Test OEE database paths from source and build locations", (t) => {
+  const projectRoot = path.resolve(".");
+  const sourceModuleDirectory = path.join(
+    projectRoot,
+    "src/server/skills/test-oee-calculator",
+  );
+  const buildModuleDirectory = path.join(
+    projectRoot,
+    "dist/src/server/skills/test-oee-calculator",
+  );
+  assert.equal(resolveTestOeeProjectRoot(sourceModuleDirectory), projectRoot);
+  assert.equal(resolveTestOeeProjectRoot(buildModuleDirectory), projectRoot);
+
+  const previousDatabasePath = process.env["SQL_WEB_DB_PATH"];
+  t.after(() => {
+    if (previousDatabasePath === undefined) delete process.env["SQL_WEB_DB_PATH"];
+    else process.env["SQL_WEB_DB_PATH"] = previousDatabasePath;
+  });
+  process.env["SQL_WEB_DB_PATH"] = "from-environment.sqlite";
+  assert.equal(
+    resolveTestOeeDatabasePath(undefined, sourceModuleDirectory),
+    path.join(projectRoot, "from-environment.sqlite"),
+  );
+  assert.equal(
+    resolveTestOeeDatabasePath("from-override.sqlite", buildModuleDirectory),
+    path.join(projectRoot, "from-override.sqlite"),
+  );
+  delete process.env["SQL_WEB_DB_PATH"];
+  assert.equal(
+    resolveTestOeeDatabasePath(undefined, buildModuleDirectory),
+    path.join(projectRoot, ".data/database/oee.sqlite"),
+  );
+});
+
+test("closes a Skill-owned database after its operation", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "test-oee-database-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+
+  let openedDatabase: AppDatabase | undefined;
+  const schema = withTestOeeDatabase((database) => {
+    openedDatabase = database;
+    return database.getSchema();
+  }, filePath);
+  assert.ok(schema.length > 0);
+  assert.ok(openedDatabase);
+  assert.throws(() => openedDatabase!.getSchema(), /数据库尚未初始化/u);
+});
+
 test("calculates MT/ST Test OEE with all machines and all test stages", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "test-oee-calculator-"));
   const filePath = path.join(directory, "oee.sqlite");
@@ -114,9 +169,12 @@ test("calculates MT/ST Test OEE with all machines and all test stages", async (t
   insertDut.run("INVALID", "X1", "999", "999", "1st", "999", "5000", "2026-01-01");
   writer.close();
 
+  const previousDatabasePath = process.env["SQL_WEB_DB_PATH"];
   const database = AppDatabase.open({ filePath });
   t.after(() => {
     database.close();
+    if (previousDatabasePath === undefined) delete process.env["SQL_WEB_DB_PATH"];
+    else process.env["SQL_WEB_DB_PATH"] = previousDatabasePath;
     rmSync(directory, { recursive: true, force: true });
   });
   const result = calculateTestOee(database, "2026-01-01", "2026-01-01");
@@ -153,7 +211,8 @@ test("calculates MT/ST Test OEE with all machines and all test stages", async (t
   const mtOnly = calculateTestOee(database, "2026-01-01", "2026-01-01", "MT");
   assert.deepEqual(mtOnly.results.map((row) => row.kind), ["MT"]);
 
-  const tools = createTools({ database }) as readonly CallableSkillTool[];
+  process.env["SQL_WEB_DB_PATH"] = path.join(directory, "missing.sqlite");
+  const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
     "calculate_test_oee",
     "classify_test_oee_record",
@@ -162,6 +221,19 @@ test("calculates MT/ST Test OEE with all machines and all test stages", async (t
   const classifyTool = tools.find((tool) => tool.name === "classify_test_oee_record");
   assert.ok(calculateTool);
   assert.ok(classifyTool);
+  const classified = await classifyTool.execute(
+    "classify",
+    { lot_id: "P123", step: "1000", machine_id: "ADH092", final_state: "Retest(Golden)" },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  assert.equal(
+    (JSON.parse(classified.content[0]?.text ?? "{}") as { kind?: string }).kind,
+    "ST",
+  );
+
+  process.env["SQL_WEB_DB_PATH"] = filePath;
   const calculated = await calculateTool.execute(
     "calculate",
     { start_date: "2026-01-01", end_date: "2026-01-01", kind: "ST" },
@@ -173,17 +245,6 @@ test("calculates MT/ST Test OEE with all machines and all test stages", async (t
     (JSON.parse(calculated.content[0]?.text ?? "{}") as { results?: { kind: string }[] }).results
       ?.map((row) => row.kind),
     ["ST"],
-  );
-  const classified = await classifyTool.execute(
-    "classify",
-    { lot_id: "P123", step: "1000", machine_id: "ADH092", final_state: "Retest(Golden)" },
-    undefined,
-    undefined,
-    undefined as never,
-  );
-  assert.equal(
-    (JSON.parse(classified.content[0]?.text ?? "{}") as { kind?: string }).kind,
-    "ST",
   );
   await assert.rejects(
     () => calculateTool.execute(
@@ -218,6 +279,24 @@ test("runs the Skill-owned Test OEE CLI", (t) => {
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout) as { results: { kind: string }[] };
   assert.deepEqual(parsed.results.map((row) => row.kind), ["MT"]);
+
+  const fromEnvironment = spawnSync(process.execPath, [
+    "--import",
+    "tsx",
+    scriptPath,
+    "2026-01-01",
+    "2026-01-01",
+    "ST",
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, SQL_WEB_DB_PATH: filePath },
+  });
+  assert.equal(fromEnvironment.status, 0, fromEnvironment.stderr);
+  const environmentParsed = JSON.parse(fromEnvironment.stdout) as {
+    results: { kind: string }[];
+  };
+  assert.deepEqual(environmentParsed.results.map((row) => row.kind), ["ST"]);
 
   const invalid = spawnSync(process.execPath, ["--import", "tsx", scriptPath], {
     cwd: process.cwd(),

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -71,24 +79,13 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   ]);
 
   const piSession = await store.get(created.id);
-  assert.match(piSession.systemPrompt, /## 数据库结构/u);
-  assert.match(piSession.systemPrompt, /CREATE TABLE oee_availability/u);
-  assert.match(piSession.systemPrompt, /CREATE TABLE oee_dut_utilization/u);
-  assert.match(piSession.systemPrompt, /<database_schema dialect="sqlite">/u);
-  assert.match(piSession.systemPrompt, /<database_field_descriptions>/u);
-  assert.match(piSession.systemPrompt, /tool_name\(TOOL_NAME\):机台号/u);
-  assert.match(piSession.systemPrompt, /lot_id\(LOT_ID\):物料批次号/u);
-  assert.match(piSession.systemPrompt, /final_state\(FINAL_STATE\):机台状态/u);
-  assert.match(piSession.systemPrompt, /step\(STEP\):步骤/u);
-  assert.match(piSession.systemPrompt, /date\(DATE\):日期/u);
-  assert.match(piSession.systemPrompt, /shift\(SHIFT\):白班夜班的区分/u);
-  assert.match(piSession.systemPrompt, /time_span\(TIME_SPAN\):机台状态对应的时间,单位秒/u);
-  assert.match(piSession.systemPrompt, /machine_id\(MACHINE_ID\):机台号/u);
-  assert.match(piSession.systemPrompt, /in_qty\(IN_QTY\):实际的 Socket 使用数量/u);
-  assert.match(piSession.systemPrompt, /out_qty\(OUT_QTY\):好品数量\(包含复测\)/u);
-  assert.match(piSession.systemPrompt, /test_stage\(TEST_STAGE\):1st 表示初测,Rescreen 表示复测/u);
-  assert.match(piSession.systemPrompt, /dut_num\(DUT_NUM\):Socket 数量/u);
-  assert.match(piSession.systemPrompt, /step_id\(STEP_ID\):步骤/u);
+  assert.doesNotMatch(piSession.systemPrompt, /## 数据库结构/u);
+  assert.doesNotMatch(piSession.systemPrompt, /CREATE TABLE oee_availability/u);
+  assert.doesNotMatch(piSession.systemPrompt, /CREATE TABLE oee_dut_utilization/u);
+  assert.doesNotMatch(piSession.systemPrompt, /<database_schema dialect="sqlite">/u);
+  assert.doesNotMatch(piSession.systemPrompt, /<database_field_descriptions>/u);
+  assert.doesNotMatch(piSession.systemPrompt, /tool_name\(TOOL_NAME\):机台号/u);
+  assert.match(piSession.systemPrompt, /数据库结构和字段含义由适用的 Skill 提供/u);
   assert.match(piSession.systemPrompt, /<available_skills>/u);
   assert.match(piSession.systemPrompt, /<name>test-oee-calculator<\/name>/u);
   assert.match(piSession.systemPrompt, /<description>Precisely calculate or explain MT\/ST Test OEE/u);
@@ -111,6 +108,31 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
 
   const skillLocation = /<location>([^<]+)<\/location>/u.exec(piSession.systemPrompt)?.[1];
   assert.ok(skillLocation);
+  const skillContent = readFileSync(skillLocation, "utf8");
+  assert.match(skillContent, /references\/database\.md/u);
+  const databaseReference = readFileSync(
+    path.join(path.dirname(skillLocation), "references", "database.md"),
+    "utf8",
+  );
+  assert.match(databaseReference, /## 数据库结构/u);
+  assert.match(databaseReference, /<database_schema dialect="sqlite">/u);
+  assert.match(databaseReference, /CREATE TABLE oee_availability/u);
+  assert.match(databaseReference, /CREATE TABLE oee_dut_utilization/u);
+  assert.match(databaseReference, /## 字段业务含义/u);
+  assert.match(databaseReference, /<database_field_descriptions>/u);
+  assert.match(databaseReference, /tool_name\(TOOL_NAME\):机台号/u);
+  assert.match(databaseReference, /lot_id\(LOT_ID\):物料批次号/u);
+  assert.match(databaseReference, /final_state\(FINAL_STATE\):机台状态/u);
+  assert.match(databaseReference, /step\(STEP\):步骤/u);
+  assert.match(databaseReference, /date\(DATE\):日期/u);
+  assert.match(databaseReference, /shift\(SHIFT\):白班夜班的区分/u);
+  assert.match(databaseReference, /time_span\(TIME_SPAN\):机台状态对应的时间,单位秒/u);
+  assert.match(databaseReference, /machine_id\(MACHINE_ID\):机台号/u);
+  assert.match(databaseReference, /in_qty\(IN_QTY\):实际的 Socket 使用数量/u);
+  assert.match(databaseReference, /out_qty\(OUT_QTY\):好品数量\(包含复测\)/u);
+  assert.match(databaseReference, /test_stage\(TEST_STAGE\):1st 表示初测,Rescreen 表示复测/u);
+  assert.match(databaseReference, /dut_num\(DUT_NUM\):Socket 数量/u);
+  assert.match(databaseReference, /step_id\(STEP_ID\):步骤/u);
   const readTool = piSession.getToolDefinition("read");
   assert.ok(readTool);
   await assert.rejects(

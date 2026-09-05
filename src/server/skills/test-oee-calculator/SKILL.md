@@ -1,11 +1,17 @@
 ---
 name: test-oee-calculator
-description: Precisely calculate or explain MT/ST Test OEE from the DataLens SQLite database using the fixed lot, machine-type, Machine_Running, Availability, DUT-On, and Yield rules. Use for Test OEE values, component breakdowns, comparisons, or audits; do not use for Assembly OEE.
+description: Precisely calculate or explain MT/ST Test OEE and query its underlying DataLens SQLite source tables using the fixed lot, machine-type, Machine_Running, Availability, DUT-On, and Yield rules. Use for Test OEE values, component breakdowns, comparisons, audits, or questions about its source schema and fields; do not use for Assembly OEE.
 ---
 
 # Test OEE Calculator
 
 Use deterministic code for every calculation. Do not recreate the classification CASE expressions or formulas ad hoc.
+
+## Database
+
+This Skill owns the context for its OEE SQLite database. Read
+[references/database.md](references/database.md) before writing an ad hoc `execute_sql` query
+or explaining source tables and fields. Use only the documented tables and columns.
 
 ## Web Agent
 

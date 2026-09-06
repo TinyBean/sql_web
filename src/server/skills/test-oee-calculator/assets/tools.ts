@@ -1,82 +1,191 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { withTestOeeDatabase } from "./database.ts";
 import {
-  calculateTestOee,
-  classifyTestOeeRecord,
-  type TestOeeKindFilter,
+  calculateRatioProduct,
+  classifyAvailabilityStates,
+  classifyTestOeeKinds,
+  getTestOeeSqlExpressions,
+  MAX_RATIO_ITEMS,
+  MAX_RULE_BATCH_SIZE,
+  validateTestOeeLotIds,
 } from "./test-oee-calculator.ts";
 
+function jsonResult(value: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    details: value,
+  };
+}
+
 export function createTools(): ToolDefinition[] {
-  const calculateTestOeeTool = defineTool({
-    name: "calculate_test_oee",
-    label: "计算 Test OEE",
+  const getSqlExpressionsTool = defineTool({
+    name: "get_sql_expressions",
+    label: "获取 Test OEE SQL 规则",
     description:
-      "Authoritative deterministic Test OEE calculator. Use it for every Test OEE, Availability, DUT-On, or Yield request instead of recreating classification or formulas in SQL. It applies the fixed valid-LOT, MT/ST, platform fallback, Machine_Running, all-machine Availability, all-stage Yield, and shared inclusive date-range rules.",
+      "返回 Test OEE 固定关键规则对应的 SQLite 表达式，供 execute_sql 查询复用。工具只生成 LOT 过滤、MT/ST 分类和 Availability 状态分类片段，不连接或查询数据库，也不固定日期、聚合方式或最终公式。",
     executionMode: "sequential",
     parameters: Type.Object({
-      start_date: Type.String({
-        description: "Inclusive start date in YYYY-MM-DD format.",
-        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      source: Type.Union([Type.Literal("availability"), Type.Literal("dut")], {
+        description: "选择 oee_availability 或 oee_dut_utilization 对应的字段映射。",
       }),
-      end_date: Type.String({
-        description: "Inclusive end date in YYYY-MM-DD format.",
-        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
-      }),
-      kind: Type.Optional(
-        Type.Union([Type.Literal("all"), Type.Literal("MT"), Type.Literal("ST")], {
-          description: "Return both MT and ST (default), or only the selected kind.",
-        }),
-      ),
+      table_alias: Type.Optional(Type.String({
+        description: "SQL 查询中使用的可选表别名，例如 a 或 d。",
+        minLength: 1,
+        maxLength: 64,
+        pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+      })),
     }),
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
-      const result = withTestOeeDatabase((database) =>
-        calculateTestOee(
-          database,
-          params.start_date,
-          params.end_date,
-          (params.kind ?? "all") as TestOeeKindFilter,
-        ),
-      );
+      const result = getTestOeeSqlExpressions(params.source, params.table_alias);
       signal?.throwIfAborted();
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-        details: result,
-      };
+      return jsonResult(result);
     },
   });
 
-  const classifyTestOeeRecordTool = defineTool({
-    name: "classify_test_oee_record",
-    label: "判定 Test OEE 记录",
+  const validateLotIdsTool = defineTool({
+    name: "validate_lot_ids",
+    label: "筛选 Test OEE 批次",
     description:
-      "Deterministically classify one source record for Test OEE. Use it instead of reasoning manually about eligible LOT_ID, MT/ST step precedence, platform fallback, or Machine_Running state.",
+      "按固定 P/M/R/A/F/L 前缀规则判定少量 LOT_ID 是否符合 Test OEE 条件。大范围数据应使用 get_sql_expressions 返回的条件在 execute_sql 中筛选。",
     executionMode: "sequential",
     parameters: Type.Object({
-      lot_id: Type.String({ description: "Source LOT_ID." }),
-      step: Type.String({ description: "Availability STEP or DUT STEP_ID." }),
-      machine_id: Type.String({ description: "Availability TOOL_NAME or DUT MACHINE_ID." }),
-      final_state: Type.Optional(
-        Type.String({ description: "Availability FINAL_STATE when state classification is needed." }),
-      ),
+      lot_ids: Type.Array(Type.String(), {
+        description: "待判定的 LOT_ID 列表。",
+        minItems: 1,
+        maxItems: MAX_RULE_BATCH_SIZE,
+      }),
     }),
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
-      const result = classifyTestOeeRecord({
-        lotId: params.lot_id,
-        step: params.step,
-        machineId: params.machine_id,
-        ...(params.final_state === undefined ? {} : { finalState: params.final_state }),
+      const result = validateTestOeeLotIds(params.lot_ids);
+      signal?.throwIfAborted();
+      return jsonResult(result);
+    },
+  });
+
+  const classifyMtStTool = defineTool({
+    name: "classify_mt_st",
+    label: "判定 Test OEE MT/ST",
+    description:
+      "按固定步骤优先级和平台回退规则判定少量记录的 MT/ST 类型。大范围数据应使用 get_sql_expressions 返回的 CASE 在 execute_sql 中分类。",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      records: Type.Array(Type.Object({
+        step: Type.String({ description: "Availability STEP 或 DUT STEP_ID。" }),
+        machine_id: Type.String({
+          description: "Availability TOOL_NAME 或 DUT MACHINE_ID。",
+        }),
+      }), {
+        description: "待分类的记录。",
+        minItems: 1,
+        maxItems: MAX_RULE_BATCH_SIZE,
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      const result = classifyTestOeeKinds(params.records.map((record) => ({
+        step: record.step,
+        machineId: record.machine_id,
+      })));
+      signal?.throwIfAborted();
+      return jsonResult(result);
+    },
+  });
+
+  const classifyAvailabilityStatesTool = defineTool({
+    name: "classify_availability_states",
+    label: "判定 Availability 状态",
+    description:
+      "按固定 Machine_Running 规则判定少量 Availability 记录的派生状态。大范围数据应使用 get_sql_expressions 返回的 CASE 在 execute_sql 中分类。",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      records: Type.Array(Type.Object({
+        final_state: Type.String({ description: "Availability FINAL_STATE。" }),
+        lot_id: Type.String({ description: "Availability LOT_ID。" }),
+      }), {
+        description: "待分类的 Availability 记录。",
+        minItems: 1,
+        maxItems: MAX_RULE_BATCH_SIZE,
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      const result = classifyAvailabilityStates(params.records.map((record) => ({
+        finalState: record.final_state,
+        lotId: record.lot_id,
+      })));
+      signal?.throwIfAborted();
+      return jsonResult(result);
+    },
+  });
+
+  const ratioSchema = Type.Object({
+    name: Type.String({ description: "比率名称。", minLength: 1 }),
+    numerator: Type.Number({ description: "原始分子。" }),
+    denominator: Type.Number({ description: "原始分母。" }),
+    include_in_product: Type.Optional(Type.Boolean({
+      description: "是否参与最终乘积，默认 true。",
+    })),
+  });
+  const factorSchema = Type.Object({
+    name: Type.String({ description: "常量因子名称。", minLength: 1 }),
+    value: Type.Number({ description: "常量因子的原始值。" }),
+    include_in_product: Type.Optional(Type.Boolean({
+      description: "是否参与最终乘积，默认 true。",
+    })),
+  });
+  const calculateRatioProductTool = defineTool({
+    name: "calculate_ratio_product",
+    label: "计算比率与乘积",
+    description:
+      "使用 execute_sql 返回的聚合值计算任意命名比率及其可配置乘积。不会套用固定 OEE 公式、舍入、封顶或修正源值；分母为零时比率为 null。",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      ratios: Type.Array(ratioSchema, {
+        description: "要计算的分子/分母项目。",
+        minItems: 1,
+        maxItems: MAX_RATIO_ITEMS,
+      }),
+      factors: Type.Optional(Type.Array(factorSchema, {
+        description: "可选的常量乘数，例如默认口径中的 Test Time Performance=1。",
+        maxItems: MAX_RATIO_ITEMS,
+      })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      const result = calculateRatioProduct({
+        ratios: params.ratios.map((ratio) => ({
+          name: ratio.name,
+          numerator: ratio.numerator,
+          denominator: ratio.denominator,
+          ...(ratio.include_in_product === undefined
+            ? {}
+            : { includeInProduct: ratio.include_in_product }),
+        })),
+        ...(params.factors === undefined
+          ? {}
+          : {
+            factors: params.factors.map((factor) => ({
+              name: factor.name,
+              value: factor.value,
+              ...(factor.include_in_product === undefined
+                ? {}
+                : { includeInProduct: factor.include_in_product }),
+            })),
+          }),
       });
       signal?.throwIfAborted();
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-        details: result,
-      };
+      return jsonResult(result);
     },
   });
 
-  return [calculateTestOeeTool, classifyTestOeeRecordTool];
+  return [
+    getSqlExpressionsTool,
+    validateLotIdsTool,
+    classifyMtStTool,
+    classifyAvailabilityStatesTool,
+    calculateRatioProductTool,
+  ];
 }

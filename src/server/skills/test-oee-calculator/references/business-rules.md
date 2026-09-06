@@ -1,64 +1,75 @@
-# Test OEE business rules
+# Test OEE 业务规则
 
-## Shared scope
+## 固定关键规则
 
-- Apply the same inclusive date range to all three calculated components.
-- Keep only `LOT_ID` values starting with `P`, `M`, `R`, `A`, `F`, or `L`.
-- Calculate MT and ST independently. Aggregate each component first, then multiply the three component ratios. Do not join the two fact tables or average row-level percentages.
-- Performance (Test Time) is fixed at `1`.
+以下规则由纯工具和 SQL 表达式生成器统一实现。除非用户明确要求修改这些规则，否则不要手工重新编写。
 
-## MT/ST
+### 有效 LOT
 
-Use `oee_availability.step` for Availability and `oee_dut_utilization.step_id` for DUT-On and Yield, in this order:
+只保留首字符为 `P`、`M`、`R`、`A`、`F` 或 `L` 的 `LOT_ID`。
 
-1. first character `5` → MT
-2. first two characters `95` → MT
-3. first character `7` → ST
-4. first two characters `97` → ST
-5. platform in `SHRack-U PCIe Gen 4`, `T5851`, `T5851-16G`, or `T5851-32G` → ST
-6. otherwise unclassified and excluded
+### MT/ST
 
-The canonical implementation contains the current machine IDs for the platform fallback.
+Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；DUT-On 和 Yield 使用 `oee_dut_utilization.step_id` 和 `oee_dut_utilization.machine_id`。按以下顺序判断：
 
-## Machine_Running
+1. 首字符为 `5` → MT
+2. 前两个字符为 `95` → MT
+3. 首字符为 `7` → ST
+4. 前两个字符为 `97` → ST
+5. 机台配置的平台为 `SHRack-U PCIe Gen 4`、`T5851`、`T5851-16G` 或 `T5851-32G` → ST
+6. 其他情况归为未分类
 
-Apply these conditions in order. Anything not matched is `Machine_Running`.
+平台回退规则使用的当前机台 ID 由标准实现维护。
 
-- `Assistance` with a non-`None` lot → `Assistance`; with lot `None` → `IDLE`.
-- `Conversion` → `Conversion`.
-- `HangUp` with a non-`None` lot → `HangUp`; with lot `None` → `IDLE`.
-- `PM` → `PM`.
-- `Handler_Flush` → `Handler_Flush`.
-- `IDLE_NoWIP` → `IDLE_NoWIP`.
-- `IDLE_WaitARV` → `IDLE_WaitARV`.
-- `IDLE` → `IDLE`.
-- `IDLE_NoWIP(NoTask)` and `IDLE_NoTask(xCurrentLot)` → `IDLE_NoWIP`.
-- The named `IDLE_NoTask(...)` variants and every other value starting with `IDLE_NoTask(` except `IDLE_NoTask(xCurrentLot)` → `IDLE_NoTask`.
-- `HANDLER_PAUSE(Golden)`, `Handler_Executing(Golden)`, `Loader_Unload(Golden)`, `Machine_Initialize(Golden)`, `Temp_Down(Golden)`, `Temp_Up(Golden)`, and `Test(Golden)` → `Golden_run_time`.
-- `Not_Defined` → `Not_Defined`.
-- `Temp_Up(Normal Retest)` with lot `None` → `Other`.
-- Everything else → `Machine_Running`. This intentionally includes `Retest(Golden)`, `RMS_Initialize(Golden)`, and states containing `Golden Retest`.
+### Machine_Running
 
-Only `time_span` whose derived state is `Machine_Running` contributes to running seconds.
+按以下顺序应用条件。所有未匹配项均归为 `Machine_Running`。
 
-## Formulas
+- `Assistance` 且批次不是 `None` → `Assistance`；批次为 `None` → `IDLE`。
+- `Conversion` → `Conversion`。
+- `HangUp` 且批次不是 `None` → `HangUp`；批次为 `None` → `IDLE`。
+- `PM` → `PM`。
+- `Handler_Flush` → `Handler_Flush`。
+- `IDLE_NoWIP` → `IDLE_NoWIP`。
+- `IDLE_WaitARV` → `IDLE_WaitARV`。
+- `IDLE` → `IDLE`。
+- `IDLE_NoWIP(NoTask)` 和 `IDLE_NoTask(xCurrentLot)` → `IDLE_NoWIP`。
+- 已明确列出的 `IDLE_NoTask(...)` 变体，以及除 `IDLE_NoTask(xCurrentLot)` 外所有以 `IDLE_NoTask(` 开头的值 → `IDLE_NoTask`。
+- `HANDLER_PAUSE(Golden)`、`Handler_Executing(Golden)`、`Loader_Unload(Golden)`、`Machine_Initialize(Golden)`、`Temp_Down(Golden)`、`Temp_Up(Golden)` 和 `Test(Golden)` → `Golden_run_time`。
+- `Not_Defined` → `Not_Defined`。
+- `Temp_Up(Normal Retest)` 且批次为 `None` → `Other`。
+- 其他所有情况 → `Machine_Running`。这里有意包含 `Retest(Golden)`、`RMS_Initialize(Golden)` 以及含有 `Golden Retest` 的状态。
 
-For each MT/ST kind:
+只有派生状态为 `Machine_Running` 的 `time_span` 才计入默认口径的运行秒数。
+
+## 默认计算口径
+
+以下内容是没有临时口径时使用的基准。用户可以修改日期范围、数据范围、聚合方式、组成项或公式。
+
+- 三个组成项使用相同的闭区间日期范围。
+- MT 和 ST 分别聚合；先计算各组成项比率，再相乘。不要连接两张事实表，也不要平均行级百分比。
+- 性能（测试时间）固定为 `1`。
+- Yield 包含所有 `test_stage`，包括 `1st`、`Rescreen` 和 `2ndRescreen`。
+- 不限制比率上限，也不静默修正源数据值。
+
+对每一种 MT/ST 类型：
 
 ```text
-machine set = every distinct oee_availability.tool_name in the full database
-              that has an eligible lot and classifies into the kind
+机台集合 = 整个数据库中具有有效批次且被归入当前类型的所有不重复的
+           oee_availability.tool_name
 
-calendar days = every natural day in the selected closed interval
+自然日数 = 所选闭区间内的全部自然日
 
-Availability = SUM(Machine_Running time_span in range and kind)
-               / (machine count × calendar days × 86400)
+Availability = SUM(范围和类型内 Machine_Running 状态的 time_span)
+               / (机台数量 × 自然日数 × 86400)
 
-DUT-On = SUM(IN_QTY in range and kind) / SUM(DUT_NUM in range and kind)
+DUT-On = SUM(范围和类型内的 IN_QTY) / SUM(范围和类型内的 DUT_NUM)
 
-Yield = SUM(OUT_QTY in range and kind) / SUM(IN_QTY in range and kind)
+Yield = SUM(范围和类型内的 OUT_QTY) / SUM(范围和类型内的 IN_QTY)
 
 Test OEE = Availability × DUT-On × 1 × Yield
 ```
 
-Yield includes all `test_stage` values, including `1st`, `Rescreen`, and `2ndRescreen`. Do not cap ratios or silently repair source values.
+## 临时口径
+
+如果用户指定的口径与默认值不同，查询和计算必须按用户口径组合，同时明确列出差异。若用户修改的是固定关键规则，则不要调用受影响的固定工具；改用用户提供的规则执行 SQL，并说明该结果没有采用对应的标准规则工具。

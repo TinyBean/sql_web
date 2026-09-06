@@ -1,8 +1,6 @@
-import type { AppDatabase } from "../../../database/database.ts";
-
 export type TestOeeKind = "MT" | "ST";
-export type TestOeeKindFilter = TestOeeKind | "all";
 export type TestOeeKindSource = "step" | "platform";
+export type TestOeeSqlSource = "availability" | "dut";
 export type AvailabilityStateGroup =
   | "Assistance"
   | "Conversion"
@@ -18,73 +16,79 @@ export type AvailabilityStateGroup =
   | "Other"
   | "PM";
 
-export interface TestOeeCategoryResult {
-  readonly kind: TestOeeKind;
-  readonly machineCount: number;
-  readonly calendarDays: number;
-  readonly runningSeconds: number;
-  readonly availableSeconds: number;
-  readonly availability: number | null;
-  readonly availabilityPercent: number | null;
-  readonly inQty: number;
-  readonly outQty: number;
-  readonly dutNum: number;
-  readonly dutOn: number | null;
-  readonly dutOnPercent: number | null;
-  readonly yield: number | null;
-  readonly yieldPercent: number | null;
-  readonly testTimePerformance: 1;
-  readonly testOee: number | null;
-  readonly testOeePercent: number | null;
-  readonly coverage: {
-    readonly availabilityRows: number;
-    readonly availabilityDates: number;
-    readonly dutRows: number;
-    readonly dutDates: number;
-  };
+export interface TestOeeSqlExpressions {
+  readonly source: TestOeeSqlSource;
+  readonly tableAlias: string | null;
+  readonly lotPredicate: string;
+  readonly kindExpression: string;
+  readonly availabilityStateExpression?: string;
 }
 
-export interface TestOeeCalculationResult {
-  readonly startDate: string;
-  readonly endDate: string;
-  readonly dateRangeInclusive: true;
-  readonly lotPrefixes: readonly ["P", "M", "R", "A", "F", "L"];
-  readonly testStages: "all";
-  readonly availabilityMachineScope: "all_machines_in_kind";
-  readonly results: readonly TestOeeCategoryResult[];
-  readonly diagnostics: {
-    readonly unclassifiedAvailabilityRows: number;
-    readonly unclassifiedDutRows: number;
-  };
-}
-
-export interface TestOeeRecordClassification {
+export interface LotEligibilityResult {
   readonly lotId: string;
   readonly eligibleLot: boolean;
-  readonly step: string;
-  readonly machineId: string;
-  readonly kind: TestOeeKind | null;
-  readonly kindSource: TestOeeKindSource | null;
-  readonly includedInCalculation: boolean;
-  readonly availabilityState?: AvailabilityStateGroup;
 }
 
-interface RawCategoryMetrics {
-  readonly kind: TestOeeKind;
-  readonly machineCount: number;
-  readonly runningSeconds: number;
-  readonly availabilityRows: number;
-  readonly availabilityDates: number;
-  readonly inQty: number;
-  readonly outQty: number;
-  readonly dutNum: number;
-  readonly dutRows: number;
-  readonly dutDates: number;
+export interface MtStClassificationInput {
+  readonly step: string;
+  readonly machineId: string;
+}
+
+export interface MtStClassificationResult extends MtStClassificationInput {
+  readonly kind: TestOeeKind | null;
+  readonly source: TestOeeKindSource | null;
+}
+
+export interface AvailabilityStateInput {
+  readonly finalState: string;
+  readonly lotId: string;
+}
+
+export interface AvailabilityStateResult extends AvailabilityStateInput {
+  readonly stateGroup: AvailabilityStateGroup;
+  readonly machineRunning: boolean;
+}
+
+export interface NamedRatioInput {
+  readonly name: string;
+  readonly numerator: number;
+  readonly denominator: number;
+  readonly includeInProduct?: boolean;
+}
+
+export interface NamedFactorInput {
+  readonly name: string;
+  readonly value: number;
+  readonly includeInProduct?: boolean;
+}
+
+export interface NamedRatioResult {
+  readonly name: string;
+  readonly numerator: number;
+  readonly denominator: number;
+  readonly includeInProduct: boolean;
+  readonly value: number | null;
+  readonly percent: number | null;
+}
+
+export interface NamedFactorResult {
+  readonly name: string;
+  readonly value: number;
+  readonly includeInProduct: boolean;
+}
+
+export interface RatioProductResult {
+  readonly ratios: readonly NamedRatioResult[];
+  readonly factors: readonly NamedFactorResult[];
+  readonly product: number | null;
+  readonly productPercent: number | null;
 }
 
 export const VALID_OEE_LOT_PREFIXES = ["P", "M", "R", "A", "F", "L"] as const;
+export const MAX_RULE_BATCH_SIZE = 200;
+export const MAX_RATIO_ITEMS = 20;
 
-/** Machine IDs whose configured platform triggers the ST fallback rule. */
+/** 所配置的平台会触发 ST 回退规则的机台 ID。 */
 export const ST_PLATFORM_MACHINE_IDS = [
   "ADH092",
   "ADH093",
@@ -134,6 +138,7 @@ export const ST_PLATFORM_MACHINE_IDS = [
 
 const VALID_LOT_PREFIX_SET = new Set<string>(VALID_OEE_LOT_PREFIXES);
 const ST_PLATFORM_MACHINE_SET = new Set<string>(ST_PLATFORM_MACHINE_IDS);
+const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const IDLE_NO_TASK_STATES = new Set([
   "IDLE_NoTask(xAllBundleReachable)",
   "IDLE_NoTask(xLeads)",
@@ -154,10 +159,6 @@ const GOLDEN_RUNTIME_STATES = new Set([
   "Temp_Up(Golden)",
   "Test(Golden)",
 ]);
-const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
-const MILLISECONDS_PER_DAY = 86_400_000;
-const SECONDS_PER_MACHINE_DAY = 86_400;
-const MAX_DATE_RANGE_DAYS = 3_660;
 
 export class TestOeeInputError extends Error {
   constructor(message: string) {
@@ -170,8 +171,9 @@ export function isValidOeeLotId(lotId: string): boolean {
   return VALID_LOT_PREFIX_SET.has(lotId.charAt(0));
 }
 
-export function classifyTestOeeKind(step: string, machineId: string): TestOeeKind | null {
-  return classifyTestOeeKindWithSource(step, machineId).kind;
+export function validateTestOeeLotIds(lotIds: readonly string[]): LotEligibilityResult[] {
+  assertBatchSize(lotIds, "lot_ids");
+  return lotIds.map((lotId) => ({ lotId, eligibleLot: isValidOeeLotId(lotId) }));
 }
 
 export function classifyTestOeeKindWithSource(
@@ -182,6 +184,20 @@ export function classifyTestOeeKindWithSource(
   if (step.startsWith("7") || step.startsWith("97")) return { kind: "ST", source: "step" };
   if (ST_PLATFORM_MACHINE_SET.has(machineId)) return { kind: "ST", source: "platform" };
   return { kind: null, source: null };
+}
+
+export function classifyTestOeeKind(step: string, machineId: string): TestOeeKind | null {
+  return classifyTestOeeKindWithSource(step, machineId).kind;
+}
+
+export function classifyTestOeeKinds(
+  records: readonly MtStClassificationInput[],
+): MtStClassificationResult[] {
+  assertBatchSize(records, "records");
+  return records.map((record) => ({
+    ...record,
+    ...classifyTestOeeKindWithSource(record.step, record.machineId),
+  }));
 }
 
 export function classifyAvailabilityState(
@@ -209,59 +225,27 @@ export function classifyAvailabilityState(
   return "Machine_Running";
 }
 
-export function classifyTestOeeRecord(input: {
-  readonly lotId: string;
-  readonly step: string;
-  readonly machineId: string;
-  readonly finalState?: string;
-}): TestOeeRecordClassification {
-  const eligibleLot = isValidOeeLotId(input.lotId);
-  const kind = classifyTestOeeKindWithSource(input.step, input.machineId);
-  return {
-    lotId: input.lotId,
-    eligibleLot,
-    step: input.step,
-    machineId: input.machineId,
-    kind: kind.kind,
-    kindSource: kind.source,
-    includedInCalculation: eligibleLot && kind.kind !== null,
-    ...(input.finalState === undefined
-      ? {}
-      : { availabilityState: classifyAvailabilityState(input.finalState, input.lotId) }),
-  };
-}
-
-function parseIsoDate(value: string, name: string): number {
-  if (!ISO_DATE_PATTERN.test(value)) {
-    throw new TestOeeInputError(`${name} 必须是 YYYY-MM-DD 格式`);
-  }
-  const timestamp = Date.parse(`${value}T00:00:00.000Z`);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value) {
-    throw new TestOeeInputError(`${name} 不是有效日期`);
-  }
-  return timestamp;
-}
-
-export function inclusiveCalendarDays(startDate: string, endDate: string): number {
-  const startTimestamp = parseIsoDate(startDate, "start_date");
-  const endTimestamp = parseIsoDate(endDate, "end_date");
-  if (endTimestamp < startTimestamp) {
-    throw new TestOeeInputError("end_date 不能早于 start_date");
-  }
-  const days = Math.floor((endTimestamp - startTimestamp) / MILLISECONDS_PER_DAY) + 1;
-  if (days > MAX_DATE_RANGE_DAYS) {
-    throw new TestOeeInputError(`日期范围不能超过 ${MAX_DATE_RANGE_DAYS} 个自然日`);
-  }
-  return days;
+export function classifyAvailabilityStates(
+  records: readonly AvailabilityStateInput[],
+): AvailabilityStateResult[] {
+  assertBatchSize(records, "records");
+  return records.map((record) => {
+    const stateGroup = classifyAvailabilityState(record.finalState, record.lotId);
+    return { ...record, stateGroup, machineRunning: stateGroup === "Machine_Running" };
+  });
 }
 
 function quoteSqlLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-const validLotSql = (column: string): string => (
-  `substr(${column},1,1) IN (${VALID_OEE_LOT_PREFIXES.map(quoteSqlLiteral).join(",")})`
-);
+function sqlColumn(name: string, tableAlias: string | undefined): string {
+  return tableAlias === undefined ? name : `${tableAlias}.${name}`;
+}
+
+function validLotSql(column: string): string {
+  return `substr(${column},1,1) IN (${VALID_OEE_LOT_PREFIXES.map(quoteSqlLiteral).join(",")})`;
+}
 
 function kindSql(stepColumn: string, machineColumn: string): string {
   return `CASE
@@ -274,199 +258,138 @@ function kindSql(stepColumn: string, machineColumn: string): string {
   END`;
 }
 
-function availabilityStateSql(): string {
+function availabilityStateSql(finalStateColumn: string, lotIdColumn: string): string {
   return `CASE
-    WHEN final_state='Assistance' AND lot_id!='None' THEN 'Assistance'
-    WHEN final_state='Assistance' AND lot_id='None' THEN 'IDLE'
-    WHEN final_state='Conversion' THEN 'Conversion'
-    WHEN final_state='HangUp' AND lot_id!='None' THEN 'HangUp'
-    WHEN final_state='HangUp' AND lot_id='None' THEN 'IDLE'
-    WHEN final_state='PM' THEN 'PM'
-    WHEN final_state='Handler_Flush' THEN 'Handler_Flush'
-    WHEN final_state='IDLE_NoWIP' THEN 'IDLE_NoWIP'
-    WHEN final_state='IDLE_WaitARV' THEN 'IDLE_WaitARV'
-    WHEN final_state='IDLE' THEN 'IDLE'
-    WHEN final_state IN ('IDLE_NoWIP(NoTask)','IDLE_NoTask(xCurrentLot)') THEN 'IDLE_NoWIP'
-    WHEN final_state IN (${Array.from(IDLE_NO_TASK_STATES).map(quoteSqlLiteral).join(",")}) THEN 'IDLE_NoTask'
-    WHEN final_state IN (${Array.from(GOLDEN_RUNTIME_STATES).map(quoteSqlLiteral).join(",")}) THEN 'Golden_run_time'
-    WHEN substr(final_state,1,12)='IDLE_NoTask(' AND final_state!='IDLE_NoTask(xCurrentLot)' THEN 'IDLE_NoTask'
-    WHEN final_state='Not_Defined' THEN 'Not_Defined'
-    WHEN final_state='Temp_Up(Normal Retest)' AND lot_id='None' THEN 'Other'
+    WHEN ${finalStateColumn}='Assistance' AND ${lotIdColumn}!='None' THEN 'Assistance'
+    WHEN ${finalStateColumn}='Assistance' AND ${lotIdColumn}='None' THEN 'IDLE'
+    WHEN ${finalStateColumn}='Conversion' THEN 'Conversion'
+    WHEN ${finalStateColumn}='HangUp' AND ${lotIdColumn}!='None' THEN 'HangUp'
+    WHEN ${finalStateColumn}='HangUp' AND ${lotIdColumn}='None' THEN 'IDLE'
+    WHEN ${finalStateColumn}='PM' THEN 'PM'
+    WHEN ${finalStateColumn}='Handler_Flush' THEN 'Handler_Flush'
+    WHEN ${finalStateColumn}='IDLE_NoWIP' THEN 'IDLE_NoWIP'
+    WHEN ${finalStateColumn}='IDLE_WaitARV' THEN 'IDLE_WaitARV'
+    WHEN ${finalStateColumn}='IDLE' THEN 'IDLE'
+    WHEN ${finalStateColumn} IN ('IDLE_NoWIP(NoTask)','IDLE_NoTask(xCurrentLot)') THEN 'IDLE_NoWIP'
+    WHEN ${finalStateColumn} IN (${Array.from(IDLE_NO_TASK_STATES).map(quoteSqlLiteral).join(",")}) THEN 'IDLE_NoTask'
+    WHEN ${finalStateColumn} IN (${Array.from(GOLDEN_RUNTIME_STATES).map(quoteSqlLiteral).join(",")}) THEN 'Golden_run_time'
+    WHEN substr(${finalStateColumn},1,12)='IDLE_NoTask(' AND ${finalStateColumn}!='IDLE_NoTask(xCurrentLot)' THEN 'IDLE_NoTask'
+    WHEN ${finalStateColumn}='Not_Defined' THEN 'Not_Defined'
+    WHEN ${finalStateColumn}='Temp_Up(Normal Retest)' AND ${lotIdColumn}='None' THEN 'Other'
     ELSE 'Machine_Running'
   END`;
 }
 
-const availabilityKindSql = kindSql("step", "tool_name");
-const dutKindSql = kindSql("step_id", "machine_id");
-
-export const TEST_OEE_QUERY = `WITH
-parameters(start_date,end_date) AS (VALUES(?,?)),
-kinds(kind) AS (VALUES('MT'),('ST')),
-availability_all AS (
-  SELECT tool_name,${availabilityKindSql} AS kind
-  FROM oee_availability
-  WHERE ${validLotSql("lot_id")}
-),
-machine_counts AS (
-  SELECT kind,COUNT(DISTINCT tool_name) AS machine_count
-  FROM availability_all
-  WHERE kind IS NOT NULL
-  GROUP BY kind
-),
-availability_range AS (
-  SELECT ${availabilityKindSql} AS kind,${availabilityStateSql()} AS state_group,
-    time_span,date(date) AS data_date
-  FROM oee_availability,parameters
-  WHERE ${validLotSql("lot_id")} AND date(date) BETWEEN start_date AND end_date
-),
-availability_metrics AS (
-  SELECT kind,
-    COALESCE(SUM(CASE WHEN state_group='Machine_Running' THEN time_span ELSE 0 END),0) AS running_seconds,
-    COUNT(*) AS availability_rows,
-    COUNT(DISTINCT data_date) AS availability_dates
-  FROM availability_range
-  WHERE kind IS NOT NULL
-  GROUP BY kind
-),
-availability_diagnostics AS (
-  SELECT COALESCE(SUM(CASE WHEN kind IS NULL THEN 1 ELSE 0 END),0) AS unclassified_rows
-  FROM availability_range
-),
-dut_range AS (
-  SELECT ${dutKindSql} AS kind,in_qty,out_qty,dut_num,date(date) AS data_date
-  FROM oee_dut_utilization,parameters
-  WHERE ${validLotSql("lot_id")} AND date(date) BETWEEN start_date AND end_date
-),
-dut_metrics AS (
-  SELECT kind,
-    COALESCE(SUM(CAST(in_qty AS REAL)),0) AS in_qty,
-    COALESCE(SUM(CAST(out_qty AS REAL)),0) AS out_qty,
-    COALESCE(SUM(CAST(dut_num AS REAL)),0) AS dut_num,
-    COUNT(*) AS dut_rows,
-    COUNT(DISTINCT data_date) AS dut_dates
-  FROM dut_range
-  WHERE kind IS NOT NULL
-  GROUP BY kind
-),
-dut_diagnostics AS (
-  SELECT COALESCE(SUM(CASE WHEN kind IS NULL THEN 1 ELSE 0 END),0) AS unclassified_rows
-  FROM dut_range
-)
-SELECT kinds.kind,
-  COALESCE(machine_counts.machine_count,0) AS machine_count,
-  COALESCE(availability_metrics.running_seconds,0) AS running_seconds,
-  COALESCE(availability_metrics.availability_rows,0) AS availability_rows,
-  COALESCE(availability_metrics.availability_dates,0) AS availability_dates,
-  COALESCE(dut_metrics.in_qty,0) AS in_qty,
-  COALESCE(dut_metrics.out_qty,0) AS out_qty,
-  COALESCE(dut_metrics.dut_num,0) AS dut_num,
-  COALESCE(dut_metrics.dut_rows,0) AS dut_rows,
-  COALESCE(dut_metrics.dut_dates,0) AS dut_dates,
-  availability_diagnostics.unclassified_rows AS unclassified_availability_rows,
-  dut_diagnostics.unclassified_rows AS unclassified_dut_rows
-FROM kinds
-LEFT JOIN machine_counts USING(kind)
-LEFT JOIN availability_metrics USING(kind)
-LEFT JOIN dut_metrics USING(kind)
-CROSS JOIN availability_diagnostics
-CROSS JOIN dut_diagnostics
-ORDER BY kinds.kind`;
-
-function numericField(row: Readonly<Record<string, string | number | null>>, name: string): number {
-  const value = row[name];
-  const result = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(result)) throw new Error(`Test OEE 查询字段 ${name} 不是有效数字`);
-  return result;
-}
-
-function divide(numerator: number, denominator: number): number | null {
-  return denominator === 0 ? null : numerator / denominator;
-}
-
-function percentage(value: number | null): number | null {
-  return value === null ? null : value * 100;
-}
-
-export function calculateTestOeeCategory(
-  raw: RawCategoryMetrics,
-  calendarDays: number,
-): TestOeeCategoryResult {
-  const availableSeconds = raw.machineCount * calendarDays * SECONDS_PER_MACHINE_DAY;
-  const availability = divide(raw.runningSeconds, availableSeconds);
-  const dutOn = divide(raw.inQty, raw.dutNum);
-  const yieldValue = divide(raw.outQty, raw.inQty);
-  const testOee = availability === null || dutOn === null || yieldValue === null
-    ? null
-    : availability * dutOn * yieldValue;
+export function getTestOeeSqlExpressions(
+  source: TestOeeSqlSource,
+  tableAlias?: string,
+): TestOeeSqlExpressions {
+  if (tableAlias !== undefined && !SQL_IDENTIFIER_PATTERN.test(tableAlias)) {
+    throw new TestOeeInputError("table_alias 必须是合法的 SQL 标识符");
+  }
+  const lotIdColumn = sqlColumn("lot_id", tableAlias);
+  if (source === "availability") {
+    return {
+      source,
+      tableAlias: tableAlias ?? null,
+      lotPredicate: validLotSql(lotIdColumn),
+      kindExpression: kindSql(
+        sqlColumn("step", tableAlias),
+        sqlColumn("tool_name", tableAlias),
+      ),
+      availabilityStateExpression: availabilityStateSql(
+        sqlColumn("final_state", tableAlias),
+        lotIdColumn,
+      ),
+    };
+  }
   return {
-    kind: raw.kind,
-    machineCount: raw.machineCount,
-    calendarDays,
-    runningSeconds: raw.runningSeconds,
-    availableSeconds,
-    availability,
-    availabilityPercent: percentage(availability),
-    inQty: raw.inQty,
-    outQty: raw.outQty,
-    dutNum: raw.dutNum,
-    dutOn,
-    dutOnPercent: percentage(dutOn),
-    yield: yieldValue,
-    yieldPercent: percentage(yieldValue),
-    testTimePerformance: 1,
-    testOee,
-    testOeePercent: percentage(testOee),
-    coverage: {
-      availabilityRows: raw.availabilityRows,
-      availabilityDates: raw.availabilityDates,
-      dutRows: raw.dutRows,
-      dutDates: raw.dutDates,
-    },
+    source,
+    tableAlias: tableAlias ?? null,
+    lotPredicate: validLotSql(lotIdColumn),
+    kindExpression: kindSql(
+      sqlColumn("step_id", tableAlias),
+      sqlColumn("machine_id", tableAlias),
+    ),
   };
 }
 
-export function calculateTestOee(
-  database: AppDatabase,
-  startDate: string,
-  endDate: string,
-  kindFilter: TestOeeKindFilter = "all",
-): TestOeeCalculationResult {
-  const calendarDays = inclusiveCalendarDays(startDate, endDate);
-  const query = database.query(TEST_OEE_QUERY, [startDate, endDate], { maxRows: 2 });
-  if (query.truncated || query.rows.length !== 2) {
-    throw new Error("Test OEE 查询没有返回完整的 MT/ST 汇总结果");
+function assertBatchSize(values: readonly unknown[], name: string): void {
+  if (values.length < 1 || values.length > MAX_RULE_BATCH_SIZE) {
+    throw new TestOeeInputError(`${name} 必须包含 1 至 ${MAX_RULE_BATCH_SIZE} 项`);
   }
-  const rawResults = query.rows.map((row): RawCategoryMetrics => {
-    const kind = row["kind"];
-    if (kind !== "MT" && kind !== "ST") throw new Error("Test OEE 查询返回未知分类");
+}
+
+function assertFinite(value: number, name: string): void {
+  if (!Number.isFinite(value)) throw new TestOeeInputError(`${name} 必须是有限数字`);
+}
+
+function percentage(value: number | null, name: string): number | null {
+  if (value === null) return null;
+  const result = value * 100;
+  assertFinite(result, `${name} 百分比`);
+  return result;
+}
+
+export function calculateRatioProduct(input: {
+  readonly ratios: readonly NamedRatioInput[];
+  readonly factors?: readonly NamedFactorInput[];
+}): RatioProductResult {
+  if (input.ratios.length < 1 || input.ratios.length > MAX_RATIO_ITEMS) {
+    throw new TestOeeInputError(`ratios 必须包含 1 至 ${MAX_RATIO_ITEMS} 项`);
+  }
+  const factors = input.factors ?? [];
+  if (factors.length > MAX_RATIO_ITEMS) {
+    throw new TestOeeInputError(`factors 不能超过 ${MAX_RATIO_ITEMS} 项`);
+  }
+  const names = new Set<string>();
+  const validateName = (name: string): void => {
+    if (!name.trim()) throw new TestOeeInputError("计算项名称不能为空");
+    if (names.has(name)) throw new TestOeeInputError(`计算项名称不能重复：${name}`);
+    names.add(name);
+  };
+
+  const ratioResults = input.ratios.map((ratio): NamedRatioResult => {
+    validateName(ratio.name);
+    assertFinite(ratio.numerator, `${ratio.name}.numerator`);
+    assertFinite(ratio.denominator, `${ratio.name}.denominator`);
+    const value = ratio.denominator === 0 ? null : ratio.numerator / ratio.denominator;
+    if (value !== null) assertFinite(value, ratio.name);
     return {
-      kind,
-      machineCount: numericField(row, "machine_count"),
-      runningSeconds: numericField(row, "running_seconds"),
-      availabilityRows: numericField(row, "availability_rows"),
-      availabilityDates: numericField(row, "availability_dates"),
-      inQty: numericField(row, "in_qty"),
-      outQty: numericField(row, "out_qty"),
-      dutNum: numericField(row, "dut_num"),
-      dutRows: numericField(row, "dut_rows"),
-      dutDates: numericField(row, "dut_dates"),
+      name: ratio.name,
+      numerator: ratio.numerator,
+      denominator: ratio.denominator,
+      includeInProduct: ratio.includeInProduct ?? true,
+      value,
+      percent: percentage(value, ratio.name),
     };
   });
-  const firstRow = query.rows[0];
-  if (!firstRow) throw new Error("Test OEE 查询未返回诊断信息");
+  const factorResults = factors.map((factor): NamedFactorResult => {
+    validateName(factor.name);
+    assertFinite(factor.value, factor.name);
+    return {
+      name: factor.name,
+      value: factor.value,
+      includeInProduct: factor.includeInProduct ?? true,
+    };
+  });
+
+  const includedRatios = ratioResults.filter((ratio) => ratio.includeInProduct);
+  const includedFactors = factorResults.filter((factor) => factor.includeInProduct);
+  if (includedRatios.length + includedFactors.length === 0) {
+    throw new TestOeeInputError("至少要有一个计算项参与乘积");
+  }
+  const hasUndefinedRatio = includedRatios.some((ratio) => ratio.value === null);
+  let product: number | null = hasUndefinedRatio ? null : 1;
+  if (product !== null) {
+    for (const ratio of includedRatios) product *= ratio.value!;
+    for (const factor of includedFactors) product *= factor.value;
+    assertFinite(product, "乘积");
+  }
   return {
-    startDate,
-    endDate,
-    dateRangeInclusive: true,
-    lotPrefixes: VALID_OEE_LOT_PREFIXES,
-    testStages: "all",
-    availabilityMachineScope: "all_machines_in_kind",
-    results: rawResults
-      .filter((row) => kindFilter === "all" || row.kind === kindFilter)
-      .map((row) => calculateTestOeeCategory(row, calendarDays)),
-    diagnostics: {
-      unclassifiedAvailabilityRows: numericField(firstRow, "unclassified_availability_rows"),
-      unclassifiedDutRows: numericField(firstRow, "unclassified_dut_rows"),
-    },
+    ratios: ratioResults,
+    factors: factorResults,
+    product,
+    productPercent: percentage(product, "乘积"),
   };
 }

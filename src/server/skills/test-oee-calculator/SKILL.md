@@ -1,38 +1,32 @@
 ---
 name: test-oee-calculator
-description: Precisely calculate or explain MT/ST Test OEE and query its underlying DataLens SQLite source tables using the fixed lot, machine-type, Machine_Running, Availability, DUT-On, and Yield rules. Use for Test OEE values, component breakdowns, comparisons, audits, or questions about its source schema and fields; do not use for Assembly OEE.
+description: 使用可组合的固定 LOT、MT/ST、平台回退和 Machine_Running 规则以及通用比率工具，查询、计算或解释 Test OEE。适用于默认口径和临时调整日期、范围、聚合、组成项或公式的 Test OEE 请求；不适用于 Assembly OEE。
 ---
 
-# Test OEE Calculator
+# Test OEE 可组合计算
 
-Use deterministic code for every calculation. Do not recreate the classification CASE expressions or formulas ad hoc.
+本技能不连接数据库，也不提供固定的一键 OEE 计算。使用 `execute_sql` 获取真实数据，并用本技能的纯规则工具和通用数值工具组合出本次结果。
 
-## Database
+## 工作流
 
-This Skill owns the context for its OEE SQLite database. Read
-[references/database.md](references/database.md) before writing an ad hoc `execute_sql` query
-or explaining source tables and fields. Use only the documented tables and columns.
+1. 查询或计算前，读取 [references/database.md](references/database.md) 和 [references/business-rules.md](references/business-rules.md)。
+2. 明确本次日期范围、数据范围、聚合方式、组成项和公式；用户指定的临时口径优先于参考文档中的默认计算口径。
+3. 对每个使用的数据源调用 `test_oee_calculator__get_sql_expressions`，将返回的固定 LOT 条件、MT/ST `CASE` 和 Availability 状态 `CASE` 原样组合进 `execute_sql` 查询。
+4. 优先让 SQLite 完成过滤和聚合。不要为了逐行调用规则工具而提取大量明细。
+5. 将查询得到的原始分子、分母和常量交给 `test_oee_calculator__calculate_ratio_product`。只把本次公式需要的项目纳入乘积。
+6. 回答时说明查询范围、实际公式、各项分子与分母，以及相对默认口径的临时变化。分母为零表示“无法计算”，而不是 0%。
 
-## Web Agent
+## 固定规则工具
 
-1. Resolve one inclusive `start_date` and `end_date` in `YYYY-MM-DD` format. Use the same bounds for Availability, DUT-On, and Yield.
-2. Call `test_oee_calculator__calculate_test_oee`. Return both MT and ST unless the user asks for one kind.
-3. For a single record's valid-LOT, MT/ST, platform fallback, or Machine_Running decision, call `test_oee_calculator__classify_test_oee_record`.
-4. Report each component and Test OEE as percentages. State the machine counts and raw numerators/denominators when useful.
-5. Surface nonzero unclassified-row diagnostics. A zero denominator means “无法计算”, not 0%.
+- `test_oee_calculator__get_sql_expressions`：生成适用于 `oee_availability` 或 `oee_dut_utilization` 的固定规则 SQL 片段。可传入查询中的表别名。
+- `test_oee_calculator__validate_lot_ids`：抽查或审计少量 `LOT_ID`。
+- `test_oee_calculator__classify_mt_st`：抽查或审计少量记录的 MT/ST 类型与判定来源。
+- `test_oee_calculator__classify_availability_states`：抽查或审计少量 Availability 状态及其是否为 `Machine_Running`。
 
-## Project shell
+这些工具固定实现当前 LOT、MT/ST、平台回退和 Machine_Running 规则。如果用户明确要求修改其中一项，不要使用对应的固定 SQL 片段或值判定结果；应按用户规则编写 `execute_sql`，并在回答中明确说明该偏差。
 
-Run the bundled deterministic CLI:
+## 通用数值工具
 
-```bash
-node --import tsx src/server/skills/test-oee-calculator/scripts/calculate-test-oee.ts START_DATE END_DATE [all|MT|ST]
-```
+`test_oee_calculator__calculate_ratio_product` 接受任意命名的分子/分母和常量因子。它不绑定 Test OEE 的默认公式，不做舍入、封顶或源值修正。可以通过 `include_in_product` 保留某项计算结果但不让它参与最终乘积。
 
-The namespaced application tools and CLI both call the canonical implementation in
-`assets/test-oee-calculator.ts`. Runtime source modules and other code resources live in
-`assets/`; directly executable entrypoints live in `scripts/`.
-
-## Explain or audit
-
-Read [references/business-rules.md](references/business-rules.md) only when explaining the formula, reviewing a result, or changing the business rules. Keep the implementation and reference synchronized whenever a rule changes.
+默认口径只是起点，不是强制流程。公式说明、结果复核或口径调整均以 [references/business-rules.md](references/business-rules.md) 为基准，并以用户当前请求为准。

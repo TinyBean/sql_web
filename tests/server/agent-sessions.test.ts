@@ -40,12 +40,12 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   const database = AppDatabase.open({ filePath });
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
   const codeInterpreter = await CodeInterpreterRuntime.create({
-    pythonPath: "/usr/bin/python3",
-    bwrapPath: "/usr/bin/bwrap",
-    prlimitPath: "/usr/bin/prlimit",
+    pythonPath: path.join(directory, "missing-python"),
+    bwrapPath: path.join(directory, "missing-bwrap"),
+    prlimitPath: path.join(directory, "missing-prlimit"),
     projectRoot: directory,
   });
-  assert.equal(codeInterpreter.status.available, true);
+  assert.equal(codeInterpreter.status.available, false);
   const store = await AgentSessionStore.open({
     database,
     artifacts,
@@ -67,7 +67,6 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
-    "code_interpreter",
   ]);
   assert.equal(created.model?.provider, "test-provider");
   assert.equal(created.model?.id, "test-model");
@@ -75,7 +74,6 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
-    "code_interpreter",
   ]);
 
   const piSession = await store.get(created.id);
@@ -88,23 +86,28 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /数据库结构和字段含义由适用的 Skill 提供/u);
   assert.match(piSession.systemPrompt, /<available_skills>/u);
   assert.match(piSession.systemPrompt, /<name>test-oee-calculator<\/name>/u);
-  assert.match(piSession.systemPrompt, /<description>Precisely calculate or explain MT\/ST Test OEE/u);
+  assert.match(piSession.systemPrompt, /<description>使用可组合的固定 LOT、MT\/ST/u);
   assert.doesNotMatch(piSession.systemPrompt, /## Test OEE 固定计算口径/u);
-  assert.doesNotMatch(piSession.systemPrompt, /test_oee_calculator__calculate_test_oee/u);
+  assert.doesNotMatch(piSession.systemPrompt, /test_oee_calculator__get_sql_expressions/u);
   assert.doesNotMatch(piSession.systemPrompt, /Machine_Running、全部机台 Availability/u);
   assert.match(piSession.systemPrompt, /execute_sql 只允许执行一条会返回结果集的只读 SQL/u);
   assert.match(piSession.systemPrompt, /get_current_time/u);
-  assert.match(piSession.systemPrompt, /code_interpreter\.input_json/u);
+  assert.doesNotMatch(piSession.systemPrompt, /code_interpreter\.input_json/u);
   assert.doesNotMatch(piSession.systemPrompt, /SimHei|matplotlib_chinese_font|chinese_font/u);
 
   const codeInterpreterDefinition = piSession.getToolDefinition("code_interpreter");
-  assert.ok(codeInterpreterDefinition);
-  assert.match(codeInterpreterDefinition.description, /Simplified Chinese system font/u);
-  assert.match(codeInterpreterDefinition.description, /do not replace.*SimHei/u);
-  assert.match(codeInterpreterDefinition.description, /matplotlib_chinese_font\(size\)/u);
-  assert.match(codeInterpreterDefinition.description, /chinese_font\(size\)/u);
-  assert.equal(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"), undefined);
+  assert.equal(codeInterpreterDefinition, undefined);
+  for (const name of [
+    "get_sql_expressions",
+    "validate_lot_ids",
+    "classify_mt_st",
+    "classify_availability_states",
+    "calculate_ratio_product",
+  ]) {
+    assert.equal(piSession.getToolDefinition(`test_oee_calculator__${name}`), undefined);
+  }
   assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"), undefined);
 
   const skillLocation = /<location>([^<]+)<\/location>/u.exec(piSession.systemPrompt)?.[1];
   assert.ok(skillLocation);
@@ -152,7 +155,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined,
     undefined as never,
   );
-  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"), undefined);
 
   const beforeSkillEntryId = piSession.sessionManager.appendCustomEntry("test.before-skill");
   await readTool.execute(
@@ -162,15 +165,22 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined,
     undefined as never,
   );
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__validate_lot_ids"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_mt_st"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_availability_states"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__calculate_ratio_product"));
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"), undefined);
   assert.deepEqual(piSession.getActiveToolNames(), [
     "read",
     "execute_sql",
     "get_current_time",
-    "code_interpreter",
-    "test_oee_calculator__calculate_test_oee",
-    "test_oee_calculator__classify_test_oee_record",
+    "test_oee_calculator__get_sql_expressions",
+    "test_oee_calculator__validate_lot_ids",
+    "test_oee_calculator__classify_mt_st",
+    "test_oee_calculator__classify_availability_states",
+    "test_oee_calculator__calculate_ratio_product",
   ]);
   await readTool.execute(
     "read-skill-again",
@@ -207,13 +217,13 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal(loadedEntry?.parentId, beforeSkillEntryId);
   await piSession.navigateTree(beforeSkillEntryId, { summarize: false });
   assert.equal(
-    piSession.getActiveToolNames().includes("test_oee_calculator__calculate_test_oee"),
+    piSession.getActiveToolNames().includes("test_oee_calculator__get_sql_expressions"),
     false,
   );
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"));
   await piSession.navigateTree(loadedEntry.id, { summarize: false });
   assert.equal(
-    piSession.getActiveToolNames().includes("test_oee_calculator__calculate_test_oee"),
+    piSession.getActiveToolNames().includes("test_oee_calculator__get_sql_expressions"),
     true,
   );
 
@@ -234,16 +244,16 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   });
   const restoredSession = await restoredStore.get(created.id);
   assert.equal(
-    restoredSession.getActiveToolNames().includes("test_oee_calculator__calculate_test_oee"),
+    restoredSession.getActiveToolNames().includes("test_oee_calculator__get_sql_expressions"),
     true,
   );
   restoredStore.dispose();
 
   const isolated = await store.create();
-  assert.deepEqual(isolated.tools, ["read", "execute_sql", "get_current_time", "code_interpreter"]);
+  assert.deepEqual(isolated.tools, ["read", "execute_sql", "get_current_time"]);
   const isolatedSession = await store.get(isolated.id);
   assert.equal(
-    isolatedSession.getToolDefinition("test_oee_calculator__calculate_test_oee"),
+    isolatedSession.getToolDefinition("test_oee_calculator__get_sql_expressions"),
     undefined,
   );
   await store.delete(isolated.id);
@@ -341,5 +351,5 @@ test("forwards explicit Skill syntax as ordinary prompt text", async (t) => {
     text: "/skill:test-oee-calculator audit",
     expandPromptTemplates: false,
   });
-  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"), undefined);
 });

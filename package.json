@@ -21,6 +21,7 @@
     "data:pull": "tsx scripts/oee-data.ts pull",
     "data:sync": "tsx scripts/oee-data.ts sync",
     "data:status": "tsx scripts/oee-data.ts status",
+    "session:html": "node --import tsx scripts/session-to-html.ts",
     "start": "npm run build && node --enable-source-maps dist/src/server/main.js",
     "test": "npm run build && node --test dist/tests/**/*.test.js",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit"

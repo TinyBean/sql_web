@@ -27,7 +27,8 @@ tests/
 └── server/          # 服务端只读行为测试
 public/              # HTML、样式及生成的浏览器脚本
 scripts/
-└── database/        # 数据库初始化、Schema 与 OEE 写入实现
+├── database/        # 数据库初始化、Schema 与 OEE 写入实现
+└── session-to-html.ts  # 持久化会话排障 HTML 导出
 ```
 
 ## 数据链路
@@ -132,6 +133,27 @@ npm run data:status
 同步完成后运行 `npm run data:status` 检查两个数据集的最小日期、最大日期、总行数和不同日期数。
 
 数据拉取、重试、导入和同步结果以 JSON Lines 格式持续追加到 `.data/logs/oee-data.log`，该文件不按日期滚动。网站服务日志与数据日志分开，按上海自然日写入 `.data/logs/sql_web-YYYY-MM-DD.log`；两类日志的时间戳均使用上海时区（`+08:00`）。
+
+## 会话排障导出
+
+将持久化 session 导出成可直接用浏览器打开的单文件 HTML：
+
+```bash
+# 使用完整 session ID
+npm run session:html -- 01a07997-d9c6-71e7-8218-a3131cea47ed
+
+# 使用 JSONL 路径并指定输出文件
+npm run session:html -- .data/sessions/example.jsonl /tmp/session.html
+
+# 导出最近修改的 session
+npm run session:html -- latest
+```
+
+未指定输出路径时，文件写入 `.data/session-exports/<session-file>.html`。脚本默认从 `SQL_WEB_SESSION_DIR` 查找 ID；也可以使用 `--session-dir <directory>` 指定其他目录。导出过程只读取原 JSONL 快照，不会迁移或改写 session。
+
+HTML 默认为完整诊断视图，可切换分支、搜索条目，并展示持久化 header、消息、thinking、工具参数及原始结果、usage、错误、模型切换、压缩/分支记录、自定义条目和代码解释器图片；也可以切换为简化的对话视图。页面的 CSS、JavaScript、Markdown 渲染器、清理器和图片都内嵌在文件中，不依赖正在运行的网站或网络资源。
+
+该导出是排障资料，不是脱敏的分享页面。文件可能包含用户问题、内部 thinking、SQL、查询结果、Python 代码、本机路径和生成图片；默认以仅当前用户可读写的权限创建，仍应按敏感数据保管。
 
 ## 表结构
 

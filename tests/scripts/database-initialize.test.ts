@@ -27,6 +27,9 @@ test("initializes the OEE schema idempotently and preserves existing data", (t) 
        tool_name, lot_id, final_state, step, date, shift, time_span
      ) VALUES ('TOOL-1', 'LOT-1', 'Running', '1000', '2026-08-20T00:00:00Z', NULL, 60)`,
   ).run();
+  writer.exec(
+    "DROP TABLE oee_import_windows; DROP TABLE oee_import_runs; PRAGMA user_version = 0;",
+  );
   writer.close();
 
   initializeOeeDatabase(databasePath);
@@ -38,8 +41,9 @@ test("initializes the OEE schema idempotently and preserves existing data", (t) 
     reader.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     ).all().map((row) => row["name"]),
-    ["oee_availability", "oee_dut_utilization"],
+    ["oee_availability", "oee_dut_utilization", "oee_import_runs", "oee_import_windows"],
   );
+  assert.equal(reader.prepare("PRAGMA user_version").get()?.["user_version"], 2);
   const availabilityColumns = reader.prepare("PRAGMA table_info('oee_availability')").all();
   assert.deepEqual(
     availabilityColumns.map((column) => column["name"]),

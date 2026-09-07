@@ -736,9 +736,10 @@ function handleStreamEvent(
     }
     const error = document.createElement("div");
     error.className = "message-error";
-    error.textContent = parsed.data.message;
+    const requestSuffix = parsed.data.requestId ? `（跟踪 ID：${parsed.data.requestId}）` : "";
+    error.textContent = `${parsed.data.message}${requestSuffix}`;
     node.body.append(error);
-    showToast(parsed.data.message);
+    showToast(`${parsed.data.message}${requestSuffix}`);
   }
   elements.messages.scrollTop = elements.messages.scrollHeight;
 }

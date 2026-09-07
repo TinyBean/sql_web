@@ -19,6 +19,7 @@ import { AppDatabase } from "../../src/server/database/database.ts";
 import {
   createWebServer,
   type StreamableAgentSession,
+  type WebServerOptions,
   type WebSessionPort,
 } from "../../src/server/http-server.ts";
 import type { ChatImage, ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
@@ -37,6 +38,7 @@ async function fetchContract<ResponseBody>(
 async function createFixture(
   t: TestContext,
   sessionsOverride?: WebSessionPort,
+  loggerOverride?: WebServerOptions["logger"],
 ): Promise<string> {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-http-"));
   const filePath = path.join(directory, "oee.sqlite");
@@ -65,7 +67,7 @@ async function createFixture(
     prompt: async () => {},
     abort: async () => {},
   };
-  const logger = { error() {} };
+  const logger = loggerOverride ?? { error() {} };
   const server = createWebServer({
     database,
     sessions,
@@ -86,6 +88,51 @@ async function createFixture(
   });
   return baseUrl;
 }
+
+test("returns and logs one correlation ID for each API request", async (t) => {
+  const entries: Array<{ event: string; requestId?: string; statusCode?: unknown }> = [];
+  const logger: NonNullable<WebServerOptions["logger"]> = {
+    info(event, fields) {
+      entries.push({ event, statusCode: fields?.["statusCode"] });
+    },
+    warn(event, fields) {
+      entries.push({ event, statusCode: fields?.["statusCode"] });
+    },
+    error(event) {
+      entries.push({ event });
+    },
+    child(context) {
+      return {
+        info(event, fields) {
+          entries.push({ event, requestId: String(context["requestId"]), statusCode: fields?.["statusCode"] });
+        },
+        warn(event, fields) {
+          entries.push({ event, requestId: String(context["requestId"]), statusCode: fields?.["statusCode"] });
+        },
+        error(event) {
+          entries.push({ event, requestId: String(context["requestId"]) });
+        },
+      };
+    },
+  };
+  const baseUrl = await createFixture(t, undefined, logger);
+  const response = await fetch(`${baseUrl}/api/not-found`);
+  const requestId = response.headers.get("x-request-id");
+  assert.ok(requestId);
+  const error = decodeErrorResponse(parseJson(await response.text()));
+  assert.equal(error.requestId, requestId);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    entries.some((entry) =>
+      entry.event === "http.request.started" && entry.requestId === requestId),
+    true,
+  );
+  assert.equal(
+    entries.some((entry) =>
+      entry.event === "http.request.completed" && entry.requestId === requestId && entry.statusCode === 404),
+    true,
+  );
+});
 
 function parseSseBody(body: string): ParsedSseEvent[] {
   const events: ParsedSseEvent[] = [];

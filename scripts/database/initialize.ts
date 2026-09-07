@@ -23,8 +23,14 @@ export function initializeOeeDatabase(databasePath: string): void {
   });
   try {
     hardenConnection(database);
-    database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
-    database.exec(readFileSync(schemaPath, "utf8"));
+    database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; BEGIN IMMEDIATE;");
+    try {
+      database.exec(readFileSync(schemaPath, "utf8"));
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
   } finally {
     database.close();
   }

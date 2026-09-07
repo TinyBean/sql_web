@@ -1,89 +1,101 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { AgentSessionStore } from "./agent/agent-sessions.ts";
-import { ArtifactStore } from "./tool/artifact-store.ts";
-import { CodeInterpreterRuntime } from "./tool/code-interpreter.ts";
-import { loadConfig, loadProjectEnvironment } from "./config.ts";
-import { AppDatabase } from "./database/database.ts";
-import { createWebServer } from "./http-server.ts";
+import { loadConfig, loadProjectEnvironment, PROJECT_ROOT } from "./config.ts";
 import { DailyFileLogger } from "./logger.ts";
+import type { AppLogger } from "./logger.ts";
+import { startWebService } from "./service-runtime.ts";
+import type { RunningWebService } from "./service-runtime.ts";
 
-const config = loadConfig(loadProjectEnvironment());
-const logger = new DailyFileLogger(config.logDir, { filenamePrefix: "sql_web" });
-logger.info("system.starting", {
-  host: config.host,
-  port: config.port,
-  databasePath: config.databasePath,
-  provider: config.model.provider,
-  model: config.model.model,
+const rootLogger = new DailyFileLogger(path.join(PROJECT_ROOT, ".data", "logs"), {
+  filenamePrefix: "sql_web",
 });
-const database = AppDatabase.open({ filePath: config.databasePath });
-const artifacts = new ArtifactStore(config.artifactDir);
-const codeInterpreter = await CodeInterpreterRuntime.create({
-  ...config.codeInterpreter,
-  projectRoot: config.projectRoot,
+const logger = rootLogger.child({ serviceRunId: randomUUID() });
+const processStartedAt = Date.now();
+
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  logger.error(
+    origin === "unhandledRejection" ? "system.unhandled_rejection" : "system.uncaught_exception",
+    error,
+    { stage: "process", origin, retryable: false },
+  );
 });
-if (codeInterpreter.status.available) {
-  logger.info("code_interpreter.available", {
-    pythonPath: config.codeInterpreter.pythonPath,
+process.once("exit", (exitCode) => {
+  logger.info("system.exited", {
+    stage: "process",
+    exitCode,
+    durationMs: Date.now() - processStartedAt,
   });
-} else {
-  logger.warn("code_interpreter.unavailable", {
-    reason: codeInterpreter.status.reason,
-  });
+});
+
+async function loadApplicationConfig(log: AppLogger) {
+  const startedAt = Date.now();
+  log.info("system.stage.started", { stage: "config" });
+  try {
+    const config = loadConfig(loadProjectEnvironment());
+    log.info("system.stage.completed", {
+      stage: "config",
+      durationMs: Date.now() - startedAt,
+      host: config.host,
+      port: config.port,
+      databasePath: config.databasePath,
+      provider: config.model.provider,
+      model: config.model.model,
+    });
+    return config;
+  } catch (error) {
+    log.error("system.stage.failed", error, {
+      stage: "config",
+      durationMs: Date.now() - startedAt,
+      retryable: false,
+    });
+    throw error;
+  }
 }
-const sessions = await AgentSessionStore.open({
-  database,
-  artifacts,
-  codeInterpreter,
-  cwd: config.projectRoot,
-  sessionDir: config.sessionDir,
-  agentDir: config.agentDir,
-  model: config.model,
-  logger,
-}).catch((error: unknown) => {
-  logger.error("agent.store.open_failed", error);
-  codeInterpreter.dispose();
-  database.close();
-  throw error;
-});
-const server = createWebServer({
-  database,
-  sessions,
-  publicDir: config.publicDir,
-  vendorDir: path.join(config.projectRoot, "node_modules"),
-  logger,
-});
 
-server.once("error", (error) => {
-  logger.error("system.server.error", error);
-  sessions.dispose();
-  database.close();
-  throw error;
-});
+logger.info("system.starting", { stage: "process" });
 
-server.listen(config.port, config.host, () => {
-  logger.info("system.started", { host: config.host, port: config.port });
+let runtime: RunningWebService | undefined;
+try {
+  const config = await loadApplicationConfig(logger);
+  runtime = await startWebService(config, logger);
   console.log(`数据库问答网站已启动:http://${config.host}:${config.port}`);
   console.log(`日志:${config.logDir}/sql_web-YYYY-MM-DD.log`);
-});
-
-let closing = false;
-function shutdown(signal: NodeJS.Signals): void {
-  if (closing) return;
-  closing = true;
-  logger.info("system.stopping", { signal });
-  console.log(`\n收到 ${signal},正在关闭…`);
-  server.close(() => {
-    sessions.dispose();
-    database.close();
-    logger.info("system.stopped", { signal });
-    process.exit(0);
+} catch (error) {
+  logger.error("system.start_failed", error, {
+    stage: "startup",
+    durationMs: Date.now() - processStartedAt,
+    retryable: false,
   });
-  setTimeout(() => {
-    logger.error("system.shutdown.timeout", new Error("服务未能在 5 秒内关闭"), { signal });
-    process.exit(1);
-  }, 5_000).unref();
+  process.exitCode = 1;
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+if (runtime) {
+  let requestedExitCode = 0;
+  let stopPromise: Promise<void> | undefined;
+  const stop = (reason: string, exitCode: number): Promise<void> => {
+    requestedExitCode = Math.max(requestedExitCode, exitCode);
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      const result = await runtime!.shutdown(reason);
+      if (result.failed) requestedExitCode = 1;
+      process.exit(requestedExitCode);
+    })();
+    return stopPromise;
+  };
+
+  runtime.server.on("error", (error) => {
+    logger.error("system.server.error", error, {
+      stage: "http_listener",
+      retryable: false,
+    });
+    void stop("server_error", 1);
+  });
+  process.once("SIGINT", () => {
+    logger.info("system.signal.received", { stage: "process", signal: "SIGINT" });
+    void stop("SIGINT", 0);
+  });
+  process.once("SIGTERM", () => {
+    logger.info("system.signal.received", { stage: "process", signal: "SIGTERM" });
+    void stop("SIGTERM", 0);
+  });
+}

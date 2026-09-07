@@ -72,3 +72,38 @@ test("appends entries across dates to one fixed file", (t) => {
     "2026-09-01T00:00:01.456+08:00",
   ]);
 });
+
+test("inherits correlation context and serializes bounded error causes", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-context-logs-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = path.join(directory, "context.log");
+  const logger = new FileLogger(filename)
+    .child({ serviceRunId: "service-1" })
+    .child({ requestId: "request-1" });
+  const cause = Object.assign(new Error("database locked"), { code: "SQLITE_BUSY" });
+  logger.error("http.request.failed", new Error("query failed", { cause }), { stage: "database" });
+
+  const entry = readEntries(filename)[0] as {
+    context: { serviceRunId: string; requestId: string };
+    error: { message: string; cause: { message: string; code: string } };
+  };
+  assert.deepEqual(entry.context, {
+    serviceRunId: "service-1",
+    requestId: "request-1",
+  });
+  assert.equal(entry.error.message, "query failed");
+  assert.equal(entry.error.cause.message, "database locked");
+  assert.equal(entry.error.cause.code, "SQLITE_BUSY");
+});
+
+test("reports repeated file write failures only once until a write succeeds", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-log-failure-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const errors: unknown[] = [];
+  const logger = new FileLogger(directory, {
+    reportWriteError: (error) => errors.push(error),
+  });
+  logger.info("first.write");
+  logger.info("second.write");
+  assert.equal(errors.length, 1);
+});

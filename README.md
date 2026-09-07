@@ -45,7 +45,9 @@ OEE HTTP API / 本地 JSON
           ▼
    .data/database/oee.sqlite
    ├─ oee_availability
-   └─ oee_dut_utilization
+   ├─ oee_dut_utilization
+   ├─ oee_import_runs
+   └─ oee_import_windows
           │
           ▼
        Agent 问答
@@ -62,17 +64,22 @@ DUT 接口返回的 UTC `DATE` 比请求业务日期早一天；增量同步规�
 
 ## 数据完整性
 
-每次导入的命令结果和 JSON Lines 日志会包含：
+每次导入都会获得任务 ID 和窗口 ID。命令结果、审计表和 JSON Lines 日志会共同记录：
 
 - 请求的开始、结束日期。
 - 响应实际包含的最小、最大日期。
-- 接收和新增行数。
+- 接收、新增和替换删除的行数。
+- 每日行数、缺失日期、越界日期和无法归属日期的行数。
 - 当前数据库的最小日期、最大日期、总行数和日期数。
 - 原始响应 SHA-256。
 
-Availability 和 DUT 两个事实表都使用自增 `id` 作为主键。API 返回的每一行都会独立写入，即使所有源字段完全相同也不会比对、合并或删除；因此重复拉取同一窗口会再次保存原始行。Availability 的 `tool_name`、`lot_id`、`final_state`、`step`、`date`、`time_span` 为非空字段，`shift` 允许为空。DUT 的 `machine_id`、`lot_id`、`in_qty`、`out_qty`、`test_stage`、`dut_num`、`step_id` 为非空字段，其他源字段允许为空且暂不校验。DUT 长字段直接保存在事实表中。
+Availability 和 DUT 两个事实表都使用自增 `id` 作为主键。导入窗口在一个事务中处理：对于响应实际返回且位于预期范围内的日期，先删除该日期旧数据，再逐条保存本次响应，因此重复导入正常日期不会累积旧批次；同一响应内部的完全重复行仍会全部保留。解析、必填字段校验或数据库写入失败会回滚整个窗口。
 
-数据库只保留两张用户表。SQLite 因 `AUTOINCREMENT` 自动维护的内部表 `sqlite_sequence` 不属于业务表。覆盖状态由 `data:status` 直接扫描事实表计算，也可以直接查询：
+响应缺少预期日期时不会删除该日期已有数据，窗口状态为 `completed_with_warnings`。DUT 的无日期、无效日期或越界日期行仍会保存并记录异常，但因为事实表不保存窗口 ID，这些异常行在重复导入时可能累积，必须结合 `data:status` 人工判断。
+
+Availability 的 `tool_name`、`lot_id`、`final_state`、`step`、`date`、`time_span` 为非空字段，`shift` 允许为空。DUT 的 `machine_id`、`lot_id`、`in_qty`、`out_qty`、`test_stage`、`dut_num`、`step_id` 为非空字段，其他源字段允许为空且暂不校验。DUT 长字段直接保存在事实表中。
+
+数据库保留两张事实表和两张导入审计表。`oee_import_runs` 记录一次命令任务，`oee_import_windows` 记录每个最多三天的下载/导入窗口及其状态。SQLite 因 `AUTOINCREMENT` 自动维护的 `sqlite_sequence` 不属于业务表。事实覆盖仍可直接查询：
 
 ```sql
 SELECT MIN(substr(date, 1, 10)), MAX(substr(date, 1, 10)), COUNT(*)
@@ -81,7 +88,7 @@ FROM oee_availability;
 
 ## 数据命令
 
-首次部署时显式创建数据库并执行 Schema。该命令可以安全重复运行，不会清空已有数据：
+首次部署时显式创建数据库并执行 Schema。该命令也用于把旧数据库升级到当前 Schema 版本，可以安全重复运行且不会清空已有事实或审计数据：
 
 ```bash
 npm run data:init
@@ -103,7 +110,7 @@ npm run data:pull -- availability 2026-08-20 2026-08-22
 npm run data:pull -- dut_utilization 2026-08-20 2026-08-22
 ```
 
-根据事实表的最大日期和两天重叠窗口增量同步到指定日期：
+根据审计状态同步到指定日期。命令会自动补齐失败、中断、未覆盖和新增日期，并刷新最近两天：
 
 ```bash
 npm run data:sync -- all 2026-09-02
@@ -121,7 +128,16 @@ npm run data:sync -- all 2026-09-02 2026-08-20
 npm run data:sync -- all 2026-09-02 2026-01-01
 ```
 
-显式提供起始日期时，同步会完整拉取从起始日期到结束日期的所有窗口。数据库不保存导入批次或逐日进度，因此中途失败后原样重试会再次追加先前已完成窗口的原始行；如需避免重拉，应把起始日期调整到失败窗口。所有重复响应行仍会保留。
+显式提供起始日期时，同步会在该范围内跳过已完成的历史窗口，只补缺口并保留最近两天刷新。单个窗口失败不会阻止其他窗口和另一个数据集继续执行；下次运行会自动重试失败或中断范围。
+
+强制重新拉取并原子替换指定日期范围：
+
+```bash
+npm run data:reimport -- availability 2026-08-20 2026-08-30
+npm run data:reimport -- dut_utilization 2026-08-20 2026-08-30
+```
+
+较长范围会自动拆成最多三天的窗口。重导成功会关闭相同逻辑日期上的旧异常建议，但不会自动清理无法按日期归属的 DUT 异常行。
 
 查看状态：
 
@@ -129,10 +145,13 @@ npm run data:sync -- all 2026-09-02 2026-01-01
 npm run data:status
 ```
 
-生产环境可定期执行 `data:sync`。命令失败时返回非零退出码，可以由 cron、systemd timer 或调度平台告警。
-同步完成后运行 `npm run data:status` 检查两个数据集的最小日期、最大日期、总行数和不同日期数。
+`data:status` 为每个数据集输出四组 JSON：`facts` 是事实日期范围、行数、缺口和无日期行数；`tracking` 是审计覆盖、连续完成日期、下一起始日期和最新任务；`issues` 是当前有效异常；`recommendations` 给出结构化的 `sync` 或 `reimport` 建议。
 
-数据拉取、重试、导入和同步结果以 JSON Lines 格式持续追加到 `.data/logs/oee-data.log`，该文件不按日期滚动。网站服务日志与数据日志分开，按上海自然日写入 `.data/logs/sql_web-YYYY-MM-DD.log`；两类日志的时间戳均使用上海时区（`+08:00`）。
+生产环境可定期执行 `data:sync`。正常完成返回 0，已提交但存在缺日/越界/无日期异常返回 2，硬失败返回 1，可由 cron、systemd timer 或调度平台分别告警。旧事实数据没有审计历史时会显示 `legacy_untracked`，应使用显式起始日期同步或 `data:reimport` 建立可信覆盖。
+
+数据拉取、重试、导入和同步结果按上海自然日写入 `.data/logs/oee-data-YYYY-MM-DD.log`；网站服务日志写入 `.data/logs/sql_web-YYYY-MM-DD.log`。两类日志的时间戳均使用上海时区（`+08:00`），不会由应用自动删除。
+
+服务日志使用 `serviceRunId` 串联一次进程生命周期，并记录配置、数据库、产物目录、代码解释器、Agent Store、HTTP 监听、信号和关闭阶段。每个 API 响应返回 `X-Request-Id`；网页错误也会展示该跟踪 ID。数据日志使用 `commandRunId`、`importRunId` 和 `windowId` 与审计表关联。日志不会写入鉴权头、密码、请求正文或原始数据行。
 
 ## 会话排障导出
 
@@ -157,10 +176,12 @@ HTML 默认为完整诊断视图，可切换分支、搜索条目，并展示持
 
 ## 表结构
 
-数据库中的两张用户表：
+数据库中的四张用户表：
 
 - `oee_availability`：Availability 原始事实数据，自增 `id` 主键加七个源字段。
 - `oee_dut_utilization`：DUT 原始事实数据，自增 `id` 主键加 37 个源字段（包括长位图字段）。
+- `oee_import_runs`：导入命令任务、参数、生命周期状态、窗口汇总和首个错误。
+- `oee_import_windows`：数据集窗口、请求/预期日期、下载与导入状态、行数、哈希和异常详情。
 
 ## 启动
 

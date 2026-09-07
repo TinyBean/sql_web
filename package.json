@@ -20,6 +20,7 @@
     "data:import": "tsx scripts/oee-data.ts import",
     "data:pull": "tsx scripts/oee-data.ts pull",
     "data:sync": "tsx scripts/oee-data.ts sync",
+    "data:reimport": "tsx scripts/oee-data.ts reimport",
     "data:status": "tsx scripts/oee-data.ts status",
     "session:html": "node --import tsx scripts/session-to-html.ts",
     "start": "npm run build && node --enable-source-maps dist/src/server/main.js",

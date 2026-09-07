@@ -37,12 +37,12 @@ export interface AppConfig {
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(moduleDirectory, "../..");
-const projectRoot = path.basename(sourceRoot) === "dist"
+export const PROJECT_ROOT = path.basename(sourceRoot) === "dist"
   ? path.resolve(sourceRoot, "..")
   : sourceRoot;
 
 function resolveProjectPath(value: string | undefined, fallback: string): string {
-  return path.resolve(projectRoot, value ?? fallback);
+  return path.resolve(PROJECT_ROOT, value ?? fallback);
 }
 
 function parsePort(value: string | undefined): number {
@@ -54,7 +54,7 @@ function parsePort(value: string | undefined): number {
 }
 
 export function loadProjectEnvironment(
-  envFilePath = path.join(projectRoot, ".env"),
+  envFilePath = path.join(PROJECT_ROOT, ".env"),
   target: NodeJS.ProcessEnv = process.env,
 ): AppEnvironment {
   try {
@@ -91,15 +91,15 @@ export function loadConfig(env: AppEnvironment): AppConfig {
   }
 
   return {
-    projectRoot,
+    projectRoot: PROJECT_ROOT,
     host: env.HOST?.trim() || "127.0.0.1",
     port: parsePort(env.PORT),
     databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/database/oee.sqlite"),
     sessionDir: resolveProjectPath(env.SQL_WEB_SESSION_DIR, ".data/sessions"),
     artifactDir: resolveProjectPath(env.SQL_WEB_ARTIFACT_DIR, ".data/artifacts"),
-    publicDir: path.join(projectRoot, "public"),
-    agentDir: path.join(projectRoot, ".data", "agent"),
-    logDir: path.join(projectRoot, ".data", "logs"),
+    publicDir: path.join(PROJECT_ROOT, "public"),
+    agentDir: path.join(PROJECT_ROOT, ".data", "agent"),
+    logDir: path.join(PROJECT_ROOT, ".data", "logs"),
     model: { provider, model },
     codeInterpreter: {
       pythonPath: path.resolve(env.SQL_WEB_PYTHON_PATH?.trim() || "/usr/bin/python3"),

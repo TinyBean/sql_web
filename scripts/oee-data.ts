@@ -1,14 +1,21 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
-import { FileLogger } from "../src/server/logger.ts";
+import { DailyFileLogger } from "../src/server/logger.ts";
 import { initializeOeeDatabase } from "./database/initialize.ts";
-import { OeeDataStore, parseOeeDataset } from "./database/oee-data-store.ts";
+import {
+  OeeDataStore,
+  outcomeExitCode,
+  parseOeeDataset,
+} from "./database/oee-data-store.ts";
 
 const projectRoot = path.basename(path.resolve(import.meta.dirname, "..")) === "dist"
   ? path.resolve(import.meta.dirname, "../..")
   : path.resolve(import.meta.dirname, "..");
-const logger = new FileLogger(path.join(projectRoot, ".data", "logs", "oee-data.log"));
+const logger = new DailyFileLogger(path.join(projectRoot, ".data", "logs"), {
+  filenamePrefix: "oee-data",
+}).child({ commandRunId: randomUUID() });
 
 function requiredArgument(value: string | undefined, name: string): string {
   if (!value) throw new Error(`缺少参数 ${name}`);
@@ -23,16 +30,22 @@ function usage(): never {
       "  npm run data:import -- <dataset> <json-file> <start-date> <end-date>",
       "  npm run data:pull -- <dataset> <start-date> <end-date>",
       "  npm run data:sync -- <dataset|all> <through-date> [initial-start-date]",
+      "  npm run data:reimport -- <dataset> <start-date> <end-date>",
       "  npm run data:status",
       "dataset: availability | dut_utilization;日期格式:YYYY-MM-DD",
     ].join("\n"),
   );
 }
 
+function applyExitCode(status: Parameters<typeof outcomeExitCode>[0]): void {
+  process.exitCode = outcomeExitCode(status);
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (!command) usage();
-  logger.info("oee.command.started", { command, args });
+  const startedAt = Date.now();
+  logger.info("oee.command.started", { stage: "command", command, args });
   let fileEnvironment: Record<string, string | undefined> = {};
   try {
     fileEnvironment = parseEnv(readFileSync(path.join(projectRoot, ".env"), "utf8"));
@@ -49,7 +62,13 @@ async function main(): Promise<void> {
   if (command === "init") {
     initializeOeeDatabase(databasePath);
     console.log(JSON.stringify({ databasePath, initialized: true }, null, 2));
-    logger.info("oee.command.completed", { command, databasePath });
+    logger.info("oee.command.completed", {
+      stage: "command",
+      command,
+      databasePath,
+      status: "completed",
+      durationMs: Date.now() - startedAt,
+    });
     return;
   }
   const store = OeeDataStore.open({
@@ -71,7 +90,14 @@ async function main(): Promise<void> {
         requestedEndDate: requiredArgument(args[3], "end-date"),
       });
       console.log(JSON.stringify(result, null, 2));
-      logger.info("oee.command.completed", { command });
+      applyExitCode(result.status);
+      logger.info("oee.command.completed", {
+        stage: "command",
+        command,
+        status: result.status,
+        importRunId: result.runId,
+        durationMs: Date.now() - startedAt,
+      });
       return;
     }
 
@@ -82,7 +108,14 @@ async function main(): Promise<void> {
         endDate: requiredArgument(args[2], "end-date"),
       });
       console.log(JSON.stringify(result, null, 2));
-      logger.info("oee.command.completed", { command });
+      applyExitCode(result.status);
+      logger.info("oee.command.completed", {
+        stage: "command",
+        command,
+        status: result.status,
+        importRunId: result.runId,
+        durationMs: Date.now() - startedAt,
+      });
       return;
     }
 
@@ -96,13 +129,43 @@ async function main(): Promise<void> {
         ...(initialStartDate ? { initialStartDate } : {}),
       });
       console.log(JSON.stringify(result, null, 2));
-      logger.info("oee.command.completed", { command });
+      applyExitCode(result.status);
+      logger.info("oee.command.completed", {
+        stage: "command",
+        command,
+        status: result.status,
+        importRunId: result.runId,
+        durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
+
+    if (command === "reimport") {
+      const result = await store.reimport({
+        dataset: parseOeeDataset(requiredArgument(args[0], "dataset")),
+        startDate: requiredArgument(args[1], "start-date"),
+        endDate: requiredArgument(args[2], "end-date"),
+      });
+      console.log(JSON.stringify(result, null, 2));
+      applyExitCode(result.status);
+      logger.info("oee.command.completed", {
+        stage: "command",
+        command,
+        status: result.status,
+        importRunId: result.runId,
+        durationMs: Date.now() - startedAt,
+      });
       return;
     }
 
     if (command === "status") {
       console.log(JSON.stringify(store.getStatus(), null, 2));
-      logger.info("oee.command.completed", { command });
+      logger.info("oee.command.completed", {
+        stage: "command",
+        command,
+        status: "completed",
+        durationMs: Date.now() - startedAt,
+      });
       return;
     }
 
@@ -113,7 +176,7 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error: unknown) => {
-  logger.error("oee.command.failed", error);
+  logger.error("oee.command.failed", error, { stage: "command", retryable: false });
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

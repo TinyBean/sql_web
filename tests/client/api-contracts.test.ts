@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   ContractValidationError,
   decodeDeleteSessionResponse,
+  decodeErrorResponse,
   decodeHealthResponse,
   decodeSchemaResponse,
   decodeSerializedSession,
   decodeSseEvent,
+  errorMessageFromResponse,
 } from "../../src/client/api-contracts.ts";
 
 const validSession = {
@@ -34,6 +36,20 @@ test("decodes a complete session without type assertions", () => {
 test("decodes a successful session deletion", () => {
   assert.deepEqual(decodeDeleteSessionResponse({ ok: true }), { ok: true });
   assert.throws(() => decodeDeleteSessionResponse({ ok: false }), /ok/u);
+});
+
+test("decodes request correlation IDs from JSON and SSE errors", () => {
+  const payload = { error: "服务器内部错误", requestId: "request-123" };
+  assert.deepEqual(decodeErrorResponse(payload), payload);
+  assert.equal(
+    errorMessageFromResponse(payload),
+    "服务器内部错误（跟踪 ID：request-123）",
+  );
+  assert.deepEqual(
+    decodeSseEvent("error", { message: "回答失败", requestId: "request-456" }),
+    { event: "error", data: { message: "回答失败", requestId: "request-456" } },
+  );
+  assert.throws(() => decodeErrorResponse({ error: "失败" }), /requestId/u);
 });
 
 test("decodes ordered turn events and persisted trace items", () => {

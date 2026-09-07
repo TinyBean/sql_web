@@ -2,11 +2,13 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 export type LogFields = Readonly<Record<string, unknown>>;
+export type LogContext = Readonly<Record<string, string | number | boolean>>;
 
 export interface AppLogger {
   info(event: string, fields?: LogFields): void;
   warn(event: string, fields?: LogFields): void;
   error(event: string, error: unknown, fields?: LogFields): void;
+  child(context: LogContext): AppLogger;
 }
 
 interface LoggerOptions {
@@ -32,12 +34,26 @@ function shanghaiDate(date: Date): string {
   return shanghaiIsoString(date).slice(0, 10);
 }
 
-function errorDetails(error: unknown): Readonly<Record<string, unknown>> {
+function errorDetails(
+  error: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): Readonly<Record<string, unknown>> {
   if (error instanceof Error) {
+    if (seen.has(error)) return { message: "[Circular error cause]" };
+    seen.add(error);
+    const code = "code" in error && (typeof error.code === "string" || typeof error.code === "number")
+      ? error.code
+      : undefined;
+    const cause = depth < 4 && "cause" in error && error.cause !== undefined
+      ? errorDetails(error.cause, depth + 1, seen)
+      : undefined;
     return {
       name: error.name,
       message: error.message,
+      ...(code === undefined ? {} : { code }),
       ...(error.stack ? { stack: error.stack } : {}),
+      ...(cause ? { cause } : {}),
     };
   }
   return { message: String(error) };
@@ -52,6 +68,12 @@ function jsonLine(value: unknown): string {
     seen.add(item);
     return item;
   })}\n`;
+}
+
+function reportInitializationError(options: LoggerOptions, error: unknown): void {
+  (options.reportWriteError ?? ((writeError: unknown) => {
+    console.error("创建应用日志目录失败", writeError);
+  }))(error);
 }
 
 class JsonFileLogger implements AppLogger {
@@ -80,11 +102,26 @@ class JsonFileLogger implements AppLogger {
     this.#write("ERROR", event, fields, errorDetails(error));
   }
 
+  child(context: LogContext): AppLogger {
+    return new ChildLogger(this, context);
+  }
+
+  writeChild(
+    context: LogContext,
+    level: LogLevel,
+    event: string,
+    fields?: LogFields,
+    error?: Readonly<Record<string, unknown>>,
+  ): void {
+    this.#write(level, event, fields, error, context);
+  }
+
   #write(
     level: LogLevel,
     event: string,
     fields?: LogFields,
     error?: Readonly<Record<string, unknown>>,
+    context?: LogContext,
   ): void {
     const now = this.#now();
     const entry = {
@@ -92,6 +129,7 @@ class JsonFileLogger implements AppLogger {
       level,
       event,
       pid: process.pid,
+      ...(context && Object.keys(context).length > 0 ? { context } : {}),
       ...(fields ? { fields } : {}),
       ...(error ? { error } : {}),
     };
@@ -108,6 +146,32 @@ class JsonFileLogger implements AppLogger {
   }
 }
 
+class ChildLogger implements AppLogger {
+  readonly #root: JsonFileLogger;
+  readonly #context: LogContext;
+
+  constructor(root: JsonFileLogger, context: LogContext) {
+    this.#root = root;
+    this.#context = { ...context };
+  }
+
+  info(event: string, fields?: LogFields): void {
+    this.#root.writeChild(this.#context, "INFO", event, fields);
+  }
+
+  warn(event: string, fields?: LogFields): void {
+    this.#root.writeChild(this.#context, "WARN", event, fields);
+  }
+
+  error(event: string, error: unknown, fields?: LogFields): void {
+    this.#root.writeChild(this.#context, "ERROR", event, fields, errorDetails(error));
+  }
+
+  child(context: LogContext): AppLogger {
+    return new ChildLogger(this.#root, { ...this.#context, ...context });
+  }
+}
+
 /** Appends every entry to one fixed JSON Lines file. */
 export class FileLogger extends JsonFileLogger {
   readonly #filePath: string;
@@ -116,7 +180,11 @@ export class FileLogger extends JsonFileLogger {
     const resolvedFilePath = path.resolve(filePath);
     super(() => resolvedFilePath, options);
     this.#filePath = resolvedFilePath;
-    mkdirSync(path.dirname(resolvedFilePath), { recursive: true });
+    try {
+      mkdirSync(path.dirname(resolvedFilePath), { recursive: true });
+    } catch (error) {
+      reportInitializationError(options, error);
+    }
   }
 
   get filePath(): string {
@@ -138,7 +206,11 @@ export class DailyFileLogger extends JsonFileLogger {
     );
     this.#logDir = resolvedLogDir;
     this.#filenamePrefix = filenamePrefix;
-    mkdirSync(resolvedLogDir, { recursive: true });
+    try {
+      mkdirSync(resolvedLogDir, { recursive: true });
+    } catch (error) {
+      reportInitializationError(options, error);
+    }
   }
 
   get logDir(): string {

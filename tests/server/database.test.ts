@@ -46,7 +46,7 @@ test("opens a prepared OEE database without demo seed data", (t) => {
   assert.deepEqual(result.rows, [{ availability: 0, dut: 0 }]);
   assert.deepEqual(
     database.getSchema().filter((item) => item.type === "table").map((item) => item.name).sort(),
-    ["oee_availability", "oee_dut_utilization"],
+    ["oee_availability", "oee_dut_utilization", "oee_import_runs", "oee_import_windows"],
   );
 });
 

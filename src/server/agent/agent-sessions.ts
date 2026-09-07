@@ -414,6 +414,7 @@ export class AgentSessionStore {
   readonly #logger: AgentProcessLogger;
   readonly #unsubscribers = new Map<string, () => void>();
   readonly #toolStartedAt = new Map<string, number>();
+  readonly #activeRequestIds = new Map<string, string>();
 
   private constructor(
     { database, cwd, sessionDir, agentDir, model, artifacts, codeInterpreter, logger }:
@@ -575,7 +576,7 @@ export class AgentSessionStore {
     });
   }
 
-  async prompt(id: string, text: string): Promise<void> {
+  async prompt(id: string, text: string, requestId?: string): Promise<void> {
     if (typeof text !== "string" || !text.trim()) throw new TypeError("问题不能为空");
     if (text.length > MAX_PROMPT_LENGTH) {
       throw new TypeError(`问题不能超过 ${MAX_PROMPT_LENGTH} 个字符`);
@@ -587,8 +588,10 @@ export class AgentSessionStore {
     }
     const prompt = text.trim();
     const startedAt = Date.now();
+    if (requestId) this.#activeRequestIds.set(id, requestId);
     this.#logger.info("agent.prompt.started", {
       sessionId: id,
+      ...(requestId ? { requestId } : {}),
       promptLength: prompt.length,
     });
     try {
@@ -597,14 +600,18 @@ export class AgentSessionStore {
       if (times) times.modified = new Date();
       this.#logger.info("agent.prompt.completed", {
         sessionId: id,
+        ...(requestId ? { requestId } : {}),
         durationMs: Date.now() - startedAt,
       });
     } catch (error) {
       this.#logger.error("agent.prompt.failed", error, {
         sessionId: id,
+        ...(requestId ? { requestId } : {}),
         durationMs: Date.now() - startedAt,
       });
       throw error;
+    } finally {
+      this.#activeRequestIds.delete(id);
     }
   }
 
@@ -645,6 +652,7 @@ export class AgentSessionStore {
     for (const session of this.#sessions.values()) session.dispose();
     this.#unsubscribers.clear();
     this.#toolStartedAt.clear();
+    this.#activeRequestIds.clear();
     this.#sessions.clear();
     this.#sessionTimes.clear();
     this.#codeInterpreter.dispose();
@@ -700,7 +708,8 @@ export class AgentSessionStore {
   }
 
   #logAgentEvent(sessionId: string, event: AgentSessionEvent): void {
-    const common = { sessionId };
+    const requestId = this.#activeRequestIds.get(sessionId);
+    const common = { sessionId, ...(requestId ? { requestId } : {}) };
     if (event.type === "agent_start") {
       this.#logger.info("agent.run.started", common);
     } else if (event.type === "turn_start") {

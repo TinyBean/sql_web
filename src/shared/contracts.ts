@@ -117,6 +117,7 @@ export interface MessageRequest {
 
 export interface ErrorResponse {
   readonly error: string;
+  readonly requestId: string;
 }
 
 export interface AbortResponse {
@@ -141,7 +142,7 @@ export interface SseEventMap {
   compaction_start: { reason: AutomaticCompactionReason };
   compaction_end: { reason: AutomaticCompactionReason; outcome: CompactionOutcome };
   status: { message: string };
-  error: { message: string };
+  error: { message: string; requestId?: string };
   done: SerializedSession;
 }
 

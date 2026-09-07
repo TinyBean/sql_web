@@ -78,3 +78,71 @@ ON oee_dut_utilization(lot_id);
 
 CREATE INDEX IF NOT EXISTS idx_oee_dut_business_fields
 ON oee_dut_utilization(machine_id, lot_id, in_qty, out_qty, test_stage, dut_num, step_id);
+
+CREATE TABLE IF NOT EXISTS oee_import_runs (
+  id TEXT PRIMARY KEY,
+  command TEXT NOT NULL CHECK (command IN ('import', 'pull', 'sync', 'reimport')),
+  parameters_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('running', 'completed', 'completed_with_warnings', 'failed', 'interrupted')
+  ),
+  owner_pid INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  window_count INTEGER NOT NULL DEFAULT 0,
+  completed_window_count INTEGER NOT NULL DEFAULT 0,
+  warning_window_count INTEGER NOT NULL DEFAULT 0,
+  failed_window_count INTEGER NOT NULL DEFAULT 0,
+  error_stage TEXT,
+  error_name TEXT,
+  error_code TEXT,
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oee_import_runs_started
+ON oee_import_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS oee_import_windows (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES oee_import_runs(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL,
+  dataset TEXT NOT NULL CHECK (dataset IN ('availability', 'dut_utilization')),
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('file', 'api')),
+  source_ref TEXT NOT NULL,
+  requested_start_date TEXT NOT NULL,
+  requested_end_date TEXT NOT NULL,
+  expected_start_date TEXT NOT NULL,
+  expected_end_date TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN (
+      'planned', 'downloading', 'importing', 'completed',
+      'completed_with_warnings', 'failed', 'interrupted'
+    )
+  ),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  rows_received INTEGER NOT NULL DEFAULT 0,
+  rows_inserted INTEGER NOT NULL DEFAULT 0,
+  rows_deleted INTEGER NOT NULL DEFAULT 0,
+  unscoped_row_count INTEGER NOT NULL DEFAULT 0,
+  observed_min_date TEXT,
+  observed_max_date TEXT,
+  observed_day_counts_json TEXT NOT NULL DEFAULT '{}',
+  missing_dates_json TEXT NOT NULL DEFAULT '[]',
+  unexpected_dates_json TEXT NOT NULL DEFAULT '[]',
+  source_sha256 TEXT,
+  error_stage TEXT,
+  error_name TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  UNIQUE (run_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_oee_import_windows_dataset_dates
+ON oee_import_windows(dataset, requested_start_date, requested_end_date, completed_at);
+
+CREATE INDEX IF NOT EXISTS idx_oee_import_windows_status
+ON oee_import_windows(status, dataset);
+
+PRAGMA user_version = 2;

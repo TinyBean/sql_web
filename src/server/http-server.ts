@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from "node:http";
 import path from "node:path";
@@ -16,6 +17,7 @@ import type {
   JsonResponseBody,
   MessageRequest,
   SchemaResponse,
+  SchemaObject,
   SerializedSession,
   SessionSummary,
   SessionsResponse,
@@ -23,7 +25,6 @@ import type {
 } from "../shared/contracts.ts";
 import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.ts";
 import { DatabaseInputError } from "./database/database.ts";
-import type { AppDatabase } from "./database/database.ts";
 import { extractCodeInterpreterImages } from "./tool/code-interpreter-images.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -51,11 +52,14 @@ const STATIC_FILES = new Map<string, StaticFile>([
 ]);
 
 interface Logger {
+  info?(event: string, fields?: Readonly<Record<string, unknown>>): void;
+  warn?(event: string, fields?: Readonly<Record<string, unknown>>): void;
   error(
     event: string,
     error: unknown,
     fields?: Readonly<Record<string, unknown>>,
   ): void;
+  child?(context: Readonly<Record<string, string | number | boolean>>): Logger;
 }
 
 export interface WebSessionPort {
@@ -65,8 +69,13 @@ export interface WebSessionPort {
   get(id: string): Promise<StreamableAgentSession>;
   getSerialized(id: string): Promise<SerializedSession>;
   delete(id: string): Promise<void>;
-  prompt(id: string, text: string): Promise<void>;
+  prompt(id: string, text: string, requestId?: string): Promise<void>;
   abort(id: string): Promise<void>;
+}
+
+export interface WebDatabasePort {
+  readonly filePath: string;
+  getSchema(): readonly SchemaObject[];
 }
 
 export interface StreamableAgentSession {
@@ -75,7 +84,7 @@ export interface StreamableAgentSession {
 }
 
 export interface WebServerOptions {
-  database: AppDatabase;
+  database: WebDatabasePort;
   sessions: WebSessionPort;
   publicDir: string;
   vendorDir: string;
@@ -335,9 +344,45 @@ function decodeSessionId(match: RegExpExecArray): string {
   }
 }
 
+function requestRoute(pathname: string): string {
+  if (/^\/api\/sessions\/[^/]+\/messages$/u.test(pathname)) return "/api/sessions/:id/messages";
+  if (/^\/api\/sessions\/[^/]+\/abort$/u.test(pathname)) return "/api/sessions/:id/abort";
+  if (/^\/api\/sessions\/[^/]+$/u.test(pathname)) return "/api/sessions/:id";
+  return pathname;
+}
+
 export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console }: WebServerOptions): Server {
   return http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
+    const requestId = randomUUID();
+    const apiRequest = url.pathname.startsWith("/api/");
+    const requestLogger = logger.child?.({ requestId }) ?? logger;
+    const requestStartedAt = Date.now();
+    let requestSettled = false;
+    response.setHeader("X-Request-Id", requestId);
+    if (apiRequest) {
+      requestLogger.info?.("http.request.started", {
+        method: request.method ?? "UNKNOWN",
+        route: requestRoute(url.pathname),
+        pathname: url.pathname,
+      });
+      const settleRequest = (aborted: boolean): void => {
+        if (requestSettled) return;
+        requestSettled = true;
+        const fields = {
+          method: request.method ?? "UNKNOWN",
+          route: requestRoute(url.pathname),
+          pathname: url.pathname,
+          statusCode: response.statusCode,
+          durationMs: Date.now() - requestStartedAt,
+          aborted,
+        };
+        if (aborted) requestLogger.warn?.("http.request.completed", fields);
+        else requestLogger.info?.("http.request.completed", fields);
+      };
+      response.once("finish", () => settleRequest(false));
+      response.once("close", () => settleRequest(!response.writableFinished));
+    }
     try {
       if (request.method === "GET" && (await serveStatic(response, publicDir, vendorDir, url.pathname))) return;
 
@@ -397,11 +442,14 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         response.flushHeaders();
         const unsubscribe = session.subscribe(createAgentEventStreamer(response));
         try {
-          await sessions.prompt(id, body.message);
+          await sessions.prompt(id, body.message, requestId);
           writeSse(response, "done", await sessions.getSerialized(id));
         } catch (error) {
-          logger.error("http.agent_prompt.failed", error, { sessionId: id });
-          writeSse(response, "error", { message: errorMessage(error, "Agent 回答失败") });
+          requestLogger.error("http.agent_prompt.failed", error, { sessionId: id });
+          writeSse(response, "error", {
+            message: errorMessage(error, "Agent 回答失败"),
+            requestId,
+          });
         } finally {
           unsubscribe();
           response.end();
@@ -417,9 +465,9 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         return;
       }
 
-      json(response, 404, { error: "接口不存在" } satisfies ErrorResponse);
+      json(response, 404, { error: "接口不存在", requestId } satisfies ErrorResponse);
     } catch (error) {
-      logger.error("http.request.failed", error, {
+      requestLogger.error("http.request.failed", error, {
         method: request.method ?? "UNKNOWN",
         pathname: url.pathname,
         statusCode: errorStatus(error),
@@ -427,6 +475,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       if (!response.headersSent) {
         json(response, errorStatus(error), {
           error: errorMessage(error, "服务器内部错误"),
+          requestId,
         } satisfies ErrorResponse);
       }
       else response.end();

@@ -311,12 +311,16 @@ export const decodeDeleteSessionResponse: Decoder<DeleteSessionResponse> = (
 
 export const decodeErrorResponse: Decoder<ErrorResponse> = (value, path = "$error") => {
   const item = record(value, path);
-  return { error: string(item["error"], `${path}.error`) };
+  return {
+    error: string(item["error"], `${path}.error`),
+    requestId: nonEmptyString(item["requestId"], `${path}.requestId`),
+  };
 };
 
 export function errorMessageFromResponse(value: unknown): string | undefined {
   try {
-    return decodeErrorResponse(value).error;
+    const error = decodeErrorResponse(value);
+    return `${error.error}（跟踪 ID：${error.requestId}）`;
   } catch (error) {
     if (error instanceof ContractValidationError) return undefined;
     throw error;
@@ -404,8 +408,19 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
       },
     };
   }
-  if (event === "status" || event === "error") {
+  if (event === "status") {
     return { event, data: { message: string(data["message"], `${path}.message`) } };
+  }
+  if (event === "error") {
+    return {
+      event,
+      data: {
+        message: string(data["message"], `${path}.message`),
+        ...(data["requestId"] === undefined
+          ? {}
+          : { requestId: nonEmptyString(data["requestId"], `${path}.requestId`) }),
+      },
+    };
   }
   if (event === "done") return { event, data: decodeSerializedSession(data, path) };
   return null;

@@ -8,6 +8,8 @@ import type {
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
+  JsonObject,
+  JsonValue,
   ModelDescriptor,
   ModelSelection,
   ParsedSseEvent,
@@ -58,6 +60,25 @@ function nonNegativeInteger(value: unknown, path: string): number {
     : invalid(path, "非负整数");
 }
 
+function jsonValue(value: unknown, path: string): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) {
+    return value.map((item, index) => jsonValue(item, `${path}[${index}]`));
+  }
+  if (isRecord(value)) return jsonObject(value, path);
+  return invalid(path, "合法 JSON 值");
+}
+
+function jsonObject(value: unknown, path: string): JsonObject {
+  const item = record(value, path);
+  const decoded: Record<string, JsonValue> = {};
+  for (const [key, nested] of Object.entries(item)) {
+    decoded[key] = jsonValue(nested, `${path}.${key}`);
+  }
+  return decoded;
+}
+
 function array<Value>(
   value: unknown,
   path: string,
@@ -84,6 +105,7 @@ function chatTraceItem(value: unknown, path: string): ChatTraceItem {
       type: "tool",
       id: string(item["id"], `${path}.id`),
       name: string(item["name"], `${path}.name`),
+      arguments: jsonObject(item["arguments"], `${path}.arguments`),
       isError: boolean(item["isError"], `${path}.isError`),
     };
   }
@@ -283,7 +305,18 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
       },
     };
   }
-  if (event === "tool_call" || event === "tool_start") {
+  if (event === "tool_call") {
+    return {
+      event,
+      data: {
+        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
+        id: string(data["id"], `${path}.id`),
+        name: string(data["name"], `${path}.name`),
+        arguments: jsonObject(data["arguments"], `${path}.arguments`),
+      },
+    };
+  }
+  if (event === "tool_start") {
     return {
       event,
       data: {

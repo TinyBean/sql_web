@@ -876,12 +876,21 @@ svg {
   line-height: 1.7;
 }
 
-.thought-items .tool-chip {
+.thought-items .tool-entry {
   flex: 0 0 auto;
+  width: 100%;
+}
+
+.tool-entry {
+  display: flex;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .tool-chip {
   display: inline-flex;
+  max-width: 100%;
   align-items: center;
   gap: 7px;
   padding: 6px 9px;
@@ -894,6 +903,8 @@ svg {
 }
 
 .tool-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: #bdd0c9;
   font-weight: 650;
 }
@@ -903,7 +914,63 @@ svg {
 }
 
 .tool-status {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: inherit;
+}
+
+.tool-arguments-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  margin-left: 2px;
+  padding: 0 0 0 8px;
+  cursor: pointer;
+  color: var(--blue);
+  font: inherit;
+  border: 0;
+  border-left: 1px solid var(--border-strong);
+  background: transparent;
+}
+
+.tool-arguments-toggle:hover {
+  color: var(--text);
+}
+
+.tool-arguments-toggle::after {
+  width: 5px;
+  height: 5px;
+  content: "";
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 150ms ease;
+}
+
+.tool-arguments-toggle[aria-expanded="true"]::after {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.tool-arguments {
+  width: min(100%, 720px);
+  max-height: 320px;
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  color: #c8d8d2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(3, 10, 8, 0.5);
+}
+
+.tool-arguments[hidden] {
+  display: none;
 }
 
 .tool-chip::before {

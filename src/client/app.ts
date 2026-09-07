@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   ChatRole,
   ChatTraceItem,
+  JsonObject,
   MessageRequest,
   ParsedSseEvent,
   SchemaObject,
@@ -23,6 +24,7 @@ import {
 } from "./api-contracts.ts";
 import {
   createStreamPresentation,
+  formatToolArguments,
   formatToolStatusText,
   reduceStreamPresentation,
   settleStreamPresentation,
@@ -75,6 +77,7 @@ interface StreamNode {
   thoughts: HTMLDetailsElement;
   thoughtSummary: HTMLElement;
   thoughtItems: HTMLDivElement;
+  expandedToolIds: Set<string>;
   presentation: StreamPresentation | null;
 }
 
@@ -238,7 +241,17 @@ function ensureMessageStream(): HTMLElement {
   return stream;
 }
 
-function createToolChip(name: string, status: StreamToolStatus): HTMLSpanElement {
+let toolArgumentsPanelSequence = 0;
+
+function createToolEntry(
+  name: string,
+  arguments_: JsonObject,
+  status: StreamToolStatus,
+  expanded: boolean,
+  onToggle: (expanded: boolean) => void,
+): HTMLDivElement {
+  const entry = document.createElement("div");
+  entry.className = "tool-entry";
   const chip = document.createElement("span");
   chip.className = `tool-chip ${status}`;
   const toolName = document.createElement("span");
@@ -250,8 +263,28 @@ function createToolChip(name: string, status: StreamToolStatus): HTMLSpanElement
   const toolStatus = document.createElement("span");
   toolStatus.className = "tool-status";
   toolStatus.textContent = formatToolStatusText(name, status);
-  chip.append(toolName, separator, toolStatus);
-  return chip;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "tool-arguments-toggle";
+  toggle.textContent = "参数";
+  toggle.setAttribute("aria-label", `${expanded ? "隐藏" : "展开"} ${name} 执行参数`);
+  toggle.setAttribute("aria-expanded", String(expanded));
+  const panel = document.createElement("pre");
+  panel.className = "tool-arguments";
+  panel.id = `tool-arguments-${++toolArgumentsPanelSequence}`;
+  panel.hidden = !expanded;
+  panel.textContent = formatToolArguments(arguments_);
+  toggle.setAttribute("aria-controls", panel.id);
+  toggle.addEventListener("click", () => {
+    const nextExpanded = panel.hidden !== false;
+    panel.hidden = !nextExpanded;
+    toggle.setAttribute("aria-expanded", String(nextExpanded));
+    toggle.setAttribute("aria-label", `${nextExpanded ? "隐藏" : "展开"} ${name} 执行参数`);
+    onToggle(nextExpanded);
+  });
+  chip.append(toolName, separator, toolStatus, toggle);
+  entry.append(chip, panel);
+  return entry;
 }
 
 function createTraceText(text: string): HTMLDivElement {
@@ -267,7 +300,16 @@ function renderHistoricalTrace(node: StreamNode, trace: readonly ChatTraceItem[]
     node.thoughtItems.append(
       item.type === "text"
         ? createTraceText(item.text)
-        : createToolChip(item.name, item.isError ? "error" : "done"),
+        : createToolEntry(
+            item.name,
+            item.arguments,
+            item.isError ? "error" : "done",
+            node.expandedToolIds.has(item.id),
+            (expanded) => {
+              if (expanded) node.expandedToolIds.add(item.id);
+              else node.expandedToolIds.delete(item.id);
+            },
+          ),
     );
   }
   node.thoughtSummary.textContent = "思考过程";
@@ -306,7 +348,16 @@ function renderStreamPresentation(
   const children: HTMLElement[] = presentation.items.map((item) => (
     item.type === "text"
       ? createTraceText(item.text)
-      : createToolChip(item.name, item.status)
+      : createToolEntry(
+          item.name,
+          item.arguments,
+          item.status,
+          node.expandedToolIds.has(item.id),
+          (expanded) => {
+            if (expanded) node.expandedToolIds.add(item.id);
+            else node.expandedToolIds.delete(item.id);
+          },
+        )
   ));
   if (presentation.waiting) {
     const typing = document.createElement("div");
@@ -386,6 +437,7 @@ function appendMessage(
     thoughts,
     thoughtSummary,
     thoughtItems,
+    expandedToolIds: new Set<string>(),
     presentation: streaming ? createStreamPresentation() : null,
   };
   if (trace.length) renderHistoricalTrace(node, trace);

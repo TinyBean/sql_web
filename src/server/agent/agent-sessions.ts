@@ -20,6 +20,7 @@ import {
   type ChatImage,
   type ChatMessage,
   type ChatTraceItem,
+  type JsonObject,
   type ModelSelection,
   type SerializedSession,
   type SessionSummary,
@@ -181,6 +182,7 @@ function codeInterpreterImages(message: TranscriptSourceMessage): ChatImage[] {
 interface ToolCallSummary {
   readonly id: string;
   readonly name: string;
+  readonly arguments: JsonObject;
 }
 
 interface ResponseAccumulator {
@@ -197,13 +199,31 @@ function contentParts(message: TranscriptSourceMessage): readonly unknown[] {
   return Array.isArray(message.content) ? message.content : [];
 }
 
+function normalizedToolArguments(value: unknown): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) return {};
+    const parsed: unknown = JSON.parse(serialized);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as JsonObject
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 function toolCallSummary(part: unknown): ToolCallSummary | null {
   if (
     typeof part !== "object" || part === null || !("type" in part) ||
     part.type !== "toolCall" || !("id" in part) || typeof part.id !== "string" ||
     !("name" in part) || typeof part.name !== "string"
   ) return null;
-  return { id: part.id, name: part.name };
+  return {
+    id: part.id,
+    name: part.name,
+    arguments: normalizedToolArguments("arguments" in part ? part.arguments : undefined),
+  };
 }
 
 function appendTraceText(trace: ChatTraceItem[], text: string): void {
@@ -295,6 +315,7 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
             type: "tool",
             id: tool.id,
             name: tool.name,
+            arguments: tool.arguments,
             isError: toolErrors.get(tool.id) ?? true,
           });
           response.images.push(...(toolImages.get(tool.id) ?? []));

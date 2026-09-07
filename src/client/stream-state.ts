@@ -1,4 +1,4 @@
-import type { ParsedSseEvent } from "../shared/contracts.ts";
+import type { JsonObject, ParsedSseEvent } from "../shared/contracts.ts";
 
 export type StreamToolStatus = "queued" | "running" | "done" | "error";
 
@@ -7,6 +7,10 @@ export function formatToolStatusText(_name: string, status: StreamToolStatus): s
   if (status === "running") return "正在执行工具";
   if (status === "error") return "工具执行失败";
   return "工具执行完成";
+}
+
+export function formatToolArguments(arguments_: JsonObject): string {
+  return JSON.stringify(arguments_, null, 2);
 }
 
 export interface StreamTextItem {
@@ -20,6 +24,7 @@ export interface StreamToolItem {
   readonly turn: number;
   readonly id: string;
   readonly name: string;
+  readonly arguments: JsonObject;
   readonly status: StreamToolStatus;
 }
 
@@ -51,15 +56,22 @@ export function createStreamPresentation(): StreamPresentation {
 
 function updateTool(
   state: StreamPresentation,
-  data: { readonly turn: number; readonly id: string; readonly name: string },
+  data: {
+    readonly turn: number;
+    readonly id: string;
+    readonly name: string;
+    readonly arguments?: JsonObject;
+  },
   status: StreamToolStatus,
 ): StreamPresentation {
   const index = state.items.findIndex((item) => item.type === "tool" && item.id === data.id);
+  const previous = state.items[index];
   const tool: StreamToolItem = {
     type: "tool",
     turn: data.turn,
     id: data.id,
     name: data.name,
+    arguments: data.arguments ?? (previous?.type === "tool" ? previous.arguments : {}),
     status,
   };
   const items = [...state.items];

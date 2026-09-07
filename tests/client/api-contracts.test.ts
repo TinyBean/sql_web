@@ -45,7 +45,17 @@ test("decodes ordered turn events and persisted trace items", () => {
       text: "最终回答",
       trace: [
         { type: "text", text: "先查询" },
-        { type: "tool", id: "call-1", name: "execute_sql", isError: false },
+        {
+          type: "tool",
+          id: "call-1",
+          name: "execute_sql",
+          arguments: {
+            sql: "SELECT ?\nFROM sales",
+            parameters: [7, "上海", null, true],
+            options: { output_format: "inline" },
+          },
+          isError: false,
+        },
       ],
     }],
   };
@@ -59,8 +69,16 @@ test("decodes ordered turn events and persisted trace items", () => {
     data: { turn: 0, delta: "先查询" },
   });
   assert.deepEqual(
-    decodeSseEvent("tool_call", { turn: 0, id: "call-1", name: "execute_sql" }),
-    { event: "tool_call", data: { turn: 0, id: "call-1", name: "execute_sql" } },
+    decodeSseEvent("tool_call", {
+      turn: 0,
+      id: "call-1",
+      name: "execute_sql",
+      arguments: { sql: "SELECT 1" },
+    }),
+    {
+      event: "tool_call",
+      data: { turn: 0, id: "call-1", name: "execute_sql", arguments: { sql: "SELECT 1" } },
+    },
   );
   assert.deepEqual(decodeSseEvent("turn_end", { turn: 1, final: true }), {
     event: "turn_end",
@@ -105,6 +123,15 @@ test("rejects malformed nested API and SSE payloads", () => {
       isError: "false",
     }),
     /isError/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("tool_call", {
+      turn: 0,
+      id: "call-1",
+      name: "execute_sql",
+      arguments: { sql: undefined },
+    }),
+    /合法 JSON 值/u,
   );
   assert.throws(
     () => decodeSseEvent("turn_end", { turn: -1, final: true }),

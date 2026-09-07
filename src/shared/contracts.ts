@@ -1,6 +1,12 @@
 export type ChatRole = "user" | "assistant";
 export type AgentToolName = string;
 
+export type JsonValue = string | number | boolean | null | readonly JsonValue[] | JsonObject;
+
+export interface JsonObject {
+  readonly [key: string]: JsonValue;
+}
+
 export const AGENT_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 
 export function isAgentToolName(value: unknown): value is AgentToolName {
@@ -22,6 +28,7 @@ export interface ChatTraceTool {
   readonly type: "tool";
   readonly id: string;
   readonly name: string;
+  readonly arguments: JsonObject;
   readonly isError: boolean;
 }
 
@@ -122,7 +129,7 @@ export interface DeleteSessionResponse {
 export interface SseEventMap {
   turn_start: { turn: number };
   text_delta: { turn: number; delta: string };
-  tool_call: { turn: number; id: string; name: string };
+  tool_call: { turn: number; id: string; name: string; arguments: JsonObject };
   tool_start: { turn: number; id: string; name: string };
   tool_end: { turn: number; id: string; name: string; isError: boolean };
   turn_end: { turn: number; final: boolean };

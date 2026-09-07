@@ -10,6 +10,7 @@ import type {
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
+  JsonObject,
   JsonResponseBody,
   MessageRequest,
   SchemaResponse,
@@ -150,6 +151,21 @@ function writeSse<EventName extends keyof SseEventMap>(
 interface ToolCallEventData {
   readonly id: string;
   readonly name: string;
+  readonly arguments: JsonObject;
+}
+
+function normalizedToolArguments(value: unknown): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) return {};
+    const parsed: unknown = JSON.parse(serialized);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as JsonObject
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function messageToolCalls(message: unknown): ToolCallEventData[] {
@@ -163,7 +179,13 @@ function messageToolCalls(message: unknown): ToolCallEventData[] {
       typeof part === "object" && part !== null && "type" in part && part.type === "toolCall" &&
       "id" in part && typeof part.id === "string" &&
       "name" in part && typeof part.name === "string"
-    ) calls.push({ id: part.id, name: part.name });
+    ) {
+      calls.push({
+        id: part.id,
+        name: part.name,
+        arguments: normalizedToolArguments("arguments" in part ? part.arguments : undefined),
+      });
+    }
   }
   return calls;
 }
@@ -196,6 +218,7 @@ function createAgentEventStreamer(response: ServerResponse): (event: AgentSessio
         announceToolCall({
           id: event.assistantMessageEvent.toolCall.id,
           name: event.assistantMessageEvent.toolCall.name,
+          arguments: normalizedToolArguments(event.assistantMessageEvent.toolCall.arguments),
         });
       }
     } else if (event.type === "message_end") {

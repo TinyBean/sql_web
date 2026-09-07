@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createStreamPresentation,
+  formatToolArguments,
   formatToolStatusText,
   reduceStreamPresentation,
 } from "../../src/client/stream-state.ts";
@@ -32,6 +33,14 @@ test("formats raw tool names with every execution status", () => {
   );
 });
 
+test("formats complete tool arguments as indented JSON", () => {
+  assert.equal(formatToolArguments({}), "{}");
+  assert.equal(
+    formatToolArguments({ sql: "SELECT *\nFROM sales", parameters: [1, null] }),
+    '{\n  "sql": "SELECT *\\nFROM sales",\n  "parameters": [\n    1,\n    null\n  ]\n}',
+  );
+});
+
 test("preserves text/tool order and promotes only the final turn", () => {
   let state = createStreamPresentation();
   state = reduceStreamPresentation(state, { event: "turn_start", data: { turn: 0 } });
@@ -39,7 +48,12 @@ test("preserves text/tool order and promotes only the final turn", () => {
   state = reduceStreamPresentation(state, { event: "text_delta", data: { turn: 0, delta: "查询" } });
   state = reduceStreamPresentation(state, {
     event: "tool_call",
-    data: { turn: 0, id: "call-1", name: "execute_sql" },
+    data: {
+      turn: 0,
+      id: "call-1",
+      name: "execute_sql",
+      arguments: { sql: "SELECT 1", parameters: [1] },
+    },
   });
   state = reduceStreamPresentation(state, {
     event: "tool_start",
@@ -57,7 +71,14 @@ test("preserves text/tool order and promotes only the final turn", () => {
   assert.equal(state.finalText, "");
   assert.deepEqual(state.items, [
     { type: "text", turn: 0, text: "先查询" },
-    { type: "tool", turn: 0, id: "call-1", name: "execute_sql", status: "done" },
+    {
+      type: "tool",
+      turn: 0,
+      id: "call-1",
+      name: "execute_sql",
+      arguments: { sql: "SELECT 1", parameters: [1] },
+      status: "done",
+    },
     { type: "text", turn: 1, text: "最终回答" },
   ]);
 
@@ -66,7 +87,14 @@ test("preserves text/tool order and promotes only the final turn", () => {
   assert.equal(state.finalized, true);
   assert.deepEqual(state.items, [
     { type: "text", turn: 0, text: "先查询" },
-    { type: "tool", turn: 0, id: "call-1", name: "execute_sql", status: "done" },
+    {
+      type: "tool",
+      turn: 0,
+      id: "call-1",
+      name: "execute_sql",
+      arguments: { sql: "SELECT 1", parameters: [1] },
+      status: "done",
+    },
   ]);
 });
 

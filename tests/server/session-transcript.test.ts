@@ -43,14 +43,27 @@ test("groups agent turns into one answer with an ordered persisted trace", () =>
       timestamp: 4,
       trace: [
         { type: "text", text: "先读取订单。" },
-        { type: "tool", id: "call-1", name: "execute_sql", isError: false },
+        {
+          type: "tool",
+          id: "call-1",
+          name: "execute_sql",
+          arguments: { sql: "secret" },
+          isError: false,
+        },
         { type: "text", text: "然后按城市汇总。" },
-        { type: "tool", id: "call-2", name: "execute_sql", isError: true },
+        {
+          type: "tool",
+          id: "call-2",
+          name: "execute_sql",
+          arguments: { sql: "secret-2" },
+          isError: true,
+        },
       ],
     },
   ]);
   const serialized = JSON.stringify(serializeMessages(messages));
-  assert.doesNotMatch(serialized, /不得传给前端|secret/u);
+  assert.doesNotMatch(serialized, /不得传给前端/u);
+  assert.match(serialized, /secret-2/u);
 });
 
 test("keeps direct and truncated answers while omitting retry failures", () => {
@@ -61,6 +74,38 @@ test("keeps direct and truncated answers while omitting retry failures", () => {
   ]), [
     { id: "user-1", role: "user", text: "你好", timestamp: 1 },
     { id: "assistant-2", role: "assistant", text: "直接回答", timestamp: 3 },
+  ]);
+});
+
+test("uses an empty object for legacy tool calls without arguments", () => {
+  assert.deepEqual(serializeMessages([
+    { role: "user", content: "现在几点" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "time-1", name: "get_current_time" }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "time-1",
+      toolName: "get_current_time",
+      isError: false,
+    },
+    { role: "assistant", content: [{ type: "text", text: "现在是十二点。" }], stopReason: "stop" },
+  ]), [
+    { id: "user-1", role: "user", text: "现在几点" },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      text: "现在是十二点。",
+      trace: [{
+        type: "tool",
+        id: "time-1",
+        name: "get_current_time",
+        arguments: {},
+        isError: false,
+      }],
+    },
   ]);
 });
 
@@ -100,7 +145,13 @@ test("associates persisted code interpreter PNG details with the final answer", 
       id: "assistant-2",
       role: "assistant",
       text: "趋势如下。",
-      trace: [{ type: "tool", id: "code-1", name: "code_interpreter", isError: false }],
+      trace: [{
+        type: "tool",
+        id: "code-1",
+        name: "code_interpreter",
+        arguments: {},
+        isError: false,
+      }],
       images: [{ mimeType: "image/png", data: png, alt: "趋势图" }],
     },
   ]);

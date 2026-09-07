@@ -180,7 +180,13 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
         text: "上海最高。",
         trace: [
           { type: "text", text: "先查询。" },
-          { type: "tool", id: "call-1", name: "execute_sql", isError: false },
+          {
+            type: "tool",
+            id: "call-1",
+            name: "execute_sql",
+            arguments: { sql: "SELECT 1" },
+            isError: false,
+          },
         ],
       },
     ],
@@ -228,15 +234,19 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
         type: "message_update",
         assistantMessageEvent: { type: "text_delta", delta: "先查询。" },
         message: intermediateMessage,
-      } as AgentSessionEvent);
+      } as unknown as AgentSessionEvent);
       emit({
         type: "message_update",
         assistantMessageEvent: {
           type: "toolcall_end",
-          toolCall: { id: "call-1", name: "execute_sql" },
+          toolCall: {
+            id: "call-1",
+            name: "execute_sql",
+            arguments: { sql: "SELECT 1" },
+          },
         },
         message: intermediateMessage,
-      } as AgentSessionEvent);
+      } as unknown as AgentSessionEvent);
       emit({ type: "message_end", message: intermediateMessage } as AgentSessionEvent);
       emit({
         type: "tool_execution_start",
@@ -296,6 +306,15 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     { event: "turn_end", data: { turn: 0, final: false } },
     { event: "turn_end", data: { turn: 1, final: true } },
   ]);
+  assert.deepEqual(events.find((event) => event.event === "tool_call"), {
+    event: "tool_call",
+    data: {
+      turn: 0,
+      id: "call-1",
+      name: "execute_sql",
+      arguments: { sql: "SELECT 1" },
+    },
+  });
   assert.deepEqual(events.find((event) => event.event === "tool_end"), {
     event: "tool_end",
     data: { turn: 0, id: "call-1", name: "execute_sql", isError: false },

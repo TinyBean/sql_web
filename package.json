@@ -33,6 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "22.19.19",
+    "linkedom": "^0.18.13",
     "tsx": "4.22.4",
     "typescript": "6.0.3"
   }

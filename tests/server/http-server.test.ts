@@ -21,7 +21,8 @@ import {
   type StreamableAgentSession,
   type WebSessionPort,
 } from "../../src/server/http-server.ts";
-import type { ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
+import type { ChatImage, ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
+import { generatedImageMarkdown } from "../../src/shared/image-references.ts";
 
 const projectRoot = process.cwd();
 
@@ -102,6 +103,24 @@ function parseSseBody(body: string): ParsedSseEvent[] {
   return events;
 }
 
+function parseRawSseBody(body: string): Array<{ event: string; data: unknown }> {
+  const events: Array<{ event: string; data: unknown }> = [];
+  for (const block of body.split(/\r?\n\r?\n/u)) {
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split(/\r?\n/u)) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) continue;
+    events.push({
+      event,
+      data: parseJson(dataLines.join("\n"), `$rawSse.${event}`),
+    });
+  }
+  return events;
+}
+
 test("serves the app with restrictive security headers", async (t) => {
   const baseUrl = await createFixture(t);
   const response = await fetch(`${baseUrl}/`);
@@ -119,12 +138,19 @@ test("serves the app with restrictive security headers", async (t) => {
   assert.equal(sharedContractsModule.status, 200);
   assert.match(sharedContractsModule.headers.get("content-type") ?? "", /javascript/u);
   assert.match(await sharedContractsModule.text(), /isAgentToolName/u);
+  const sharedImageReferencesModule = await fetch(`${baseUrl}/shared/image-references.js`);
+  assert.equal(sharedImageReferencesModule.status, 200);
+  assert.match(sharedImageReferencesModule.headers.get("content-type") ?? "", /javascript/u);
+  assert.match(await sharedImageReferencesModule.text(), /generatedImageReferenceSource/u);
   const streamStateModule = await fetch(`${baseUrl}/stream-state.js`);
   assert.equal(streamStateModule.status, 200);
   assert.match(streamStateModule.headers.get("content-type") ?? "", /javascript/u);
   const markdownModule = await fetch(`${baseUrl}/markdown.js`);
   assert.equal(markdownModule.status, 200);
   assert.match(markdownModule.headers.get("content-type") ?? "", /javascript/u);
+  const markdownParserModule = await fetch(`${baseUrl}/markdown-parser.js`);
+  assert.equal(markdownParserModule.status, 200);
+  assert.match(markdownParserModule.headers.get("content-type") ?? "", /javascript/u);
   const imagePlaceholdersModule = await fetch(`${baseUrl}/image-placeholders.js`);
   assert.equal(imagePlaceholdersModule.status, 200);
   assert.match(imagePlaceholdersModule.headers.get("content-type") ?? "", /javascript/u);
@@ -319,4 +345,322 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     event: "tool_end",
     data: { turn: 0, id: "call-1", name: "execute_sql", isError: false },
   });
+});
+
+test("streams validated generated images after tool completion and reconciles with done", async (t) => {
+  const imageData = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const expectedImages = [
+    { id: "ci:code-1:1", mimeType: "image/png" as const, data: imageData, alt: "趋势图" },
+    { id: "ci:code-1:2", mimeType: "image/png" as const, data: imageData, alt: "分布图" },
+  ];
+  const completedSession: SerializedSession = {
+    id: "fake-session",
+    title: "图片事件测试",
+    model: null,
+    tools: ["code_interpreter"],
+    streaming: false,
+    messages: [{
+      id: "assistant-1",
+      role: "assistant",
+      text: expectedImages.map((image) => generatedImageMarkdown(image.id, image.alt)).join("\n"),
+      images: expectedImages,
+    }],
+  };
+  const listeners = new Set<(event: AgentSessionEvent) => void>();
+  const streamable: StreamableAgentSession = {
+    isStreaming: false,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const emit = (event: unknown): void => {
+    for (const listener of listeners) listener(event as AgentSessionEvent);
+  };
+  const sessions: WebSessionPort = {
+    status: () => ({
+      tools: ["code_interpreter"],
+      codeInterpreter: { available: true, reason: null },
+      model: { provider: "test-provider", model: "test-model" },
+      availableModelCount: 1,
+      activeSessionCount: 1,
+    }),
+    list: async () => [],
+    create: async () => completedSession,
+    get: async () => streamable,
+    getSerialized: async () => completedSession,
+    delete: async () => {},
+    prompt: async () => {
+      emit({ type: "turn_start" });
+      emit({
+        type: "tool_execution_start",
+        toolCallId: "code-1",
+        toolName: "code_interpreter",
+        args: {},
+      });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "code-1",
+        toolName: "code_interpreter",
+        result: {
+          content: [{ type: "text", text: "PRIVATE_TOOL_TEXT" }],
+          details: {
+            kind: "code_interpreter",
+            stdout: "PRIVATE_STDOUT",
+            images: [
+              { mimeType: "image/png", data: imageData, alt: "趋势图" },
+              { mimeType: "image/png", data: imageData, alt: "分布图" },
+            ],
+          },
+        },
+        isError: false,
+      });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "code-1",
+        toolName: "code_interpreter",
+        result: {
+          details: {
+            kind: "code_interpreter",
+            images: [{ mimeType: "image/png", data: imageData, alt: "重复图片" }],
+          },
+        },
+        isError: false,
+      });
+      emit({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "code-1", name: "code_interpreter", arguments: {} }],
+          stopReason: "toolUse",
+        },
+        toolResults: [],
+      });
+    },
+    abort: async () => {},
+  };
+  const baseUrl = await createFixture(t, sessions);
+  const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "画图" }),
+  });
+  assert.equal(response.status, 200);
+  const events = parseRawSseBody(await response.text());
+  const doneIndex = events.findIndex(({ event }) => event === "done");
+  const generatedImages = events.filter(({ event }) => event === "generated_image");
+  const firstToolEndIndex = events.findIndex(({ event }) => event === "tool_end");
+  const turnEndIndex = events.findIndex(({ event }) => event === "turn_end");
+
+  assert.equal(doneIndex, events.length - 1);
+  assert.deepEqual(
+    events.find(({ event }) => event === "tool_end")?.data,
+    { turn: 0, id: "code-1", name: "code_interpreter", isError: false },
+  );
+  assert.deepEqual(generatedImages.map(({ data }) => data), expectedImages.map((image) => ({
+    turn: 0,
+    toolCallId: "code-1",
+    image,
+  })));
+  assert.ok(firstToolEndIndex < events.findIndex(({ event }) => event === "generated_image"));
+  assert.ok(events.findLastIndex(({ event }) => event === "generated_image") < turnEndIndex);
+  assert.deepEqual(
+    (events[doneIndex]?.data as SerializedSession).messages[0]?.images,
+    generatedImages.map(({ data }) => (
+      data as { image: ChatImage }
+    ).image),
+  );
+  assert.doesNotMatch(JSON.stringify(events.slice(0, doneIndex)), /PRIVATE_TOOL_TEXT|PRIVATE_STDOUT/u);
+});
+
+test("does not stream images from failed, unrelated, or malformed tool results", async (t) => {
+  const imageData = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const completedSession: SerializedSession = {
+    id: "fake-session",
+    title: "非法图片事件测试",
+    model: null,
+    tools: ["code_interpreter", "execute_sql"],
+    streaming: false,
+    messages: [],
+  };
+  const listeners = new Set<(event: AgentSessionEvent) => void>();
+  const streamable: StreamableAgentSession = {
+    isStreaming: false,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const emit = (event: unknown): void => {
+    for (const listener of listeners) listener(event as AgentSessionEvent);
+  };
+  const validDetails = {
+    kind: "code_interpreter",
+    images: [{ mimeType: "image/png", data: imageData, alt: "不得发送" }],
+  };
+  const sessions: WebSessionPort = {
+    status: () => ({
+      tools: ["code_interpreter", "execute_sql"],
+      codeInterpreter: { available: true, reason: null },
+      model: { provider: "test-provider", model: "test-model" },
+      availableModelCount: 1,
+      activeSessionCount: 1,
+    }),
+    list: async () => [],
+    create: async () => completedSession,
+    get: async () => streamable,
+    getSerialized: async () => completedSession,
+    delete: async () => {},
+    prompt: async () => {
+      emit({ type: "turn_start" });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "failed",
+        toolName: "code_interpreter",
+        result: { details: validDetails },
+        isError: true,
+      });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "sql",
+        toolName: "execute_sql",
+        result: { details: validDetails },
+        isError: false,
+      });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "malformed",
+        toolName: "code_interpreter",
+        result: {
+          details: {
+            kind: "code_interpreter",
+            images: [
+              { mimeType: "image/png", data: "PRIVATE_INVALID_BASE64", alt: "坏图" },
+              {
+                mimeType: "image/png",
+                data: `${imageData}PRIVATE_BASE64_SUFFIX`,
+                alt: "尾随数据",
+              },
+            ],
+          },
+        },
+        isError: false,
+      });
+    },
+    abort: async () => {},
+  };
+  const baseUrl = await createFixture(t, sessions);
+  const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "画图" }),
+  });
+  const events = parseRawSseBody(await response.text());
+
+  assert.equal(response.status, 200);
+  assert.equal(events.some(({ event }) => event === "generated_image"), false);
+  assert.doesNotMatch(
+    JSON.stringify(events),
+    /不得发送|PRIVATE_INVALID_BASE64|PRIVATE_BASE64_SUFFIX|坏图|尾随数据/u,
+  );
+  assert.equal(events.filter(({ event }) => event === "tool_end").length, 3);
+});
+
+test("streams sanitized automatic compaction lifecycle events", async (t) => {
+  const completedSession: SerializedSession = {
+    id: "fake-session",
+    title: "自动压缩测试",
+    model: null,
+    tools: [],
+    streaming: false,
+    messages: [],
+  };
+  const listeners = new Set<(event: AgentSessionEvent) => void>();
+  const streamable: StreamableAgentSession = {
+    isStreaming: false,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const emit = (event: unknown): void => {
+    for (const listener of listeners) listener(event as AgentSessionEvent);
+  };
+  const automaticCases = [
+    { reason: "threshold", outcome: "completed" },
+    { reason: "threshold", outcome: "aborted" },
+    { reason: "threshold", outcome: "failed" },
+    { reason: "overflow", outcome: "completed" },
+    { reason: "overflow", outcome: "aborted" },
+    { reason: "overflow", outcome: "failed" },
+  ] as const;
+  const privateResult = {
+    summary: "PRIVATE_COMPACTION_SUMMARY",
+    firstKeptEntryId: "PRIVATE_FIRST_KEPT_ENTRY",
+    tokensBefore: 42_000,
+    estimatedTokensAfter: 4_200,
+    usage: { privateUsage: "PRIVATE_USAGE" },
+    details: { privateDetails: "PRIVATE_DETAILS" },
+  };
+  const sessions: WebSessionPort = {
+    status: () => ({
+      tools: [],
+      codeInterpreter: { available: false, reason: "test sandbox unavailable" },
+      model: { provider: "test-provider", model: "test-model" },
+      availableModelCount: 0,
+      activeSessionCount: 1,
+    }),
+    list: async () => [],
+    create: async () => completedSession,
+    get: async () => streamable,
+    getSerialized: async () => completedSession,
+    delete: async () => {},
+    prompt: async () => {
+      emit({ type: "compaction_start", reason: "manual" });
+      emit({
+        type: "compaction_end",
+        reason: "manual",
+        result: privateResult,
+        aborted: false,
+        willRetry: false,
+        errorMessage: "PRIVATE_MANUAL_ERROR",
+      });
+
+      for (const { reason, outcome } of automaticCases) {
+        emit({ type: "compaction_start", reason });
+        emit({
+          type: "compaction_end",
+          reason,
+          result: outcome === "completed" ? privateResult : undefined,
+          aborted: outcome === "aborted",
+          willRetry: reason === "overflow",
+          errorMessage: outcome === "failed" ? "PRIVATE_RAW_ERROR" : undefined,
+        });
+      }
+    },
+    abort: async () => {},
+  };
+  const baseUrl = await createFixture(t, sessions);
+  const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "触发自动压缩" }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.text();
+  const rawEvents = parseRawSseBody(body);
+  const compactionEvents = rawEvents.filter(({ event }) => event.startsWith("compaction_"));
+
+  assert.deepEqual(
+    compactionEvents,
+    automaticCases.flatMap(({ reason, outcome }) => [
+      { event: "compaction_start", data: { reason } },
+      { event: "compaction_end", data: { reason, outcome } },
+    ]),
+  );
+  assert.equal(rawEvents.at(-1)?.event, "done");
+  assert.doesNotMatch(
+    body,
+    /PRIVATE_|summary|firstKeptEntryId|tokensBefore|estimatedTokensAfter|usage|details|errorMessage/u,
+  );
 });

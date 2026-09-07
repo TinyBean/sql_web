@@ -2,9 +2,16 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentToolName } from "../../shared/contracts.ts";
+import {
+  createGeneratedImageId,
+  generatedImageMarkdown,
+} from "../../shared/image-references.ts";
 import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
 import type { SessionArtifactStore } from "./artifact-store.ts";
-import type { CodeInterpreterRuntime } from "./code-interpreter.ts";
+import {
+  formatCodeInterpreterResult,
+  type CodeInterpreterRuntime,
+} from "./code-interpreter.ts";
 import type { AppDatabase } from "../database/database.ts";
 import type { QueryResult, QueryTruncationReason } from "../database/database.ts";
 
@@ -146,7 +153,7 @@ export function createAgentTools(
     name: "code_interpreter",
     label: "执行受限 Python",
     description:
-      "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text and emit_image() for Matplotlib Figure or Pillow Image output. Matplotlib is preconfigured with a Simplified Chinese system font: do not replace it with hard-coded font families such as SimHei. When explicit Matplotlib font properties are needed, use matplotlib_chinese_font(size), or matplotlib_chinese_font(size, bold=True) for bold text. For Chinese Pillow text, use chinese_font(size), or chinese_font(size, bold=True) for bold text. Emitted PNGs are attached to the answer automatically; never invent a Markdown image URL. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
+      "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text and emit_image() for Matplotlib Figure or Pillow Image output. Matplotlib is preconfigured with a Simplified Chinese system font: do not replace it with hard-coded font families such as SimHei. When explicit Matplotlib font properties are needed, use matplotlib_chinese_font(size), or matplotlib_chinese_font(size, bold=True) for bold text. For Chinese Pillow text, use chinese_font(size), or chinese_font(size, bold=True) for bold text. For every emitted PNG, copy its returned imageReferences[].markdown value exactly once into the final answer at the intended display position; never modify a returned reference or invent a Markdown image URL. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
     promptSnippet: "在严格沙箱中执行 Python,进行额外计算、统计或 PNG 图表渲染",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -157,10 +164,17 @@ export function createAgentTools(
         }),
       ),
     }),
-    async execute(_toolCallId, params, signal) {
+    async execute(toolCallId, params, signal) {
       const result = await codeInterpreter.execute(params.code, params.input_json, artifacts, signal);
+      const imageReferences = result.details.images.map((image, index) => {
+        const id = createGeneratedImageId(toolCallId, index + 1);
+        return { id, markdown: generatedImageMarkdown(id, image.alt) };
+      });
       return {
-        content: [{ type: "text" as const, text: result.text }],
+        content: [{
+          type: "text" as const,
+          text: formatCodeInterpreterResult(result.details, imageReferences),
+        }],
         details: result.details,
       };
     },

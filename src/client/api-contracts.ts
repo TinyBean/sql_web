@@ -1,9 +1,11 @@
 import type {
   AbortResponse,
+  AutomaticCompactionReason,
   ChatImage,
   ChatMessage,
   ChatRole,
   ChatTraceItem,
+  CompactionOutcome,
   AgentToolName,
   DeleteSessionResponse,
   ErrorResponse,
@@ -48,6 +50,11 @@ function record(value: unknown, path: string): Record<string, unknown> {
 
 function string(value: unknown, path: string): string {
   return typeof value === "string" ? value : invalid(path, "字符串");
+}
+
+function nonEmptyString(value: unknown, path: string): string {
+  const decoded = string(value, path);
+  return decoded.trim() ? decoded : invalid(path, "非空字符串");
 }
 
 function boolean(value: unknown, path: string): boolean {
@@ -120,14 +127,40 @@ function chatImage(value: unknown, path: string): ChatImage {
   const item = record(value, path);
   if (item["mimeType"] !== "image/png") invalid(`${path}.mimeType`, "image/png");
   return {
+    id: nonEmptyString(item["id"], `${path}.id`),
     mimeType: "image/png",
     data: string(item["data"], `${path}.data`),
     alt: string(item["alt"], `${path}.alt`),
   };
 }
 
+function chatImages(value: unknown, path: string): ChatImage[] {
+  const decoded = array(value, path, chatImage);
+  const ids = new Set<string>();
+  for (const [index, image] of decoded.entries()) {
+    if (ids.has(image.id)) invalid(`${path}[${index}].id`, "同一消息内唯一的图片 ID");
+    ids.add(image.id);
+  }
+  return decoded;
+}
+
 function schemaObjectType(value: unknown, path: string): "table" | "view" {
   return value === "table" || value === "view" ? value : invalid(path, "table 或 view");
+}
+
+function compactionReason(value: unknown, path: string): AutomaticCompactionReason {
+  return value === "threshold" || value === "overflow"
+    ? value
+    : invalid(path, "threshold 或 overflow");
+}
+
+function compactionOutcome(
+  value: unknown,
+  path: string,
+): CompactionOutcome {
+  return value === "completed" || value === "aborted" || value === "failed"
+    ? value
+    : invalid(path, "completed、aborted 或 failed");
 }
 
 function chatMessage(value: unknown, path: string): ChatMessage {
@@ -147,7 +180,7 @@ function chatMessage(value: unknown, path: string): ChatMessage {
       : { trace: array(trace, `${path}.trace`, chatTraceItem) }),
     ...(images === undefined
       ? {}
-      : { images: array(images, `${path}.images`, chatImage) }),
+      : { images: chatImages(images, `${path}.images`) }),
   };
 }
 
@@ -337,12 +370,37 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
       },
     };
   }
+  if (event === "generated_image") {
+    return {
+      event,
+      data: {
+        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
+        toolCallId: nonEmptyString(data["toolCallId"], `${path}.toolCallId`),
+        image: chatImage(data["image"], `${path}.image`),
+      },
+    };
+  }
   if (event === "turn_end") {
     return {
       event,
       data: {
         turn: nonNegativeInteger(data["turn"], `${path}.turn`),
         final: boolean(data["final"], `${path}.final`),
+      },
+    };
+  }
+  if (event === "compaction_start") {
+    return {
+      event,
+      data: { reason: compactionReason(data["reason"], `${path}.reason`) },
+    };
+  }
+  if (event === "compaction_end") {
+    return {
+      event,
+      data: {
+        reason: compactionReason(data["reason"], `${path}.reason`),
+        outcome: compactionOutcome(data["outcome"], `${path}.outcome`),
       },
     };
   }

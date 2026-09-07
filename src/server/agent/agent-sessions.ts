@@ -28,6 +28,7 @@ import {
 import type { AppDatabase } from "../database/database.ts";
 import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
+import { extractCodeInterpreterImages } from "../tool/code-interpreter-images.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import type { AppLogger } from "../logger.ts";
@@ -96,7 +97,7 @@ function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
 8. 少量查询结果优先使用 execute_sql 的默认 inline 模式。需要对大量明细做额外计算或渲染时,使用 output_format="json_file",再把返回的 fileUri 原样传给 code_interpreter.input_json。
 9. 只有 SQL 和当前时间工具无法完成精确计算、统计方法或 PNG 渲染时才调用 code_interpreter。
 10. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
-11. emit_image() 生成的 PNG 会由前端自动附加并持久化。回答中不得虚构 artifact://image.png、sandbox 路径或其他 Markdown 图片地址。`
+11. emit_image() 生成的 PNG 会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
     : "";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
@@ -153,32 +154,6 @@ function messageText(message: TranscriptSourceMessage | undefined): string {
     .join("");
 }
 
-function codeInterpreterImages(message: TranscriptSourceMessage): ChatImage[] {
-  if (message.toolName !== "code_interpreter") return [];
-  const details = message.details;
-  if (
-    typeof details !== "object" || details === null || !("kind" in details) ||
-    details.kind !== "code_interpreter" || !("images" in details) || !Array.isArray(details.images)
-  ) return [];
-  const images: ChatImage[] = [];
-  for (const candidate of details.images.slice(0, 3)) {
-    if (
-      typeof candidate !== "object" || candidate === null ||
-      !("mimeType" in candidate) || candidate.mimeType !== "image/png" ||
-      !("data" in candidate) || typeof candidate.data !== "string" ||
-      !("alt" in candidate) || typeof candidate.alt !== "string" ||
-      candidate.data.length > 2_800_000
-    ) continue;
-    const bytes = Buffer.from(candidate.data, "base64");
-    if (
-      bytes.length > 2 * 1024 * 1024 || bytes.length < 8 ||
-      bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a"
-    ) continue;
-    images.push({ mimeType: "image/png", data: candidate.data, alt: candidate.alt });
-  }
-  return images;
-}
-
 interface ToolCallSummary {
   readonly id: string;
   readonly name: string;
@@ -187,7 +162,8 @@ interface ToolCallSummary {
 
 interface ResponseAccumulator {
   readonly trace: ChatTraceItem[];
-  readonly images: ChatImage[];
+  readonly pendingToolTraceIndices: Map<string, number[]>;
+  readonly toolImagesByTraceIndex: Map<number, readonly ChatImage[]>;
   hasFinal: boolean;
   finalText: string;
   finalTimestamp: number | undefined;
@@ -239,7 +215,8 @@ function appendTraceText(trace: ChatTraceItem[], text: string): void {
 function newResponseAccumulator(): ResponseAccumulator {
   return {
     trace: [],
-    images: [],
+    pendingToolTraceIndices: new Map(),
+    toolImagesByTraceIndex: new Map(),
     hasFinal: false,
     finalText: "",
     finalTimestamp: undefined,
@@ -248,18 +225,49 @@ function newResponseAccumulator(): ResponseAccumulator {
   };
 }
 
-export function serializeMessages(messages: readonly TranscriptSourceMessage[]): ChatMessage[] {
-  const transcript: ChatMessage[] = [];
-  const toolErrors = new Map<string, boolean>();
-  const toolImages = new Map<string, readonly ChatImage[]>();
-  for (const message of messages) {
-    if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-      toolErrors.set(message.toolCallId, message.isError === true);
-      const images = codeInterpreterImages(message);
-      if (images.length) toolImages.set(message.toolCallId, images);
+function responseImages(response: ResponseAccumulator): ChatImage[] {
+  const images: ChatImage[] = [];
+  const imageIds = new Set<string>();
+  const groups = [...response.toolImagesByTraceIndex.entries()]
+    .sort(([left], [right]) => left - right);
+  for (const [, group] of groups) {
+    for (const image of group) {
+      if (imageIds.has(image.id)) continue;
+      imageIds.add(image.id);
+      images.push(image);
     }
   }
+  return images;
+}
 
+function applyToolResult(
+  response: ResponseAccumulator,
+  message: TranscriptSourceMessage,
+): void {
+  if (typeof message.toolCallId !== "string") return;
+  const pending = response.pendingToolTraceIndices.get(message.toolCallId);
+  if (!pending?.length) return;
+  const matchAt = typeof message.toolName === "string"
+    ? pending.findIndex((traceIndex) => {
+        const item = response.trace[traceIndex];
+        return item?.type === "tool" && item.name === message.toolName;
+      })
+    : 0;
+  if (matchAt < 0) return;
+  const [traceIndex] = pending.splice(matchAt, 1);
+  if (traceIndex === undefined) return;
+  if (!pending.length) response.pendingToolTraceIndices.delete(message.toolCallId);
+  const item = response.trace[traceIndex];
+  if (!item || item.type !== "tool") return;
+  response.trace[traceIndex] = { ...item, isError: message.isError === true };
+  const images = message.toolName === "code_interpreter" && message.isError !== true
+    ? extractCodeInterpreterImages(message.toolCallId, message.details)
+    : [];
+  if (images.length) response.toolImagesByTraceIndex.set(traceIndex, images);
+}
+
+export function serializeMessages(messages: readonly TranscriptSourceMessage[]): ChatMessage[] {
+  const transcript: ChatMessage[] = [];
   let response: ResponseAccumulator | null = null;
   const flushResponse = (): void => {
     if (!response) return;
@@ -268,13 +276,14 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
       const timestamp = response.hasFinal
         ? response.finalTimestamp
         : response.fallbackTimestamp;
+      const images = responseImages(response);
       transcript.push({
         id: `assistant-${transcript.length + 1}`,
         role: "assistant",
         text,
         ...(timestamp === undefined ? {} : { timestamp }),
         ...(response.trace.length ? { trace: response.trace } : {}),
-        ...(response.images.length ? { images: response.images } : {}),
+        ...(images.length ? { images } : {}),
       });
     }
     response = null;
@@ -294,6 +303,10 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
       response = newResponseAccumulator();
       continue;
     }
+    if (message.role === "toolResult") {
+      if (response) applyToolResult(response, message);
+      continue;
+    }
     if (message.role !== "assistant" || !response) continue;
 
     const parts = contentParts(message);
@@ -311,14 +324,17 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
       for (const part of parts) {
         const tool = toolCallSummary(part);
         if (tool) {
+          const traceIndex = response.trace.length;
           response.trace.push({
             type: "tool",
             id: tool.id,
             name: tool.name,
             arguments: tool.arguments,
-            isError: toolErrors.get(tool.id) ?? true,
+            isError: true,
           });
-          response.images.push(...(toolImages.get(tool.id) ?? []));
+          const pending = response.pendingToolTraceIndices.get(tool.id) ?? [];
+          pending.push(traceIndex);
+          response.pendingToolTraceIndices.set(tool.id, pending);
         } else if (
           typeof part === "object" && part !== null && "type" in part && part.type === "text" &&
           "text" in part && typeof part.text === "string"

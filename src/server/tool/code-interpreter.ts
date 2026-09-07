@@ -274,6 +274,11 @@ export interface CodeInterpreterExecution {
   readonly details: CodeInterpreterDetails;
 }
 
+export interface CodeInterpreterImageReference {
+  readonly id: string;
+  readonly markdown: string;
+}
+
 interface CapturedOutput {
   readonly text: string;
   readonly truncated: boolean;
@@ -439,7 +444,10 @@ function collectImages(workDir: string): CodeInterpreterImage[] {
   return images;
 }
 
-function resultText(details: CodeInterpreterDetails): string {
+export function formatCodeInterpreterResult(
+  details: CodeInterpreterDetails,
+  imageReferences: readonly CodeInterpreterImageReference[] = [],
+): string {
   return JSON.stringify({
     stdout: details.stdout || "(no stdout)",
     ...(details.stderr ? { stderr: details.stderr } : {}),
@@ -447,6 +455,7 @@ function resultText(details: CodeInterpreterDetails): string {
     stderrTruncated: details.stderrTruncated,
     imageCount: details.images.length,
     imageDelivery: details.images.length ? "attached_to_answer" : "none",
+    ...(imageReferences.length ? { imageReferences } : {}),
   });
 }
 
@@ -712,7 +721,7 @@ export class CodeInterpreterRuntime {
         durationMs: Date.now() - startedAt,
         images: collectImages(workDir),
       };
-      return { text: resultText(details), details };
+      return { text: formatCodeInterpreterResult(details), details };
     } finally {
       if (filterDescriptor !== undefined) closeSync(filterDescriptor);
       rmSync(executionDir, { recursive: true, force: true });

@@ -14,6 +14,7 @@ export function isAgentToolName(value: unknown): value is AgentToolName {
 }
 
 export interface ChatImage {
+  readonly id: string;
   readonly mimeType: "image/png";
   readonly data: string;
   readonly alt: string;
@@ -126,13 +127,19 @@ export interface DeleteSessionResponse {
   readonly ok: true;
 }
 
+export type AutomaticCompactionReason = "threshold" | "overflow";
+export type CompactionOutcome = "completed" | "aborted" | "failed";
+
 export interface SseEventMap {
   turn_start: { turn: number };
   text_delta: { turn: number; delta: string };
   tool_call: { turn: number; id: string; name: string; arguments: JsonObject };
   tool_start: { turn: number; id: string; name: string };
   tool_end: { turn: number; id: string; name: string; isError: boolean };
+  generated_image: { turn: number; toolCallId: string; image: ChatImage };
   turn_end: { turn: number; final: boolean };
+  compaction_start: { reason: AutomaticCompactionReason };
+  compaction_end: { reason: AutomaticCompactionReason; outcome: CompactionOutcome };
   status: { message: string };
   error: { message: string };
   done: SerializedSession;

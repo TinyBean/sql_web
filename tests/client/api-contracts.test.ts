@@ -86,6 +86,45 @@ test("decodes ordered turn events and persisted trace items", () => {
   });
 });
 
+test("decodes automatic compaction lifecycle events", () => {
+  for (const reason of ["threshold", "overflow"] as const) {
+    assert.deepEqual(decodeSseEvent("compaction_start", { reason }), {
+      event: "compaction_start",
+      data: { reason },
+    });
+    for (const outcome of ["completed", "aborted", "failed"] as const) {
+      assert.deepEqual(decodeSseEvent("compaction_end", { reason, outcome }), {
+        event: "compaction_end",
+        data: { reason, outcome },
+      });
+    }
+  }
+});
+
+test("rejects invalid automatic compaction events and ignores unknown SSE events", () => {
+  assert.throws(
+    () => decodeSseEvent("compaction_start", { reason: "manual" }),
+    /reason/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("compaction_start", { reason: "unexpected" }),
+    /reason/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("compaction_start", { reason: 1 }),
+    /reason/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("compaction_end", { reason: "overflow", outcome: "unknown" }),
+    /outcome/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("compaction_end", { reason: "overflow", outcome: false }),
+    /outcome/u,
+  );
+  assert.equal(decodeSseEvent("future_event", {}), null);
+});
+
 test("decodes code interpreter tools and inline PNG images", () => {
   const session = {
     ...validSession,
@@ -100,10 +139,79 @@ test("decodes code interpreter tools and inline PNG images", () => {
       id: "assistant-1",
       role: "assistant",
       text: "图表",
-      images: [{ mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
+      images: [{ id: "ci:call-1:1", mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
     }],
   };
   assert.deepEqual(decodeSerializedSession(session), session);
+});
+
+test("decodes generated image stream events", () => {
+  const image = {
+    id: "ci:call-1:1",
+    mimeType: "image/png",
+    data: "iVBORw0KGgo=",
+    alt: "趋势图",
+  };
+  assert.deepEqual(
+    decodeSseEvent("generated_image", { turn: 2, toolCallId: "call-1", image }),
+    {
+      event: "generated_image",
+      data: { turn: 2, toolCallId: "call-1", image },
+    },
+  );
+});
+
+test("rejects malformed generated image stream events", () => {
+  const image = {
+    id: "ci:call-1:1",
+    mimeType: "image/png",
+    data: "iVBORw0KGgo=",
+    alt: "趋势图",
+  };
+  assert.throws(
+    () => decodeSseEvent("generated_image", { turn: -1, toolCallId: "call-1", image }),
+    /turn/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", { toolCallId: "call-1", image }),
+    /turn/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", { turn: 0, image }),
+    /toolCallId/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", { turn: 0, toolCallId: "   ", image }),
+    /toolCallId/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", { turn: 0, toolCallId: "call-1" }),
+    /image/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", {
+      turn: 0,
+      toolCallId: "call-1",
+      image: { ...image, id: "" },
+    }),
+    /image\.id/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", {
+      turn: 0,
+      toolCallId: "call-1",
+      image: { ...image, mimeType: "image/jpeg" },
+    }),
+    /image\.mimeType/u,
+  );
+  assert.throws(
+    () => decodeSseEvent("generated_image", {
+      turn: 0,
+      toolCallId: "call-1",
+      image: { ...image, alt: null },
+    }),
+    /image\.alt/u,
+  );
 });
 
 test("rejects malformed nested API and SSE payloads", () => {
@@ -123,6 +231,33 @@ test("rejects malformed nested API and SSE payloads", () => {
       isError: "false",
     }),
     /isError/u,
+  );
+  assert.throws(
+    () => decodeSerializedSession({
+      ...validSession,
+      messages: [{
+        id: "assistant-1",
+        role: "assistant",
+        text: "图表",
+        images: [{ id: "", mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
+      }],
+    }),
+    /images\[0\]\.id/u,
+  );
+  assert.throws(
+    () => decodeSerializedSession({
+      ...validSession,
+      messages: [{
+        id: "assistant-1",
+        role: "assistant",
+        text: "图表",
+        images: [
+          { id: "ci:call-1:1", mimeType: "image/png", data: "AAAA", alt: "第一张" },
+          { id: "ci:call-1:1", mimeType: "image/png", data: "BBBB", alt: "第二张" },
+        ],
+      }],
+    }),
+    /images\[1\]\.id/u,
   );
   assert.throws(
     () => decodeSseEvent("tool_call", {

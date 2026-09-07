@@ -7,6 +7,8 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type {
   AbortResponse,
   AgentStatus,
+  AutomaticCompactionReason,
+  CompactionOutcome,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -22,6 +24,7 @@ import type {
 import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.ts";
 import { DatabaseInputError } from "./database/database.ts";
 import type { AppDatabase } from "./database/database.ts";
+import { extractCodeInterpreterImages } from "./tool/code-interpreter-images.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";
@@ -37,7 +40,9 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/app.js", { root: "public", filename: "generated/client/app.js", contentType: "text/javascript; charset=utf-8" }],
   ["/api-contracts.js", { root: "public", filename: "generated/client/api-contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/contracts.js", { root: "public", filename: "generated/shared/contracts.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/shared/image-references.js", { root: "public", filename: "generated/shared/image-references.js", contentType: "text/javascript; charset=utf-8" }],
   ["/image-placeholders.js", { root: "public", filename: "generated/client/image-placeholders.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/markdown-parser.js", { root: "public", filename: "generated/client/markdown-parser.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown.js", { root: "public", filename: "generated/client/markdown.js", contentType: "text/javascript; charset=utf-8" }],
   ["/stream-state.js", { root: "public", filename: "generated/client/stream-state.js", contentType: "text/javascript; charset=utf-8" }],
   ["/styles.css", { root: "public", filename: "styles.css", contentType: "text/css; charset=utf-8" }],
@@ -197,9 +202,23 @@ function isFinalTurnMessage(message: unknown): boolean {
     messageToolCalls(message).length === 0;
 }
 
+function automaticCompactionReason(
+  reason: "manual" | "threshold" | "overflow",
+): AutomaticCompactionReason | undefined {
+  return reason === "threshold" || reason === "overflow" ? reason : undefined;
+}
+
+function compactionOutcome(
+  event: Extract<AgentSessionEvent, { type: "compaction_end" }>,
+): CompactionOutcome {
+  if (event.aborted) return "aborted";
+  return event.result === undefined ? "failed" : "completed";
+}
+
 function createAgentEventStreamer(response: ServerResponse): (event: AgentSessionEvent) => void {
   let turn = -1;
   let announcedToolCalls = new Set<string>();
+  const announcedImageIds = new Set<string>();
   const announceToolCall = (call: ToolCallEventData): void => {
     if (announcedToolCalls.has(call.id)) return;
     announcedToolCalls.add(call.id);
@@ -236,11 +255,37 @@ function createAgentEventStreamer(response: ServerResponse): (event: AgentSessio
         name: event.toolName,
         isError: event.isError,
       });
+      if (event.toolName === "code_interpreter" && !event.isError) {
+        const details = typeof event.result === "object" && event.result !== null &&
+            "details" in event.result
+          ? event.result.details
+          : undefined;
+        for (const image of extractCodeInterpreterImages(event.toolCallId, details)) {
+          if (announcedImageIds.has(image.id)) continue;
+          announcedImageIds.add(image.id);
+          writeSse(response, "generated_image", {
+            turn,
+            toolCallId: event.toolCallId,
+            image,
+          });
+        }
+      }
     } else if (event.type === "turn_end") {
       writeSse(response, "turn_end", {
         turn,
         final: isFinalTurnMessage(event.message),
       });
+    } else if (event.type === "compaction_start") {
+      const reason = automaticCompactionReason(event.reason);
+      if (reason) writeSse(response, "compaction_start", { reason });
+    } else if (event.type === "compaction_end") {
+      const reason = automaticCompactionReason(event.reason);
+      if (reason) {
+        writeSse(response, "compaction_end", {
+          reason,
+          outcome: compactionOutcome(event),
+        });
+      }
     } else if (event.type === "auto_retry_start") {
       writeSse(response, "status", {
         message: `请求失败,正在进行第 ${event.attempt} 次重试…`,

@@ -797,25 +797,6 @@ svg {
   background: rgba(255, 255, 255, 0.96);
 }
 
-.message-images {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.message-images[hidden] {
-  display: none;
-}
-
-.message-images img {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.96);
-}
-
 .thoughts {
   margin: 0 0 13px;
   color: var(--muted);
@@ -1020,6 +1001,19 @@ svg {
 
 .typing span:nth-child(2) { animation-delay: 150ms; }
 .typing span:nth-child(3) { animation-delay: 300ms; }
+
+.compaction-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.compaction-status .typing {
+  padding: 7px 0;
+}
 
 .message-error {
   padding: 10px 12px;

@@ -1,4 +1,10 @@
-import type { JsonObject, ParsedSseEvent } from "../shared/contracts.ts";
+import type {
+  AutomaticCompactionReason,
+  ChatImage,
+  ChatMessage,
+  JsonObject,
+  ParsedSseEvent,
+} from "../shared/contracts.ts";
 
 export type StreamToolStatus = "queued" | "running" | "done" | "error";
 
@@ -11,6 +17,15 @@ export function formatToolStatusText(_name: string, status: StreamToolStatus): s
 
 export function formatToolArguments(arguments_: JsonObject): string {
   return JSON.stringify(arguments_, null, 2);
+}
+
+/** Select only an assistant response belonging to the latest submitted user turn. */
+export function latestAssistantAfterLastUser(
+  messages: readonly ChatMessage[],
+): ChatMessage | undefined {
+  const lastUserIndex = messages.findLastIndex((message) => message.role === "user");
+  if (lastUserIndex < 0) return undefined;
+  return messages.slice(lastUserIndex + 1).findLast((message) => message.role === "assistant");
 }
 
 export interface StreamTextItem {
@@ -34,10 +49,13 @@ export interface StreamPresentation {
   readonly items: readonly StreamTraceItem[];
   readonly finalText: string;
   readonly activeTurn: number | null;
-  readonly currentTextIndex: number | null;
+  readonly currentTurnText: string;
+  readonly images: readonly ChatImage[];
+  readonly compactingReason: AutomaticCompactionReason | null;
   readonly waiting: boolean;
   readonly finalized: boolean;
   readonly failed: boolean;
+  readonly settled: boolean;
 }
 
 export type PresentationSseEvent = Exclude<ParsedSseEvent, { event: "done" | "status" }>;
@@ -47,11 +65,22 @@ export function createStreamPresentation(): StreamPresentation {
     items: [],
     finalText: "",
     activeTurn: null,
-    currentTextIndex: null,
+    currentTurnText: "",
+    images: [],
+    compactingReason: null,
     waiting: false,
     finalized: false,
     failed: false,
+    settled: false,
   };
+}
+
+function flushCurrentTurnText(
+  state: StreamPresentation,
+  turn: number,
+): StreamTraceItem[] {
+  if (!state.currentTurnText) return [...state.items];
+  return [...state.items, { type: "text", turn, text: state.currentTurnText }];
 }
 
 function updateTool(
@@ -64,8 +93,9 @@ function updateTool(
   },
   status: StreamToolStatus,
 ): StreamPresentation {
-  const index = state.items.findIndex((item) => item.type === "tool" && item.id === data.id);
-  const previous = state.items[index];
+  const items = flushCurrentTurnText(state, data.turn);
+  const index = items.findIndex((item) => item.type === "tool" && item.id === data.id);
+  const previous = items[index];
   const tool: StreamToolItem = {
     type: "tool",
     turn: data.turn,
@@ -74,13 +104,12 @@ function updateTool(
     arguments: data.arguments ?? (previous?.type === "tool" ? previous.arguments : {}),
     status,
   };
-  const items = [...state.items];
   if (index === -1) items.push(tool);
   else items[index] = tool;
   return {
     ...state,
     items,
-    currentTextIndex: null,
+    currentTurnText: "",
     waiting: false,
   };
 }
@@ -89,56 +118,69 @@ export function reduceStreamPresentation(
   state: StreamPresentation,
   parsed: PresentationSseEvent,
 ): StreamPresentation {
+  if (state.settled) return state;
+  if (parsed.event === "compaction_start") {
+    return { ...state, compactingReason: parsed.data.reason };
+  }
+  if (parsed.event === "compaction_end") {
+    return state.compactingReason === parsed.data.reason
+      ? { ...state, compactingReason: null }
+      : state;
+  }
   if (parsed.event === "turn_start") {
+    if (state.activeTurn !== null || state.finalized) return state;
     return {
       ...state,
       activeTurn: parsed.data.turn,
-      currentTextIndex: null,
+      currentTurnText: "",
       waiting: true,
       failed: false,
     };
   }
   if (parsed.event === "text_delta") {
-    const items = [...state.items];
-    const current = state.currentTextIndex === null ? undefined : items[state.currentTextIndex];
-    let currentTextIndex = state.currentTextIndex;
-    if (current?.type === "text" && current.turn === parsed.data.turn) {
-      items[state.currentTextIndex ?? -1] = {
-        ...current,
-        text: current.text + parsed.data.delta,
-      };
-    } else {
-      currentTextIndex = items.length;
-      items.push({ type: "text", turn: parsed.data.turn, text: parsed.data.delta });
-    }
-    return { ...state, items, currentTextIndex, waiting: false };
+    if (state.activeTurn !== parsed.data.turn) return state;
+    return {
+      ...state,
+      currentTurnText: state.currentTurnText + parsed.data.delta,
+      waiting: false,
+    };
   }
-  if (parsed.event === "tool_call") return updateTool(state, parsed.data, "queued");
-  if (parsed.event === "tool_start") return updateTool(state, parsed.data, "running");
+  if (parsed.event === "tool_call") {
+    return state.activeTurn === parsed.data.turn
+      ? updateTool(state, parsed.data, "queued")
+      : state;
+  }
+  if (parsed.event === "tool_start") {
+    return state.activeTurn === parsed.data.turn
+      ? updateTool(state, parsed.data, "running")
+      : state;
+  }
   if (parsed.event === "tool_end") {
-    return updateTool(state, parsed.data, parsed.data.isError ? "error" : "done");
+    return state.activeTurn === parsed.data.turn
+      ? updateTool(state, parsed.data, parsed.data.isError ? "error" : "done")
+      : state;
+  }
+  if (parsed.event === "generated_image") {
+    if (state.activeTurn !== parsed.data.turn) return state;
+    if (state.images.some((image) => image.id === parsed.data.image.id)) return state;
+    return { ...state, images: [...state.images, parsed.data.image] };
   }
   if (parsed.event === "turn_end") {
+    if (state.activeTurn !== parsed.data.turn) return state;
     if (!parsed.data.final) {
       return {
         ...state,
+        items: flushCurrentTurnText(state, parsed.data.turn),
         activeTurn: null,
-        currentTextIndex: null,
+        currentTurnText: "",
         waiting: false,
       };
     }
-    const finalText = state.items
-      .filter((item): item is StreamTextItem => (
-        item.type === "text" && item.turn === parsed.data.turn
-      ))
-      .map((item) => item.text)
-      .join("");
     return {
       ...state,
-      items: state.items.filter((item) => item.turn !== parsed.data.turn),
-      finalText: state.finalText + finalText,
+      finalText: state.currentTurnText,
       activeTurn: null,
-      currentTextIndex: null,
+      currentTurnText: "",
       waiting: false,
       finalized: true,
     };
@@ -146,12 +188,19 @@ export function reduceStreamPresentation(
   return {
     ...state,
     activeTurn: null,
-    currentTextIndex: null,
+    compactingReason: null,
     waiting: false,
     failed: true,
+    settled: true,
   };
 }
 
 export function settleStreamPresentation(state: StreamPresentation): StreamPresentation {
-  return { ...state, activeTurn: null, currentTextIndex: null, waiting: false };
+  return {
+    ...state,
+    activeTurn: null,
+    compactingReason: null,
+    waiting: false,
+    settled: true,
+  };
 }

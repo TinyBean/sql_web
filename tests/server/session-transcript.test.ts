@@ -152,7 +152,180 @@ test("associates persisted code interpreter PNG details with the final answer", 
         arguments: {},
         isError: false,
       }],
-      images: [{ mimeType: "image/png", data: png, alt: "趋势图" }],
+      images: [{ id: "ci:code-1:1", mimeType: "image/png", data: png, alt: "趋势图" }],
     },
   ]);
+});
+
+test("does not persist images from a failed code interpreter result", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const transcript = serializeMessages([
+    { role: "user", content: "画图" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "failed-code", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "failed-code",
+      toolName: "code_interpreter",
+      isError: true,
+      details: {
+        kind: "code_interpreter",
+        images: [{ mimeType: "image/png", data: png, alt: "不得持久化" }],
+      },
+    },
+    { role: "assistant", content: "生成失败。", stopReason: "stop" },
+  ]);
+
+  const tool = transcript.at(-1)?.trace?.at(-1);
+  assert.equal(transcript.at(-1)?.images, undefined);
+  assert.equal(tool?.type, "tool");
+  assert.equal(tool?.type === "tool" && tool.isError, true);
+});
+
+test("keeps generated image IDs in tool-call source order", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const transcript = serializeMessages([
+    { role: "user", content: "画两组图" },
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "code-first", name: "code_interpreter", arguments: {} },
+        { type: "toolCall", id: "code-second", name: "code_interpreter", arguments: {} },
+      ],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "code-second",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [{ mimeType: "image/png", data: png, alt: "第二组" }],
+      },
+    },
+    {
+      role: "toolResult",
+      toolCallId: "code-first",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [
+          { mimeType: "image/png", data: png, alt: "第一组之一" },
+          { mimeType: "image/png", data: png, alt: "第一组之二" },
+        ],
+      },
+    },
+    { role: "assistant", content: "图表如下。", stopReason: "stop" },
+  ]);
+
+  const images = transcript.find((message) => message.role === "assistant")?.images;
+  assert.deepEqual(images?.map((image) => image.id), [
+    "ci:code-first:1",
+    "ci:code-first:2",
+    "ci:code-second:1",
+  ]);
+  assert.deepEqual(serializeMessages([
+    { role: "user", content: "画图" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "stable", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "stable",
+      toolName: "code_interpreter",
+      isError: false,
+      details: { kind: "code_interpreter", images: [{ mimeType: "image/png", data: png, alt: "稳定" }] },
+    },
+    { role: "assistant", content: "完成。", stopReason: "stop" },
+  ]).at(-1)?.images?.[0]?.id, "ci:stable:1");
+});
+
+test("does not cross-wire images when historical tool-call IDs repeat across turns", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const transcript = serializeMessages([
+    { role: "user", content: "第一轮" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "reused", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "reused",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [{ mimeType: "image/png", data: png, alt: "第一轮图片" }],
+      },
+    },
+    { role: "assistant", content: "第一轮完成。", stopReason: "stop" },
+    { role: "user", content: "第二轮" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "reused", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "reused",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [{ mimeType: "image/png", data: png, alt: "第二轮图片" }],
+      },
+    },
+    { role: "assistant", content: "第二轮完成。", stopReason: "stop" },
+  ]);
+
+  assert.deepEqual(
+    transcript.filter((message) => message.role === "assistant").map((message) => (
+      message.images?.map((image) => image.alt)
+    )),
+    [["第一轮图片"], ["第二轮图片"]],
+  );
+});
+
+test("does not let a later reused tool-call ID satisfy an earlier missing result", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const transcript = serializeMessages([
+    { role: "user", content: "第一轮" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "reused", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    { role: "assistant", content: "第一轮没有结果。", stopReason: "stop" },
+    { role: "user", content: "第二轮" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "reused", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "reused",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [{ mimeType: "image/png", data: png, alt: "只属于第二轮" }],
+      },
+    },
+    { role: "assistant", content: "第二轮完成。", stopReason: "stop" },
+  ]);
+  const assistantMessages = transcript.filter((message) => message.role === "assistant");
+
+  assert.equal(assistantMessages[0]?.images, undefined);
+  assert.equal(assistantMessages[0]?.trace?.find((item) => item.type === "tool")?.isError, true);
+  assert.deepEqual(assistantMessages[1]?.images?.map((image) => image.alt), ["只属于第二轮"]);
+  assert.equal(assistantMessages[1]?.trace?.find((item) => item.type === "tool")?.isError, false);
 });

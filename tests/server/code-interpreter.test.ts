@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
+import {
+  CodeInterpreterRuntime,
+  formatCodeInterpreterResult,
+} from "../../src/server/tool/code-interpreter.ts";
+import {
+  createGeneratedImageId,
+  generatedImageMarkdown,
+} from "../../src/shared/image-references.ts";
 
 const projectRoot = process.cwd();
 let runtime: CodeInterpreterRuntime;
@@ -67,6 +74,17 @@ test("reads current-session artifacts and captures normalized PNG output", async
   assert.equal(result.details.images[0]?.mimeType, "image/png");
   assert.match(result.details.images[0]?.data ?? "", /^[A-Za-z0-9+/]+=*$/u);
   assert.equal(JSON.parse(result.text).imageDelivery, "attached_to_answer");
+  const id = createGeneratedImageId("code-call", 1);
+  const modelText = formatCodeInterpreterResult(result.details, [{
+    id,
+    markdown: generatedImageMarkdown(id, result.details.images[0]?.alt ?? "代码计算图表"),
+  }]);
+  const modelResult = JSON.parse(modelText) as Record<string, unknown>;
+  assert.deepEqual(modelResult["imageReferences"], [{
+    id: "ci:code-call:1",
+    markdown: "![代码计算图表 1](/__datalens_generated_image__/ci%3Acode-call%3A1)",
+  }]);
+  assert.equal(modelText.includes(result.details.images[0]?.data ?? "never"), false);
 });
 
 test("renders Chinese text with the sandbox-provided Matplotlib and Pillow fonts", async () => {

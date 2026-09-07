@@ -88,4 +88,42 @@ test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts",
     Record<string, unknown>;
   assert.equal(exported["rowCount"], 3);
   assert.equal(exported["truncationReason"], "row_limit");
+
+  const generatedImageData = "PRIVATE_GENERATED_IMAGE_DATA";
+  const availableRuntime = {
+    status: { available: true, reason: null },
+    execute: async () => ({
+      text: "legacy result text",
+      details: {
+        kind: "code_interpreter" as const,
+        stdout: "rendered\n",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        durationMs: 10,
+        images: [{
+          mimeType: "image/png" as const,
+          data: generatedImageData,
+          alt: "代码计算图表 1",
+        }],
+      },
+    }),
+  } as unknown as CodeInterpreterRuntime;
+  const toolsWithCode = createAgentTools(database, artifacts, availableRuntime) as readonly CallableTool[];
+  const codeInterpreter = toolsWithCode.find((tool) => tool.name === "code_interpreter");
+  assert.ok(codeInterpreter);
+  const codeResult = await codeInterpreter.execute(
+    "code/call",
+    { code: "pass" },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  const codeText = codeResult.content[0]?.text ?? "{}";
+  const codePayload = JSON.parse(codeText) as Record<string, unknown>;
+  assert.deepEqual(codePayload["imageReferences"], [{
+    id: "ci:code/call:1",
+    markdown: "![代码计算图表 1](/__datalens_generated_image__/ci%3Acode%2Fcall%3A1)",
+  }]);
+  assert.equal(codeText.includes(generatedImageData), false);
 });

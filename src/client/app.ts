@@ -26,12 +26,17 @@ import {
   createStreamPresentation,
   formatToolArguments,
   formatToolStatusText,
+  latestAssistantAfterLastUser,
   reduceStreamPresentation,
   settleStreamPresentation,
   type StreamPresentation,
   type StreamToolStatus,
 } from "./stream-state.ts";
-import { renderMarkdownInto } from "./markdown.ts";
+import { hideTrailingIncompleteGeneratedImageMarkdown } from "./image-placeholders.ts";
+import {
+  renderMarkdownInto,
+  type MarkdownRenderOptions,
+} from "./markdown.ts";
 
 interface ElementConstructor<ElementType extends Element> {
   readonly prototype: ElementType;
@@ -73,7 +78,6 @@ interface StreamNode {
   article: HTMLElement;
   body: HTMLDivElement;
   text: HTMLDivElement;
-  images: HTMLDivElement;
   thoughts: HTMLDetailsElement;
   thoughtSummary: HTMLElement;
   thoughtItems: HTMLDivElement;
@@ -277,9 +281,10 @@ function createToolEntry(
   toggle.setAttribute("aria-controls", panel.id);
   toggle.addEventListener("click", () => {
     const nextExpanded = panel.hidden !== false;
+    const currentName = toolName.textContent || name;
     panel.hidden = !nextExpanded;
     toggle.setAttribute("aria-expanded", String(nextExpanded));
-    toggle.setAttribute("aria-label", `${nextExpanded ? "隐藏" : "展开"} ${name} 执行参数`);
+    toggle.setAttribute("aria-label", `${nextExpanded ? "隐藏" : "展开"} ${currentName} 执行参数`);
     onToggle(nextExpanded);
   });
   chip.append(toolName, separator, toolStatus, toggle);
@@ -287,56 +292,171 @@ function createToolEntry(
   return entry;
 }
 
-function createTraceText(text: string): HTMLDivElement {
+function createTraceText(): HTMLDivElement {
   const item = document.createElement("div");
   item.className = "thought-text markdown-content";
-  renderMarkdownInto(item, text);
   return item;
 }
 
-function renderHistoricalTrace(node: StreamNode, trace: readonly ChatTraceItem[]): void {
-  node.thoughtItems.replaceChildren();
-  for (const item of trace) {
-    node.thoughtItems.append(
-      item.type === "text"
-        ? createTraceText(item.text)
-        : createToolEntry(
-            item.name,
-            item.arguments,
-            item.isError ? "error" : "done",
-            node.expandedToolIds.has(item.id),
-            (expanded) => {
-              if (expanded) node.expandedToolIds.add(item.id);
-              else node.expandedToolIds.delete(item.id);
-            },
-          ),
+function createTypingIndicator(): HTMLDivElement {
+  const typing = document.createElement("div");
+  typing.className = "typing";
+  typing.append(
+    document.createElement("span"),
+    document.createElement("span"),
+    document.createElement("span"),
+  );
+  return typing;
+}
+
+function createCompactionStatus(): HTMLDivElement {
+  const status = document.createElement("div");
+  status.className = "compaction-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  status.setAttribute("aria-atomic", "true");
+  const typing = createTypingIndicator();
+  typing.setAttribute("aria-hidden", "true");
+  status.append(
+    Object.assign(document.createElement("span"), {
+      className: "compaction-status-label",
+      textContent: "正在自动压缩上下文…",
+    }),
+    typing,
+  );
+  return status;
+}
+
+const STREAM_THOUGHT_KEY_ATTRIBUTE = "data-stream-key";
+
+function thoughtChildrenByKey(container: HTMLElement): ReadonlyMap<string, HTMLElement> {
+  const children = new Map<string, HTMLElement>();
+  for (const child of container.children) {
+    if (!(child instanceof HTMLElement)) continue;
+    const key = child.getAttribute(STREAM_THOUGHT_KEY_ATTRIBUTE) ?? "";
+    if (key && !children.has(key)) children.set(key, child);
+  }
+  return children;
+}
+
+function keyedTraceText(
+  existing: HTMLElement | undefined,
+  key: string,
+  text: string,
+  images: readonly ChatImage[] = [],
+  options: MarkdownRenderOptions = {},
+): HTMLDivElement {
+  const item = existing instanceof HTMLDivElement && existing.classList.contains("thought-text")
+    ? existing
+    : createTraceText();
+  item.setAttribute(STREAM_THOUGHT_KEY_ATTRIBUTE, key);
+  renderMarkdownInto(item, text, images, options);
+  return item;
+}
+
+function updateToolEntry(
+  entry: HTMLDivElement,
+  name: string,
+  arguments_: JsonObject,
+  status: StreamToolStatus,
+  expanded: boolean,
+): boolean {
+  const chip = entry.querySelector<HTMLElement>(".tool-chip");
+  const toolName = entry.querySelector<HTMLElement>(".tool-name");
+  const toolStatus = entry.querySelector<HTMLElement>(".tool-status");
+  const toggle = entry.querySelector<HTMLButtonElement>(".tool-arguments-toggle");
+  const panel = entry.querySelector<HTMLElement>(".tool-arguments");
+  if (!chip || !toolName || !toolStatus || !toggle || !panel) return false;
+  chip.className = `tool-chip ${status}`;
+  toolName.textContent = name;
+  toolStatus.textContent = formatToolStatusText(name, status);
+  toggle.setAttribute("aria-label", `${expanded ? "隐藏" : "展开"} ${name} 执行参数`);
+  toggle.setAttribute("aria-expanded", String(expanded));
+  panel.hidden = !expanded;
+  panel.textContent = formatToolArguments(arguments_);
+  return true;
+}
+
+function keyedToolEntry(
+  node: StreamNode,
+  existing: HTMLElement | undefined,
+  key: string,
+  id: string,
+  name: string,
+  arguments_: JsonObject,
+  status: StreamToolStatus,
+): HTMLDivElement {
+  const expanded = node.expandedToolIds.has(id);
+  let entry = existing instanceof HTMLDivElement && existing.classList.contains("tool-entry")
+    ? existing
+    : createToolEntry(
+        name,
+        arguments_,
+        status,
+        expanded,
+        (nextExpanded) => {
+          if (nextExpanded) node.expandedToolIds.add(id);
+          else node.expandedToolIds.delete(id);
+        },
+      );
+  if (!updateToolEntry(entry, name, arguments_, status, expanded)) {
+    entry = createToolEntry(
+      name,
+      arguments_,
+      status,
+      expanded,
+      (nextExpanded) => {
+        if (nextExpanded) node.expandedToolIds.add(id);
+        else node.expandedToolIds.delete(id);
+      },
     );
   }
+  entry.setAttribute(STREAM_THOUGHT_KEY_ATTRIBUTE, key);
+  return entry;
+}
+
+function keyedStatus(
+  existing: HTMLElement | undefined,
+  key: string,
+  className: string,
+  create: () => HTMLElement,
+): HTMLElement {
+  const status = existing?.classList.contains(className) ? existing : create();
+  status.setAttribute(STREAM_THOUGHT_KEY_ATTRIBUTE, key);
+  return status;
+}
+
+function renderHistoricalTrace(
+  node: StreamNode,
+  trace: readonly ChatTraceItem[],
+  images: readonly ChatImage[],
+): void {
+  const claimedGeneratedImageIds = new Set<string>();
+  const children = trace.map((item, index) => (
+    item.type === "text"
+      ? keyedTraceText(
+          undefined,
+          `trace:${index}`,
+          item.text,
+          images,
+          {
+            claimedGeneratedImageIds,
+          },
+        )
+      : keyedToolEntry(
+          node,
+          undefined,
+          `tool:${item.id}`,
+          item.id,
+          item.name,
+          item.arguments,
+          item.isError ? "error" : "done",
+        )
+  ));
+  node.thoughtItems.replaceChildren(...children);
   node.thoughtSummary.textContent = "思考过程";
   node.thoughts.hidden = trace.length === 0;
   node.thoughts.open = false;
-}
-
-function renderMessageImages(container: HTMLElement, images: readonly ChatImage[]): void {
-  container.replaceChildren();
-  container.hidden = images.length === 0;
-  for (const item of images) {
-    const image = document.createElement("img");
-    image.src = `data:${item.mimeType};base64,${item.data}`;
-    image.alt = item.alt;
-    image.loading = "lazy";
-    container.append(image);
-  }
-}
-
-function renderAssistantContent(
-  textContainer: HTMLElement,
-  imageContainer: HTMLElement,
-  text: string,
-  images: readonly ChatImage[],
-): void {
-  const embeddedImageCount = renderMarkdownInto(textContainer, text, images);
-  renderMessageImages(imageContainer, images.slice(embeddedImageCount));
 }
 
 function renderStreamPresentation(
@@ -345,36 +465,81 @@ function renderStreamPresentation(
 ): void {
   const presentation = node.presentation;
   if (!presentation) return;
-  const children: HTMLElement[] = presentation.items.map((item) => (
+  const showFinalBody = presentation.finalized;
+  if (showFinalBody) {
+    renderMarkdownInto(
+      node.text,
+      presentation.finalText,
+      presentation.images,
+    );
+  }
+
+  const existing = thoughtChildrenByKey(node.thoughtItems);
+  const claimedGeneratedImageIds = new Set<string>();
+  const children: HTMLElement[] = presentation.items.map((item, index) => (
     item.type === "text"
-      ? createTraceText(item.text)
-      : createToolEntry(
+      ? keyedTraceText(
+          existing.get(`trace:${index}`),
+          `trace:${index}`,
+          item.text,
+          presentation.images,
+          {
+            claimedGeneratedImageIds,
+          },
+        )
+      : keyedToolEntry(
+          node,
+          existing.get(`tool:${item.id}`),
+          `tool:${item.id}`,
+          item.id,
           item.name,
           item.arguments,
           item.status,
-          node.expandedToolIds.has(item.id),
-          (expanded) => {
-            if (expanded) node.expandedToolIds.add(item.id);
-            else node.expandedToolIds.delete(item.id);
-          },
         )
   ));
-  if (presentation.waiting) {
-    const typing = document.createElement("div");
-    typing.className = "typing";
+  const trailingText = presentation.currentTurnText;
+  if (trailingText) {
+    const source = presentation.activeTurn !== null && !presentation.settled
+      ? hideTrailingIncompleteGeneratedImageMarkdown(trailingText)
+      : trailingText;
+    const key = `trace:${presentation.items.length}`;
+    children.push(keyedTraceText(
+      existing.get(key),
+      key,
+      source,
+      presentation.images,
+      {
+        claimedGeneratedImageIds,
+      },
+    ));
+  }
+  if (presentation.compactingReason !== null) {
+    children.push(keyedStatus(
+      existing.get("status:compaction"),
+      "status:compaction",
+      "compaction-status",
+      createCompactionStatus,
+    ));
+  } else if (presentation.waiting) {
+    const typing = keyedStatus(
+      existing.get("status:waiting"),
+      "status:waiting",
+      "typing",
+      createTypingIndicator,
+    );
+    typing.setAttribute("role", "status");
     typing.setAttribute("aria-label", "正在思考");
-    typing.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
     children.push(typing);
   }
   node.thoughtItems.replaceChildren(...children);
-  renderMarkdownInto(node.text, presentation.finalText);
+  if (!showFinalBody) node.text.replaceChildren();
   node.thoughts.hidden = children.length === 0;
-  if (presentation.failed) {
-    node.thoughtSummary.textContent = "思考过程";
-    node.thoughts.open = true;
-  } else if (presentation.finalized) {
+  if (showFinalBody) {
     node.thoughtSummary.textContent = "思考过程";
     if (!previous?.finalized) node.thoughts.open = false;
+  } else if (presentation.failed || presentation.settled) {
+    node.thoughtSummary.textContent = "思考过程";
+    node.thoughts.open = true;
   } else {
     node.thoughtSummary.textContent = "思考中";
     node.thoughts.open = true;
@@ -415,17 +580,11 @@ function appendMessage(
   thoughts.append(thoughtSummary, thoughtItems);
   const messageText = document.createElement("div");
   messageText.className = role === "assistant" ? "message-text markdown-content" : "message-text";
-  const messageImages = document.createElement("div");
-  messageImages.className = "message-images";
-  if (role === "assistant") renderAssistantContent(messageText, messageImages, text, images);
-  else {
-    messageText.textContent = text;
-    messageImages.hidden = true;
-  }
+  if (role === "assistant") renderMarkdownInto(messageText, text, images);
+  else messageText.textContent = text;
   body.append(label);
   if (role === "assistant") body.append(thoughts);
   body.append(messageText);
-  if (role === "assistant") body.append(messageImages);
   article.append(avatar, body);
   ensureMessageStream().append(article);
   elements.messages.scrollTop = elements.messages.scrollHeight;
@@ -433,14 +592,13 @@ function appendMessage(
     article,
     body,
     text: messageText,
-    images: messageImages,
     thoughts,
     thoughtSummary,
     thoughtItems,
     expandedToolIds: new Set<string>(),
     presentation: streaming ? createStreamPresentation() : null,
   };
-  if (trace.length) renderHistoricalTrace(node, trace);
+  if (trace.length) renderHistoricalTrace(node, trace, images);
   if (node.presentation) renderStreamPresentation(node, null);
   return node;
 }
@@ -569,6 +727,9 @@ function handleStreamEvent(
     const previous = node.presentation ?? createStreamPresentation();
     node.presentation = reduceStreamPresentation(previous, parsed);
     renderStreamPresentation(node, previous);
+    if (parsed.event === "compaction_end" && parsed.data.outcome === "failed") {
+      showToast("自动上下文压缩失败");
+    }
     if (parsed.event !== "error") {
       elements.messages.scrollTop = elements.messages.scrollHeight;
       return;
@@ -638,19 +799,24 @@ async function submitQuestion(question: string): Promise<void> {
 
   try {
     const completed = await streamQuestion(message, activeStream);
-    settleStreamNode(streamNode);
     if (completed) {
       state.sessionId = completed.id;
-      const finalMessage = completed.messages.findLast((item) => item.role === "assistant");
-      if (finalMessage) {
-        renderAssistantContent(
-          streamNode.text,
-          streamNode.images,
-          finalMessage.text,
-          finalMessage.images ?? [],
-        );
+      const finalMessage = latestAssistantAfterLastUser(completed.messages);
+      renderMarkdownInto(
+        streamNode.text,
+        finalMessage?.text ?? "",
+        finalMessage?.images ?? [],
+      );
+      streamNode.thoughtSummary.textContent = "思考过程";
+      streamNode.thoughts.open = false;
+      streamNode.presentation = null;
+      try {
+        await refreshSessions();
+      } catch (error) {
+        showToast(messageFromUnknown(error, "会话列表刷新失败"));
       }
-      await refreshSessions();
+    } else {
+      settleStreamNode(streamNode);
     }
   } catch (error) {
     handleStreamEvent(

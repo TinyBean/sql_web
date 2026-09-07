@@ -9,7 +9,16 @@ import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 test("initializes the OEE schema idempotently and preserves existing data", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-init-"));
   const databasePath = path.join(directory, "database", "oee.sqlite");
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let reader: DatabaseSync | undefined;
+  t.after(() => {
+    reader?.close();
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
+  });
 
   initializeOeeDatabase(databasePath);
   const writer = new DatabaseSync(databasePath);
@@ -21,8 +30,7 @@ test("initializes the OEE schema idempotently and preserves existing data", (t) 
   writer.close();
 
   initializeOeeDatabase(databasePath);
-  const reader = new DatabaseSync(databasePath, { readOnly: true });
-  t.after(() => reader.close());
+  reader = new DatabaseSync(databasePath, { readOnly: true });
 
   assert.equal(reader.prepare("PRAGMA journal_mode").get()?.["journal_mode"], "wal");
   assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM oee_availability").get()?.["count"], 1);

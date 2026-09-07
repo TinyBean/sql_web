@@ -27,18 +27,27 @@ interface CallableTool {
 
 test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-tools-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let database: AppDatabase | undefined;
+  let runtime: CodeInterpreterRuntime | undefined;
+  t.after(() => {
+    runtime?.dispose();
+    database?.close();
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
+  });
   const filePath = path.join(directory, "oee.sqlite");
   initializeOeeDatabase(filePath);
-  const database = AppDatabase.open({ filePath });
-  t.after(() => database.close());
-  const runtime = await CodeInterpreterRuntime.create({
+  database = AppDatabase.open({ filePath });
+  runtime = await CodeInterpreterRuntime.create({
     pythonPath: path.join(directory, "missing-python"),
     bwrapPath: path.join(directory, "missing-bwrap"),
     prlimitPath: path.join(directory, "missing-prlimit"),
     projectRoot: directory,
   });
-  t.after(() => runtime.dispose());
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"))
     .forSession("session-12345678");
   const tools = createAgentTools(database, artifacts, runtime) as readonly CallableTool[];

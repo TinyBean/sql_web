@@ -226,9 +226,16 @@ test("assigns separate auto-increment IDs to completely identical API rows", asy
     availabilityRow("2026-08-20", "conflict", 60),
   ]));
   const store = createStore(directory);
+  let reader: DatabaseSync | undefined;
   t.after(() => {
+    reader?.close();
     store.close();
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   });
 
   const result = await store.importFile({
@@ -240,8 +247,7 @@ test("assigns separate auto-increment IDs to completely identical API rows", asy
   assert.equal(result.rowsReceived, 2);
   assert.equal(result.rowsInserted, 2);
 
-  const reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  t.after(() => reader.close());
+  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
   assert.deepEqual(
     reader.prepare("SELECT id, time_span FROM oee_availability ORDER BY id").all()
       .map((row) => ({ ...row })),
@@ -419,9 +425,16 @@ test("keeps DUT payload fields inline and permits nulls in nonessential fields",
   sourceRow["ORPTSIP.PART_NUM"] = null;
   writeFileSync(sourcePath, dutResponse([sourceRow, sourceRow]));
   const store = createStore(directory);
+  let reader: DatabaseSync | undefined;
   t.after(() => {
+    reader?.close();
     store.close();
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   });
 
   const result = await store.importFile({
@@ -432,8 +445,7 @@ test("keeps DUT payload fields inline and permits nulls in nonessential fields",
   });
   assert.equal(result.rowsInserted, 2);
 
-  const reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  t.after(() => reader.close());
+  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
   const rows = reader.prepare(
     "SELECT id, length(dut_lot_map) AS payload_length, tooling, tray_id, start_time, end_time, part_num " +
     "FROM oee_dut_utilization ORDER BY id",

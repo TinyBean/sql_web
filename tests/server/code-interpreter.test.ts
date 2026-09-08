@@ -9,7 +9,6 @@ import {
   formatCodeInterpreterResult,
 } from "../../src/server/tool/code-interpreter.ts";
 import {
-  createGeneratedImageId,
   generatedImageMarkdown,
 } from "../../src/shared/image-references.ts";
 
@@ -48,6 +47,45 @@ test("passes sandbox self-check and performs exact inline JSON calculations", as
   assert.equal(result.details.images.length, 0);
 });
 
+test("requires and validates a semantic reference name", async () => {
+  const invalidCalls = [
+    ["emit_image(image)", /required positional argument|缺少/u],
+    ["emit_image(image, '')", /reference_name/u],
+    ["emit_image(image, 123)", /reference_name 必须是字符串/u],
+    ["emit_image(image, '趋势图')", /reference_name 只能包含/u],
+    ["emit_image(image, 'oee@ranking')", /reference_name 只能包含/u],
+    ["emit_image(image, 'aaaaaaaaaaaaaaaaaaaaaaaaa')", /不超过 24 个字符/u],
+  ] as const;
+
+  for (const [call, expected] of invalidCalls) {
+    await assert.rejects(
+      () => runtime.execute([
+        "from PIL import Image",
+        "image = Image.new('RGB', (8, 8), 'white')",
+        call,
+      ].join("\n"), undefined, undefined, undefined),
+      expected,
+    );
+  }
+
+  const normalized = await runtime.execute([
+    "from PIL import Image",
+    "image = Image.new('RGB', (8, 8), 'white')",
+    "emit_image(image, 'OEE Ranking')",
+  ].join("\n"), undefined, undefined, undefined);
+  assert.equal(normalized.details.images[0]?.referenceName, "oee-ranking");
+  assert.equal(normalized.details.images[0]?.alt, "oee-ranking");
+});
+
+test("does not automatically capture Matplotlib figures", async () => {
+  const result = await runtime.execute([
+    "import matplotlib.pyplot as plt",
+    "figure, axis = plt.subplots()",
+    "axis.plot([1, 2, 3])",
+  ].join("\n"), undefined, undefined, undefined);
+  assert.equal(result.details.images.length, 0);
+});
+
 test("reads current-session artifacts and captures normalized PNG output", async () => {
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"))
     .forSession("session-12345678");
@@ -63,7 +101,7 @@ test("reads current-session artifacts and captures normalized PNG output", async
       "print(sum(values))",
       "figure, axis = plt.subplots()",
       "axis.plot(values)",
-      "emit_image(figure)",
+      "emit_image(figure, 'value-trend')",
     ].join("\n"),
     created.fileUri,
     artifacts,
@@ -72,17 +110,19 @@ test("reads current-session artifacts and captures normalized PNG output", async
   assert.equal(result.details.stdout, "5\n");
   assert.equal(result.details.images.length, 1);
   assert.equal(result.details.images[0]?.mimeType, "image/png");
+  assert.equal(result.details.images[0]?.referenceName, "value-trend");
+  assert.equal(result.details.images[0]?.alt, "value-trend");
   assert.match(result.details.images[0]?.data ?? "", /^[A-Za-z0-9+/]+=*$/u);
   assert.equal(JSON.parse(result.text).imageDelivery, "attached_to_answer");
-  const id = createGeneratedImageId("code-call", 1);
+  const id = "ci-value-trend";
   const modelText = formatCodeInterpreterResult(result.details, [{
     id,
-    markdown: generatedImageMarkdown(id, result.details.images[0]?.alt ?? "代码计算图表"),
+    markdown: generatedImageMarkdown(id, result.details.images[0]?.alt ?? "value-trend"),
   }]);
   const modelResult = JSON.parse(modelText) as Record<string, unknown>;
   assert.deepEqual(modelResult["imageReferences"], [{
-    id: "ci:code-call:1",
-    markdown: "![代码计算图表 1](/__datalens_generated_image__/ci%3Acode-call%3A1)",
+    id: "ci-value-trend",
+    markdown: "![value-trend](/__datalens_generated_image__/ci-value-trend)",
   }]);
   assert.equal(modelText.includes(result.details.images[0]?.data ?? "never"), false);
 });
@@ -99,10 +139,10 @@ test("renders Chinese text with the sandbox-provided Matplotlib and Pillow fonts
       "axis.set_ylabel('小时')",
       "axis.set_xlabel('生产日期', fontproperties=matplotlib_chinese_font(12, bold=True))",
       "plt.tight_layout()",
-      "emit_image(figure)",
+      "emit_image(figure, 'equipment-time')",
       "canvas = Image.new('RGB', (320, 100), 'white')",
       "ImageDraw.Draw(canvas).text((12, 28), '中文设备状态', font=chinese_font(28, bold=True), fill='black')",
-      "emit_image(canvas)",
+      "emit_image(canvas, 'device-status')",
       "print(CJK_FONT_FAMILY)",
     ].join("\n"),
     undefined,
@@ -114,6 +154,10 @@ test("renders Chinese text with the sandbox-provided Matplotlib and Pillow fonts
   assert.doesNotMatch(result.details.stderr, /Font family 'SimHei' not found/u);
   assert.doesNotMatch(result.details.stderr, /Glyph .* missing from current font/u);
   assert.equal(result.details.images.length, 2);
+  assert.deepEqual(
+    result.details.images.map((image) => image.referenceName),
+    ["equipment-time", "device-status"],
+  );
 });
 
 test("rejects host paths and aborts a running process", async () => {

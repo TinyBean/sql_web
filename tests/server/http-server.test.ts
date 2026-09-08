@@ -397,8 +397,8 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
 test("streams validated generated images after tool completion and reconciles with done", async (t) => {
   const imageData = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
   const expectedImages = [
-    { id: "ci:code-1:1", mimeType: "image/png" as const, data: imageData, alt: "趋势图" },
-    { id: "ci:code-1:2", mimeType: "image/png" as const, data: imageData, alt: "分布图" },
+    { id: "ci-oee-trend", mimeType: "image/png" as const, data: imageData, alt: "oee-trend" },
+    { id: "ci-yield-distribution", mimeType: "image/png" as const, data: imageData, alt: "yield-distribution" },
   ];
   const completedSession: SerializedSession = {
     id: "fake-session",
@@ -455,8 +455,20 @@ test("streams validated generated images after tool completion and reconciles wi
             kind: "code_interpreter",
             stdout: "PRIVATE_STDOUT",
             images: [
-              { mimeType: "image/png", data: imageData, alt: "趋势图" },
-              { mimeType: "image/png", data: imageData, alt: "分布图" },
+              {
+                mimeType: "image/png",
+                data: imageData,
+                alt: "oee-trend",
+                referenceName: "oee-trend",
+                referenceId: "ci-oee-trend",
+              },
+              {
+                mimeType: "image/png",
+                data: imageData,
+                alt: "yield-distribution",
+                referenceName: "yield-distribution",
+                referenceId: "ci-yield-distribution",
+              },
             ],
           },
         },
@@ -469,7 +481,13 @@ test("streams validated generated images after tool completion and reconciles wi
         result: {
           details: {
             kind: "code_interpreter",
-            images: [{ mimeType: "image/png", data: imageData, alt: "重复图片" }],
+            images: [{
+              mimeType: "image/png",
+              data: imageData,
+              alt: "oee-trend",
+              referenceName: "oee-trend",
+              referenceId: "ci-oee-trend",
+            }],
           },
         },
         isError: false,

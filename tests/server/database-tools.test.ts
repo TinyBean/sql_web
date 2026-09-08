@@ -16,6 +16,7 @@ interface ToolResult {
 
 interface CallableTool {
   readonly name: string;
+  readonly description: string;
   execute(
     id: string,
     params: Record<string, unknown>,
@@ -104,7 +105,8 @@ test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts",
         images: [{
           mimeType: "image/png" as const,
           data: generatedImageData,
-          alt: "代码计算图表 1",
+          alt: "oee-ranking",
+          referenceName: "oee-ranking",
         }],
       },
     }),
@@ -112,6 +114,13 @@ test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts",
   const toolsWithCode = createAgentTools(database, artifacts, availableRuntime) as readonly CallableTool[];
   const codeInterpreter = toolsWithCode.find((tool) => tool.name === "code_interpreter");
   assert.ok(codeInterpreter);
+  assert.match(codeInterpreter.description, /pre-injected global functions, not Python modules/u);
+  assert.match(codeInterpreter.description, /never import either name/u);
+  assert.match(
+    codeInterpreter.description,
+    /fontproperties=matplotlib_chinese_font\(12, bold=True\)/u,
+  );
+  assert.match(codeInterpreter.description, /font=chinese_font\(20, bold=True\)/u);
   const codeResult = await codeInterpreter.execute(
     "code/call",
     { code: "pass" },
@@ -122,8 +131,46 @@ test("execute_sql defaults to 200 inline rows and emits bounded JSON artifacts",
   const codeText = codeResult.content[0]?.text ?? "{}";
   const codePayload = JSON.parse(codeText) as Record<string, unknown>;
   assert.deepEqual(codePayload["imageReferences"], [{
-    id: "ci:code/call:1",
-    markdown: "![代码计算图表 1](/__datalens_generated_image__/ci%3Acode%2Fcall%3A1)",
+    id: "ci-oee-ranking",
+    markdown: "![oee-ranking](/__datalens_generated_image__/ci-oee-ranking)",
   }]);
+  assert.deepEqual(
+    (codeResult.details as { images: Array<{ referenceId: string }> }).images[0]?.referenceId,
+    "ci-oee-ranking",
+  );
   assert.equal(codeText.includes(generatedImageData), false);
+
+  const repeated = await codeInterpreter.execute(
+    "another-long-tool-call-id",
+    { code: "pass" },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  const repeatedPayload = JSON.parse(repeated.content[0]?.text ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(repeatedPayload["imageReferences"], [{
+    id: "ci-oee-ranking-2",
+    markdown: "![oee-ranking](/__datalens_generated_image__/ci-oee-ranking-2)",
+  }]);
+
+  const restoredTools = createAgentTools(
+    database,
+    artifacts,
+    availableRuntime,
+    new Set(["ci-oee-ranking", "ci-oee-ranking-2"]),
+  ) as readonly CallableTool[];
+  const restoredCodeInterpreter = restoredTools.find((tool) => tool.name === "code_interpreter");
+  assert.ok(restoredCodeInterpreter);
+  const restored = await restoredCodeInterpreter.execute(
+    "restored-tool-call",
+    { code: "pass" },
+    undefined,
+    undefined,
+    undefined as never,
+  );
+  const restoredPayload = JSON.parse(restored.content[0]?.text ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(restoredPayload["imageReferences"], [{
+    id: "ci-oee-ranking-3",
+    markdown: "![oee-ranking](/__datalens_generated_image__/ci-oee-ranking-3)",
+  }]);
 });

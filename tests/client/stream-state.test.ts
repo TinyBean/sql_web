@@ -57,7 +57,7 @@ test("does not reuse an older image answer when the latest user turn has no assi
     role: "assistant" as const,
     text: "上一轮图表",
     images: [{
-      id: "ci:old:1",
+      id: "ci-old",
       mimeType: "image/png" as const,
       data: "OLD_IMAGE",
       alt: "旧图",
@@ -338,6 +338,49 @@ test("ignores duplicate final turn ends after promoting the answer once", () => 
   assert.equal(state.finalText, "只提升一次");
 });
 
+test("reopens a finalized presentation for a hidden image-reference review turn", () => {
+  const reviewImage = {
+    id: "ci-code-one",
+    mimeType: "image/png" as const,
+    data: "IMAGE",
+    alt: "复核图片",
+  };
+  let state = createStreamPresentation();
+  state = reduceStreamPresentation(state, { event: "turn_start", data: { turn: 0 } });
+  state = reduceStreamPresentation(state, {
+    event: "generated_image",
+    data: { turn: 0, toolCallId: "code-1", image: reviewImage },
+  });
+  state = reduceStreamPresentation(state, {
+    event: "text_delta",
+    data: { turn: 0, delta: "候选回答" },
+  });
+  state = reduceStreamPresentation(state, {
+    event: "turn_end",
+    data: { turn: 0, final: true },
+  });
+  assert.equal(state.finalized, true);
+
+  state = reduceStreamPresentation(state, { event: "turn_start", data: { turn: 1 } });
+  assert.equal(state.finalized, false);
+  assert.equal(state.finalText, "");
+  assert.equal(state.activeTurn, 1);
+  assert.equal(state.waiting, true);
+  assert.deepEqual(state.images, [reviewImage]);
+
+  state = reduceStreamPresentation(state, {
+    event: "text_delta",
+    data: { turn: 1, delta: "复核后的回答" },
+  });
+  state = reduceStreamPresentation(state, {
+    event: "turn_end",
+    data: { turn: 1, final: true },
+  });
+  assert.equal(state.finalized, true);
+  assert.equal(state.finalText, "复核后的回答");
+  assert.deepEqual(state.images, [reviewImage]);
+});
+
 test("settlement and a late error never demote an already finalized answer", () => {
   let state = createStreamPresentation();
   state = reduceStreamPresentation(state, { event: "turn_start", data: { turn: 0 } });
@@ -364,7 +407,7 @@ test("settlement and a late error never demote an already finalized answer", () 
 
 test("caches generated images across turns without interrupting or replacing the draft", () => {
   const firstImage = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png" as const,
     data: "FIRST",
     alt: "第一张",
@@ -399,7 +442,7 @@ test("caches generated images across turns without interrupting or replacing the
   });
   state = reduceStreamPresentation(state, { event: "turn_start", data: { turn: 1 } });
   const secondImage = {
-    id: "ci:call-2:1",
+    id: "ci-call-two",
     mimeType: "image/png" as const,
     data: "SECOND",
     alt: "第二张",
@@ -545,7 +588,7 @@ test("clears compaction state on stream errors and settlement", () => {
 
 test("settlement preserves a partial live draft and never promotes it on a late final event", () => {
   const image = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png" as const,
     data: "IMAGE",
     alt: "部分结果",
@@ -616,7 +659,7 @@ test("ignores events whose turn does not match the active turn", () => {
       turn: 0,
       toolCallId: "late-tool",
       image: {
-        id: "ci:late-tool:1",
+        id: "ci-late-tool",
         mimeType: "image/png",
         data: "LATE",
         alt: "迟到图片",

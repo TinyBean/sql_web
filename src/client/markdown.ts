@@ -59,28 +59,6 @@ function placeholderReference(
   return Number.isSafeInteger(index) ? references[index] ?? null : null;
 }
 
-function safeMarkdownImageSource(source: string): boolean {
-  const normalized = source.trim();
-  if (!normalized || /[\u0000-\u001F\u007F]/u.test(normalized)) return false;
-  const lower = normalized.toLowerCase();
-  if (/^data:image\/(?:avif|gif|jpeg|png|webp);base64,/u.test(lower)) return true;
-  const scheme = /^([a-z][a-z\d+.-]*):/iu.exec(normalized)?.[1]?.toLowerCase();
-  return scheme === undefined || scheme === "blob" || scheme === "http" || scheme === "https";
-}
-
-function markdownImage(
-  node: Element,
-  reference: MarkdownImageReference,
-): HTMLImageElement {
-  const image = node.ownerDocument.createElement("img");
-  image.src = reference.source;
-  image.alt = reference.alt;
-  if (reference.title) image.title = reference.title;
-  image.loading = "lazy";
-  image.decoding = "async";
-  return image;
-}
-
 function generatedImageSource(image: ChatImage): string {
   return `data:${image.mimeType};base64,${image.data}`;
 }
@@ -136,14 +114,6 @@ function hydrateGeneratedImages(
     const reference = nodeReferences[index];
     if (!resolution || !reference || resolution.kind === "remove") {
       node.remove();
-      continue;
-    }
-    if (resolution.kind === "preserve") {
-      if (safeMarkdownImageSource(reference.source)) {
-        node.replaceWith(markdownImage(node, reference));
-      } else {
-        node.remove();
-      }
       continue;
     }
     node.replaceWith(hydratedImage(node, resolution.image, reference, reusable));

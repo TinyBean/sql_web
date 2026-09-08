@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { isGeneratedImageReferenceName } from "../../shared/image-references.ts";
 import type { SessionArtifactStore } from "./artifact-store.ts";
 
 const MAX_CODE_BYTES = 20_000;
@@ -25,6 +26,7 @@ const MAX_TOTAL_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 3;
 const MAX_IMAGE_WIDTH = 1_600;
 const MAX_IMAGE_HEIGHT = 1_200;
+const MAX_IMAGE_METADATA_BYTES = 128;
 const WALL_TIMEOUT_MS = 15_000;
 
 const PREPARE_CHINESE_FONTS = String.raw`
@@ -91,7 +93,7 @@ if not prepared:
 const PYTHON_RUNNER = String.raw`
 import json
 import os
-import sys
+import re
 
 with open("/input/input.json", "r", encoding="utf-8") as input_file:
     input_data = json.load(input_file)
@@ -169,8 +171,24 @@ def _apply_chinese_font_to_figure(figure):
         )
         artist.set_fontproperties(matplotlib_chinese_font(artist.get_fontsize(), bold=bold))
 
-_emitted_figure_ids = set()
 _image_count = 0
+
+def _normalize_reference_name(value):
+    if not isinstance(value, str):
+        raise TypeError("reference_name 必须是字符串")
+    if not value or any(
+        not (
+            "a" <= character.lower() <= "z"
+            or "0" <= character <= "9"
+            or character in " _-"
+        )
+        for character in value
+    ):
+        raise ValueError("reference_name 只能包含英文字母、数字、空格、下划线和连字符")
+    normalized = re.sub(r"[ _-]+", "-", value.strip(" _-").lower())
+    if not re.fullmatch(r"[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,23}", normalized):
+        raise ValueError("reference_name 归一化后必须以字母开头、以字母或数字结尾且不超过 24 个字符")
+    return normalized
 
 def _normalize_png(filename):
     from PIL import Image
@@ -183,11 +201,13 @@ def _normalize_png(filename):
         source.save(temporary, format="PNG", optimize=True)
     os.replace(temporary, filename)
 
-def emit_image(value):
+def emit_image(value, reference_name):
     global _image_count
     if _image_count >= 3:
         raise RuntimeError("每次代码执行最多生成 3 张图片")
-    filename = f"/work/image-{_image_count + 1}.png"
+    normalized_reference_name = _normalize_reference_name(reference_name)
+    image_number = _image_count + 1
+    filename = f"/work/image-{image_number}.png"
     try:
         from matplotlib.figure import Figure
     except ImportError:
@@ -199,12 +219,13 @@ def emit_image(value):
     if Figure is not None and isinstance(value, Figure):
         _apply_chinese_font_to_figure(value)
         value.savefig(filename, format="png", bbox_inches="tight", dpi=120)
-        _emitted_figure_ids.add(id(value))
     elif Image is not None and isinstance(value, Image.Image):
         value.save(filename, format="PNG")
     else:
         raise TypeError("emit_image 只接受 Matplotlib Figure 或 Pillow Image")
     _normalize_png(filename)
+    with open(f"/work/image-{image_number}.json", "w", encoding="utf-8") as metadata_file:
+        json.dump({"referenceName": normalized_reference_name}, metadata_file, separators=(",", ":"))
     _image_count += 1
 
 namespace = {
@@ -221,17 +242,6 @@ namespace = {
 with open("/input/code.py", "r", encoding="utf-8") as code_file:
     source = code_file.read()
 exec(compile(source, "<code_interpreter>", "exec"), namespace, namespace)
-
-if "matplotlib.pyplot" in sys.modules:
-    import matplotlib.pyplot as plt
-    for figure_number in plt.get_fignums():
-        figure = plt.figure(figure_number)
-        if id(figure) in _emitted_figure_ids:
-            continue
-        if _image_count >= 3:
-            print("存在超过 3 张的图表，额外图表已忽略", file=sys.stderr)
-            break
-        emit_image(figure)
 `;
 
 const NETWORK_SYSCALLS_X64 = [
@@ -257,6 +267,7 @@ export interface CodeInterpreterImage {
   readonly mimeType: "image/png";
   readonly data: string;
   readonly alt: string;
+  readonly referenceName: string;
 }
 
 export interface CodeInterpreterDetails {
@@ -411,6 +422,39 @@ function pngDimensions(buffer: Buffer): { width: number; height: number } | null
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }
 
+function imageReferenceName(workDir: string, index: number): string {
+  const filename = path.join(workDir, `image-${index}.json`);
+  let metadata;
+  try {
+    metadata = lstatSync(filename);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      throw new CodeInterpreterError(`第 ${index} 张图片缺少 reference_name 元数据`);
+    }
+    throw error;
+  }
+  if (
+    !metadata.isFile() || metadata.isSymbolicLink() ||
+    metadata.size < 1 || metadata.size > MAX_IMAGE_METADATA_BYTES
+  ) {
+    throw new CodeInterpreterError(`第 ${index} 张图片的 reference_name 元数据无效`);
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(readFileSync(filename, "utf8")) as unknown;
+  } catch {
+    throw new CodeInterpreterError(`第 ${index} 张图片的 reference_name 元数据无效`);
+  }
+  if (
+    typeof decoded !== "object" || decoded === null ||
+    !("referenceName" in decoded) ||
+    !isGeneratedImageReferenceName(decoded.referenceName)
+  ) {
+    throw new CodeInterpreterError(`第 ${index} 张图片的 reference_name 元数据无效`);
+  }
+  return decoded.referenceName;
+}
+
 function collectImages(workDir: string): CodeInterpreterImage[] {
   const images: CodeInterpreterImage[] = [];
   let totalBytes = 0;
@@ -435,10 +479,12 @@ function collectImages(workDir: string): CodeInterpreterImage[] {
       throw new CodeInterpreterError("代码生成了无效或尺寸过大的 PNG 图片");
     }
     totalBytes += bytes.length;
+    const referenceName = imageReferenceName(workDir, index);
     images.push({
       mimeType: "image/png",
       data: bytes.toString("base64"),
-      alt: `代码计算图表 ${index}`,
+      alt: referenceName,
+      referenceName,
     });
   }
   return images;
@@ -535,7 +581,7 @@ export class CodeInterpreterRuntime {
           "if not blocked or project_visible:",
           "    raise RuntimeError('sandbox isolation probe failed')",
           "image = Image.new('RGB', (8, 8), 'white')",
-          "emit_image(image)",
+          "emit_image(image, 'sandbox-probe')",
           "print(json.dumps({'sandbox': 'ok'}))",
         ].join("\n"),
         "{}",

@@ -31,6 +31,7 @@ import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
 import { extractCodeInterpreterImages } from "../tool/code-interpreter-images.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
+import { createGeneratedTextReviewExtension } from "./generated-text-review.ts";
 import type { AppLogger } from "../logger.ts";
 import {
   loadAgentSkillCatalog,
@@ -97,7 +98,8 @@ function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
 8. 少量查询结果优先使用 execute_sql 的默认 inline 模式。需要对大量明细做额外计算或渲染时,使用 output_format="json_file",再把返回的 fileUri 原样传给 code_interpreter.input_json。
 9. 只有 SQL 和当前时间工具无法完成精确计算、统计方法或 PNG 渲染时才调用 code_interpreter。
 10. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
-11. emit_image() 生成的 PNG 会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
+11. 沙箱已经为 Matplotlib 配置好简体中文字体,普通中文标题和坐标文字无需设置字体。matplotlib_chinese_font(...) 和 chinese_font(...) 是沙箱预注入的全局函数,不是 Python 模块,禁止 import 或 from import,需要显式字体对象时只能直接调用;Matplotlib 使用 fontproperties=matplotlib_chinese_font(12, bold=True),Pillow 使用 font=chinese_font(20, bold=True)。不得硬编码 SimHei 等字体族。
+12. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是不超过 24 个字符的简短具体英文名称,例如 oee-ranking 或 availability-trend;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
     : "";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
@@ -117,6 +119,7 @@ async function createLockedResourceLoader(
   cwd: string,
   agentDir: string,
   settingsManager: SettingsManager,
+  logger: AgentProcessLogger,
 ): Promise<ResourceLoader> {
   const loader = new DefaultResourceLoader({
     cwd,
@@ -128,7 +131,10 @@ async function createLockedResourceLoader(
     noThemes: true,
     noContextFiles: true,
     systemPrompt,
-    extensionFactories: [skillCatalog.createSessionExtension(cwd)],
+    extensionFactories: [
+      skillCatalog.createSessionExtension(cwd),
+      createGeneratedTextReviewExtension(logger),
+    ],
     skillsOverride: () => skillCatalog.resources,
   });
   await loader.reload();
@@ -668,13 +674,32 @@ export class AgentSessionStore {
     }
 
     const artifacts = this.#artifacts.forSession(sessionManager.getSessionId());
-    const tools = createAgentTools(this.#database, artifacts, this.#codeInterpreter);
+    const usedGeneratedImageIds = new Set<string>();
+    for (const entry of sessionManager.getEntries()) {
+      if (
+        entry.type !== "message" || entry.message.role !== "toolResult" ||
+        entry.message.toolName !== "code_interpreter" || entry.message.isError === true
+      ) continue;
+      for (const image of extractCodeInterpreterImages(
+        entry.message.toolCallId,
+        entry.message.details,
+      )) {
+        usedGeneratedImageIds.add(image.id);
+      }
+    }
+    const tools = createAgentTools(
+      this.#database,
+      artifacts,
+      this.#codeInterpreter,
+      usedGeneratedImageIds,
+    );
     const resourceLoader = await createLockedResourceLoader(
       buildSystemPrompt(this.#codeInterpreter.status.available),
       this.#skillCatalog,
       this.#cwd,
       this.#agentDir,
       settingsManager,
+      this.#logger,
     );
     const { session } = await createAgentSession({
       cwd: this.#cwd,

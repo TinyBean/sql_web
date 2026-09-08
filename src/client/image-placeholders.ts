@@ -1,11 +1,10 @@
 import type { ChatImage } from "../shared/contracts.ts";
 import {
   GENERATED_IMAGE_PATH_PREFIX,
-  isGeneratedImageReferenceSource,
   parseGeneratedImageReferenceSource,
 } from "../shared/image-references.ts";
 
-const GENERATED_IMAGE_ID_PREFIX = "ci%3A";
+const GENERATED_IMAGE_ID_PREFIX = "ci-";
 
 interface SourceRange {
   readonly start: number;
@@ -85,28 +84,14 @@ function codeRanges(source: string): readonly SourceRange[] {
   return ranges;
 }
 
-function possibleEncodedImageIdPrefix(source: string): boolean {
-  if (source.length <= GENERATED_IMAGE_ID_PREFIX.length) {
+function possibleGeneratedImageIdPrefix(source: string): boolean {
+  if (!source.startsWith(GENERATED_IMAGE_ID_PREFIX)) {
     return GENERATED_IMAGE_ID_PREFIX.startsWith(source);
   }
-  if (!source.startsWith(GENERATED_IMAGE_ID_PREFIX)) return false;
-
-  for (let index = GENERATED_IMAGE_ID_PREFIX.length; index < source.length;) {
-    const character = source[index] ?? "";
-    if (/[A-Za-z0-9._~-]/u.test(character)) {
-      index += 1;
-      continue;
-    }
-    if (character !== "%") return false;
-    const firstHex = source[index + 1];
-    const secondHex = source[index + 2];
-    if (firstHex === undefined) return true;
-    if (!/[0-9A-F]/u.test(firstHex)) return false;
-    if (secondHex === undefined) return true;
-    if (!/[0-9A-F]/u.test(secondHex)) return false;
-    index += 3;
-  }
-  return true;
+  const semanticName = source.slice(GENERATED_IMAGE_ID_PREFIX.length);
+  return semanticName.length === 0 || (
+    semanticName.length <= 80 && /^[a-z][a-z0-9-]*$/u.test(semanticName)
+  );
 }
 
 function isIncompleteGeneratedImageMarkdown(source: string): boolean {
@@ -137,7 +122,7 @@ function isIncompleteGeneratedImageMarkdown(source: string): boolean {
     return GENERATED_IMAGE_PATH_PREFIX.startsWith(destination);
   }
   if (!destination.startsWith(GENERATED_IMAGE_PATH_PREFIX)) return false;
-  return possibleEncodedImageIdPrefix(destination.slice(GENERATED_IMAGE_PATH_PREFIX.length));
+  return possibleGeneratedImageIdPrefix(destination.slice(GENERATED_IMAGE_PATH_PREFIX.length));
 }
 
 /**
@@ -157,7 +142,6 @@ export function hideTrailingIncompleteGeneratedImageMarkdown(source: string): st
 }
 
 export type ImagePlaceholderResolution =
-  | { readonly kind: "preserve" }
   | { readonly kind: "remove" }
   | { readonly kind: "replace"; readonly image: ChatImage };
 
@@ -167,9 +151,9 @@ export interface GeneratedImageLayout {
 
 /**
  * Resolve generated-image references exclusively by their stable IDs.
- * Ordinary Markdown images are preserved and missing or repeated generated
- * references are removed. Share the optional claims set when resolving
- * multiple Markdown fragments from the same response in one render pass.
+ * Every ordinary, missing, or repeated image reference is removed from the
+ * rendered DOM. Share the optional claims set when resolving multiple Markdown
+ * fragments from the same response in one render pass.
  */
 export function resolveGeneratedImageLayout(
   sources: readonly (string | null)[],
@@ -182,7 +166,6 @@ export function resolveGeneratedImageLayout(
   }
 
   const resolutions = sources.map((source): ImagePlaceholderResolution => {
-    if (!isGeneratedImageReferenceSource(source)) return { kind: "preserve" };
     const id = parseGeneratedImageReferenceSource(source);
     const image = id ? imagesById.get(id) : undefined;
     if (!image || claimedGeneratedImageIds.has(image.id)) return { kind: "remove" };

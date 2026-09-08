@@ -3,12 +3,14 @@ import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentToolName } from "../../shared/contracts.ts";
 import {
-  createGeneratedImageId,
   generatedImageMarkdown,
+  isGeneratedImageReferenceName,
+  reserveSemanticGeneratedImageId,
 } from "../../shared/image-references.ts";
 import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
 import type { SessionArtifactStore } from "./artifact-store.ts";
 import {
+  CodeInterpreterError,
   formatCodeInterpreterResult,
   type CodeInterpreterRuntime,
 } from "./code-interpreter.ts";
@@ -64,6 +66,7 @@ export function createAgentTools(
   database: AppDatabase,
   artifacts: SessionArtifactStore,
   codeInterpreter: CodeInterpreterRuntime,
+  usedGeneratedImageIds: Set<string> = new Set<string>(),
 ) {
   const executeSqlTool = defineTool({
     name: "execute_sql",
@@ -153,7 +156,7 @@ export function createAgentTools(
     name: "code_interpreter",
     label: "执行受限 Python",
     description:
-      "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text and emit_image() for Matplotlib Figure or Pillow Image output. Matplotlib is preconfigured with a Simplified Chinese system font: do not replace it with hard-coded font families such as SimHei. When explicit Matplotlib font properties are needed, use matplotlib_chinese_font(size), or matplotlib_chinese_font(size, bold=True) for bold text. For Chinese Pillow text, use chinese_font(size), or chinese_font(size, bold=True) for bold text. For every emitted PNG, copy its returned imageReferences[].markdown value exactly once into the final answer at the intended display position; never modify a returned reference or invent a Markdown image URL. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
+      "Run Python in a strict, network-disabled sandbox for exact calculations, statistics, or PNG rendering. input_json may be inline JSON or an artifact:// URI returned by execute_sql; it is available in Python as input_data. Use print() for text. Every image must be emitted explicitly with emit_image(value, reference_name), where reference_name is a short, specific English ASCII name such as oee-ranking or availability-trend; un-emitted Matplotlib figures are ignored. Matplotlib is already configured for Simplified Chinese, and emit_image applies the bundled Chinese font to figure text, so write Chinese labels normally and do not hard-code font families such as SimHei. matplotlib_chinese_font and chinese_font are pre-injected global functions, not Python modules: never import either name. Only when an explicit font object is needed, call the globals directly, for example fontproperties=matplotlib_chinese_font(12, bold=True) in Matplotlib or font=chinese_font(20, bold=True) in Pillow. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
     promptSnippet: "在严格沙箱中执行 Python,进行额外计算、统计或 PNG 图表渲染",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -164,18 +167,26 @@ export function createAgentTools(
         }),
       ),
     }),
-    async execute(toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal) {
       const result = await codeInterpreter.execute(params.code, params.input_json, artifacts, signal);
-      const imageReferences = result.details.images.map((image, index) => {
-        const id = createGeneratedImageId(toolCallId, index + 1);
+      const images = result.details.images.map((image, index) => {
+        if (!isGeneratedImageReferenceName(image.referenceName)) {
+          throw new CodeInterpreterError(`第 ${index + 1} 张图片缺少有效的 reference_name`);
+        }
+        const referenceId = reserveSemanticGeneratedImageId(image.referenceName, usedGeneratedImageIds);
+        return { ...image, alt: image.referenceName, referenceId };
+      });
+      const details = { ...result.details, images };
+      const imageReferences = images.map((image) => {
+        const id = image.referenceId;
         return { id, markdown: generatedImageMarkdown(id, image.alt) };
       });
       return {
         content: [{
           type: "text" as const,
-          text: formatCodeInterpreterResult(result.details, imageReferences),
+          text: formatCodeInterpreterResult(details, imageReferences),
         }],
-        details: result.details,
+        details,
       };
     },
   });

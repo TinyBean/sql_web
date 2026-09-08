@@ -23,6 +23,7 @@ import type {
   SessionsResponse,
 } from "../shared/contracts.ts";
 import { isAgentToolName } from "../shared/contracts.ts";
+import { isSemanticGeneratedImageId } from "../shared/image-references.ts";
 
 export type Decoder<Value> = (value: unknown, path?: string) => Value;
 
@@ -126,8 +127,11 @@ function agentToolName(value: unknown, path: string): AgentToolName {
 function chatImage(value: unknown, path: string): ChatImage {
   const item = record(value, path);
   if (item["mimeType"] !== "image/png") invalid(`${path}.mimeType`, "image/png");
+  if (!isSemanticGeneratedImageId(item["id"])) {
+    invalid(`${path}.id`, "合法的语义图片 ID");
+  }
   return {
-    id: nonEmptyString(item["id"], `${path}.id`),
+    id: item["id"],
     mimeType: "image/png",
     data: string(item["data"], `${path}.data`),
     alt: string(item["alt"], `${path}.alt`),

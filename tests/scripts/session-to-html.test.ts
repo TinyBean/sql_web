@@ -262,7 +262,13 @@ test("embeds every diagnostic branch with thinking, tool results, custom data, a
         details: {
           kind: "code_interpreter",
           stdout: "raw stdout",
-          images: [{ mimeType: "image/png", data: PNG_BASE64, alt: "诊断图片" }],
+          images: [{
+            mimeType: "image/png",
+            data: PNG_BASE64,
+            alt: "diagnostic-chart",
+            referenceName: "diagnostic-chart",
+            referenceId: "ci-diagnostic-chart",
+          }],
         },
         isError: false,
         timestamp: 12,
@@ -381,11 +387,17 @@ test("embeds every diagnostic branch with thinking, tool results, custom data, a
   assert.deepEqual(toolResultEntry.message.details, {
     kind: "code_interpreter",
     stdout: "raw stdout",
-    images: [{ mimeType: "image/png", data: PNG_BASE64, alt: "诊断图片" }],
+    images: [{
+      mimeType: "image/png",
+      data: PNG_BASE64,
+      alt: "diagnostic-chart",
+      referenceName: "diagnostic-chart",
+      referenceId: "ci-diagnostic-chart",
+    }],
   });
   assert.deepEqual(
     diagnosticBranch.messages.find((message) => message.role === "assistant")?.images,
-    [{ id: "ci:code-call-1:1", mimeType: "image/png", data: PNG_BASE64, alt: "诊断图片" }],
+    [{ id: "ci-diagnostic-chart", mimeType: "image/png", data: PNG_BASE64, alt: "diagnostic-chart" }],
   );
 
   const customEntry = entriesById.get("custom01");

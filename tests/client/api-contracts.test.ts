@@ -155,7 +155,7 @@ test("decodes code interpreter tools and inline PNG images", () => {
       id: "assistant-1",
       role: "assistant",
       text: "图表",
-      images: [{ id: "ci:call-1:1", mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
+      images: [{ id: "ci-trend", mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
     }],
   };
   assert.deepEqual(decodeSerializedSession(session), session);
@@ -163,7 +163,7 @@ test("decodes code interpreter tools and inline PNG images", () => {
 
 test("decodes generated image stream events", () => {
   const image = {
-    id: "ci:call-1:1",
+    id: "ci-trend",
     mimeType: "image/png",
     data: "iVBORw0KGgo=",
     alt: "趋势图",
@@ -179,7 +179,7 @@ test("decodes generated image stream events", () => {
 
 test("rejects malformed generated image stream events", () => {
   const image = {
-    id: "ci:call-1:1",
+    id: "ci-trend",
     mimeType: "image/png",
     data: "iVBORw0KGgo=",
     alt: "趋势图",
@@ -267,9 +267,26 @@ test("rejects malformed nested API and SSE payloads", () => {
         id: "assistant-1",
         role: "assistant",
         text: "图表",
+        images: [{
+          id: "ci:call-1:1",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+          alt: "旧图片",
+        }],
+      }],
+    }),
+    /合法的语义图片 ID/u,
+  );
+  assert.throws(
+    () => decodeSerializedSession({
+      ...validSession,
+      messages: [{
+        id: "assistant-1",
+        role: "assistant",
+        text: "图表",
         images: [
-          { id: "ci:call-1:1", mimeType: "image/png", data: "AAAA", alt: "第一张" },
-          { id: "ci:call-1:1", mimeType: "image/png", data: "BBBB", alt: "第二张" },
+          { id: "ci-duplicate", mimeType: "image/png", data: "AAAA", alt: "第一张" },
+          { id: "ci-duplicate", mimeType: "image/png", data: "BBBB", alt: "第二张" },
         ],
       }],
     }),

@@ -77,6 +77,37 @@ test("keeps direct and truncated answers while omitting retry failures", () => {
   ]);
 });
 
+test("shows only the rewritten answer around a hidden image-reference review message", () => {
+  assert.deepEqual(serializeMessages([
+    { role: "user", content: "画图", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "保留原始引用的候选回答" }],
+      stopReason: "stop",
+      timestamp: 2,
+    },
+    {
+      role: "custom",
+      content: "隐藏的图片地址复核指令",
+      timestamp: 3,
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "复核后的最终回答" }],
+      stopReason: "stop",
+      timestamp: 4,
+    },
+  ]), [
+    { id: "user-1", role: "user", text: "画图", timestamp: 1 },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      text: "复核后的最终回答",
+      timestamp: 4,
+    },
+  ]);
+});
+
 test("uses an empty object for legacy tool calls without arguments", () => {
   assert.deepEqual(serializeMessages([
     { role: "user", content: "现在几点" },
@@ -135,7 +166,13 @@ test("associates persisted code interpreter PNG details with the final answer", 
       isError: false,
       details: {
         kind: "code_interpreter",
-        images: [{ mimeType: "image/png", data: png, alt: "趋势图" }],
+        images: [{
+          mimeType: "image/png",
+          data: png,
+          alt: "oee-trend",
+          referenceName: "oee-trend",
+          referenceId: "ci-oee-trend",
+        }],
       },
     },
     { role: "assistant", content: [{ type: "text", text: "趋势如下。" }], stopReason: "stop" },
@@ -152,9 +189,50 @@ test("associates persisted code interpreter PNG details with the final answer", 
         arguments: {},
         isError: false,
       }],
-      images: [{ id: "ci:code-1:1", mimeType: "image/png", data: png, alt: "趋势图" }],
+      images: [{ id: "ci-oee-trend", mimeType: "image/png", data: png, alt: "oee-trend" }],
     },
   ]);
+});
+
+test("ignores persisted images without consistent semantic metadata", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+  const transcript = serializeMessages([
+    { role: "user", content: "画图" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "code-1", name: "code_interpreter", arguments: {} }],
+      stopReason: "toolUse",
+    },
+    {
+      role: "toolResult",
+      toolCallId: "code-1",
+      toolName: "code_interpreter",
+      isError: false,
+      details: {
+        kind: "code_interpreter",
+        images: [
+          { mimeType: "image/png", data: png, alt: "missing-metadata" },
+          {
+            mimeType: "image/png",
+            data: png,
+            alt: "old-reference",
+            referenceName: "old-reference",
+            referenceId: "ci:code-1:2",
+          },
+          {
+            mimeType: "image/png",
+            data: png,
+            alt: "wrong-alt",
+            referenceName: "semantic-name",
+            referenceId: "ci-semantic-name",
+          },
+        ],
+      },
+    },
+    { role: "assistant", content: "完成。", stopReason: "stop" },
+  ]);
+
+  assert.equal(transcript.at(-1)?.images, undefined);
 });
 
 test("does not persist images from a failed code interpreter result", () => {
@@ -204,7 +282,13 @@ test("keeps generated image IDs in tool-call source order", () => {
       isError: false,
       details: {
         kind: "code_interpreter",
-        images: [{ mimeType: "image/png", data: png, alt: "第二组" }],
+        images: [{
+          mimeType: "image/png",
+          data: png,
+          alt: "second-group",
+          referenceName: "second-group",
+          referenceId: "ci-second-group",
+        }],
       },
     },
     {
@@ -215,8 +299,20 @@ test("keeps generated image IDs in tool-call source order", () => {
       details: {
         kind: "code_interpreter",
         images: [
-          { mimeType: "image/png", data: png, alt: "第一组之一" },
-          { mimeType: "image/png", data: png, alt: "第一组之二" },
+          {
+            mimeType: "image/png",
+            data: png,
+            alt: "first-group-one",
+            referenceName: "first-group-one",
+            referenceId: "ci-first-group-one",
+          },
+          {
+            mimeType: "image/png",
+            data: png,
+            alt: "first-group-two",
+            referenceName: "first-group-two",
+            referenceId: "ci-first-group-two",
+          },
         ],
       },
     },
@@ -225,9 +321,9 @@ test("keeps generated image IDs in tool-call source order", () => {
 
   const images = transcript.find((message) => message.role === "assistant")?.images;
   assert.deepEqual(images?.map((image) => image.id), [
-    "ci:code-first:1",
-    "ci:code-first:2",
-    "ci:code-second:1",
+    "ci-first-group-one",
+    "ci-first-group-two",
+    "ci-second-group",
   ]);
   assert.deepEqual(serializeMessages([
     { role: "user", content: "画图" },
@@ -241,10 +337,19 @@ test("keeps generated image IDs in tool-call source order", () => {
       toolCallId: "stable",
       toolName: "code_interpreter",
       isError: false,
-      details: { kind: "code_interpreter", images: [{ mimeType: "image/png", data: png, alt: "稳定" }] },
+      details: {
+        kind: "code_interpreter",
+        images: [{
+          mimeType: "image/png",
+          data: png,
+          alt: "stable-chart",
+          referenceName: "stable-chart",
+          referenceId: "ci-stable-chart",
+        }],
+      },
     },
     { role: "assistant", content: "完成。", stopReason: "stop" },
-  ]).at(-1)?.images?.[0]?.id, "ci:stable:1");
+  ]).at(-1)?.images?.[0]?.id, "ci-stable-chart");
 });
 
 test("does not cross-wire images when historical tool-call IDs repeat across turns", () => {
@@ -263,7 +368,13 @@ test("does not cross-wire images when historical tool-call IDs repeat across tur
       isError: false,
       details: {
         kind: "code_interpreter",
-        images: [{ mimeType: "image/png", data: png, alt: "第一轮图片" }],
+        images: [{
+          mimeType: "image/png",
+          data: png,
+          alt: "first-turn",
+          referenceName: "first-turn",
+          referenceId: "ci-first-turn",
+        }],
       },
     },
     { role: "assistant", content: "第一轮完成。", stopReason: "stop" },
@@ -280,7 +391,13 @@ test("does not cross-wire images when historical tool-call IDs repeat across tur
       isError: false,
       details: {
         kind: "code_interpreter",
-        images: [{ mimeType: "image/png", data: png, alt: "第二轮图片" }],
+        images: [{
+          mimeType: "image/png",
+          data: png,
+          alt: "second-turn",
+          referenceName: "second-turn",
+          referenceId: "ci-second-turn",
+        }],
       },
     },
     { role: "assistant", content: "第二轮完成。", stopReason: "stop" },
@@ -290,7 +407,7 @@ test("does not cross-wire images when historical tool-call IDs repeat across tur
     transcript.filter((message) => message.role === "assistant").map((message) => (
       message.images?.map((image) => image.alt)
     )),
-    [["第一轮图片"], ["第二轮图片"]],
+    [["first-turn"], ["second-turn"]],
   );
 });
 
@@ -317,7 +434,13 @@ test("does not let a later reused tool-call ID satisfy an earlier missing result
       isError: false,
       details: {
         kind: "code_interpreter",
-        images: [{ mimeType: "image/png", data: png, alt: "只属于第二轮" }],
+        images: [{
+          mimeType: "image/png",
+          data: png,
+          alt: "second-turn-only",
+          referenceName: "second-turn-only",
+          referenceId: "ci-second-turn-only",
+        }],
       },
     },
     { role: "assistant", content: "第二轮完成。", stopReason: "stop" },
@@ -326,6 +449,6 @@ test("does not let a later reused tool-call ID satisfy an earlier missing result
 
   assert.equal(assistantMessages[0]?.images, undefined);
   assert.equal(assistantMessages[0]?.trace?.find((item) => item.type === "tool")?.isError, true);
-  assert.deepEqual(assistantMessages[1]?.images?.map((image) => image.alt), ["只属于第二轮"]);
+  assert.deepEqual(assistantMessages[1]?.images?.map((image) => image.alt), ["second-turn-only"]);
   assert.equal(assistantMessages[1]?.trace?.find((item) => item.type === "tool")?.isError, false);
 });

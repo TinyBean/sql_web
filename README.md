@@ -232,7 +232,11 @@ npm test
 - `test-oee-calculator` 被加载后，当前会话才会注册 `test_oee_calculator__calculate_test_oee` 和 `test_oee_calculator__classify_test_oee_record`；计算器、数据库连接辅助模块和工具定义位于 Skill 的 `assets/`，可执行 CLI 位于 `scripts/`，数据库结构、字段含义和业务规则位于 `references/`。计算工具每次执行都建立独立的只读连接并在结束时关闭，分类工具不连接数据库。
 - 新增 Skill 必须沿用同一目录约定：根目录只放 `SKILL.md` 等元数据，直接执行的脚本放入 `scripts/`，静态资源和代码放入 `assets/`，按需读取的说明文档放入 `references/`。Catalog 只从 `assets/tools.js` 或 `assets/tools.ts` 加载 Skill 专有工具，不兼容根目录 `tools.*`。
 - Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 不接收或持有数据库连接；启动时只扫描元数据并调用无参工具工厂进行校验，不会把专有工具注册到全局或暴露给新会话。需要数据的业务 Skill 自主管理只读连接。
-- `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址。输入在 Python 中为 `input_data`；文本通过 `print()` 返回，Matplotlib/Pillow 图片通过 `emit_image()` 返回。每张图片会获得稳定的 Markdown 引用：生成完成后先通过流式事件送达浏览器缓存，流式 Markdown 与完整图片锚点在展开的思考区实时展示；最终轮结束时，最后回答进入正文区，已提交思考片段及其图片继续保留。`done` 仅使用最终消息权威重绘正文，不重绘思考区。正文和思考过程各自按稳定 ID 去重，同一图片可在两个区域各展示一次，未被有效引用的图片不予展示。Matplotlib 会优先使用系统的 `Noto Sans CJK SC` 简体中文字体，显式字体可通过 `matplotlib_chinese_font(size, bold=True)` 获取；Pillow 可通过 `chinese_font(size)` 或 `chinese_font(size, bold=True)` 获取常规/粗体字体。
+- `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址，输入在 Python 中为 `input_data`，文本通过 `print()` 返回。
+  每张 Matplotlib/Pillow 图片必须通过 `emit_image(value, reference_name)` 显式提交；名称不超过 24 个字符并归一化为小写连字符格式，例如 `OEE Ranking` 变为 `oee-ranking`。未显式提交的 Matplotlib 图不会输出。
+  图片使用不含工具调用 UUID 的短引用，例如 `![oee-ranking](/__datalens_generated_image__/ci-oee-ranking)`；同一会话重名时才追加 `-2`、`-3`。图片解析、流式展示和会话恢复只接受这种语义 ID。
+  最终正文落库前会复核所有 Markdown 图片；无效地址优先按 Markdown 图片说明与当前回合 `ChatImage.alt` 的精确唯一对应关系修复。重复说明不猜测，也不参与数量兜底；其他唯一候选继续自动纠正，仍有歧义时触发至多一次不可见的模型重写。服务端保留无法确认或重复的原始引用，前端只渲染当前消息缓存中精确匹配且首次出现的图片 ID。
+  Matplotlib 已预配置简体中文字体，普通中文标题和坐标文字无需手动指定字体。`matplotlib_chinese_font(...)` 与 `chinese_font(...)` 是沙箱预注入的全局函数而非 Python 模块，不得导入；需要显式字体对象时直接调用，例如 Matplotlib 使用 `fontproperties=matplotlib_chinese_font(12, bold=True)`，Pillow 使用 `font=chinese_font(20, bold=True)`。
 - Python 使用 bubblewrap、seccomp 和 prlimit 隔离：无法访问数据库、项目目录、其他会话产物或网络，并限制执行时间、内存、进程和输出大小。
 - SQL JSON 文件随会话跨轮次、跨重启保留，删除会话时同步删除；文件不通过 HTTP 提供下载。
 - 基础 system prompt 不包含业务数据库结构或字段含义；这些上下文由 `test-oee-calculator` 的 `references/database.md` 按需提供，数据内容仍必须通过查询工具获取。

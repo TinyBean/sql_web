@@ -40,9 +40,40 @@ function generatedImages(root: HTMLElement): HTMLImageElement[] {
   )];
 }
 
+test("renders only a first exact image from the current message cache", () => {
+  const current: ChatImage = {
+    id: "ci-current-call",
+    mimeType: "image/png",
+    data: "CURRENT",
+    alt: "当前图片",
+  };
+  const root = container();
+  const marker = generatedImageMarkdown(current.id, current.alt);
+
+  renderMarkdownInto(root, [
+    "![外链](https://example.com/remote.png)",
+    "![内联](data:image/png;base64,REMOTE)",
+    "![相对路径](./chart.png)",
+    "![产物](artifact://chart.png)",
+    "![沙箱](sandbox:/work/chart.png)",
+    "![跨回合](/__datalens_generated_image__/ci-old-call)",
+    "![畸形](/__datalens_generated_image__/ci:raw:1)",
+    marker,
+    marker,
+    '<img src="https://example.com/raw.png">',
+  ].join("\n\n"), [current]);
+
+  const allImages = [...root.querySelectorAll<HTMLImageElement>("img")];
+  assert.equal(allImages.length, 1);
+  assert.equal(allImages[0]?.getAttribute("data-generated-image-id"), current.id);
+  assert.equal(allImages[0]?.getAttribute("src"), "data:image/png;base64,CURRENT");
+  assert.doesNotMatch(root.innerHTML, /remote\.png|REMOTE|chart\.png|old-call|ci:raw/u);
+  assert.match(root.textContent ?? "", /<img src="https:\/\/example\.com\/raw\.png">/u);
+});
+
 test("reuses a generated image across incremental renders in the same container", () => {
   const image: ChatImage = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png",
     data: "AAAA",
     alt: "趋势图",
@@ -60,13 +91,13 @@ test("reuses a generated image across incremental renders in the same container"
 
 test("shares generated image claims across separate thought fragments", () => {
   const first: ChatImage = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png",
     data: "AAAA",
     alt: "第一张",
   };
   const second: ChatImage = {
-    id: "ci:call-1:2",
+    id: "ci-call-two",
     mimeType: "image/png",
     data: "BBBB",
     alt: "第二张",
@@ -97,13 +128,13 @@ test("shares generated image claims across separate thought fragments", () => {
 
 test("keeps body and thought image claims independent", () => {
   const shared: ChatImage = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png",
     data: "SHARED",
     alt: "正文图片",
   };
   const thoughtOnly: ChatImage = {
-    id: "ci:call-1:2",
+    id: "ci-call-two",
     mimeType: "image/png",
     data: "THOUGHT_ONLY",
     alt: "思考图片",
@@ -135,7 +166,7 @@ test("keeps body and thought image claims independent", () => {
 
 test("rendering the done body does not move an existing thought image", () => {
   const image: ChatImage = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png",
     data: "AAAA",
     alt: "共享图片",
@@ -157,7 +188,7 @@ test("rendering the done body does not move an existing thought image", () => {
 
 test("authoritative redraw replaces changed image data and removes deleted images", () => {
   const streamed: ChatImage = {
-    id: "ci:call-1:1",
+    id: "ci-call-one",
     mimeType: "image/png",
     data: "STREAMED",
     alt: "流式图片",

@@ -160,12 +160,14 @@ export function reduceStreamPresentation(
       : state;
   }
   if (parsed.event === "turn_start") {
-    if (state.activeTurn !== null || state.finalized) return state;
+    if (state.activeTurn !== null) return state;
     return {
       ...state,
       activeTurn: parsed.data.turn,
+      finalText: "",
       currentTurnText: "",
       waiting: true,
+      finalized: false,
       failed: false,
     };
   }

@@ -90,6 +90,7 @@ interface ClientState {
   sessionId: string | null;
   sessions: readonly SessionSummary[];
   activeStreams: SessionStreamRegistry<ActiveStream>;
+  scrollPositions: Map<string, number>;
   deletingSessionId: string | null;
   toastTimer: number | null;
 }
@@ -105,6 +106,7 @@ const state: ClientState = {
   sessionId: null,
   sessions: [],
   activeStreams: new SessionStreamRegistry<ActiveStream>(),
+  scrollPositions: new Map<string, number>(),
   deletingSessionId: null,
   toastTimer: null,
 };
@@ -568,6 +570,7 @@ function appendMessage(
   streaming = false,
   trace: readonly ChatTraceItem[] = [],
   images: readonly ChatImage[] = [],
+  scrollToBottom = true,
 ): StreamNode {
   const article = document.createElement("article");
   article.className = `message ${role}`;
@@ -603,7 +606,7 @@ function appendMessage(
   body.append(messageText);
   article.append(avatar, body);
   ensureMessageStream().append(article);
-  elements.messages.scrollTop = elements.messages.scrollHeight;
+  if (scrollToBottom) scrollMessagesTo(elements.messages.scrollHeight);
   const node: StreamNode = {
     article,
     body,
@@ -629,8 +632,38 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
     return;
   }
   for (const message of messages) {
-    appendMessage(message.role, message.text, false, message.trace ?? [], message.images ?? []);
+    appendMessage(
+      message.role,
+      message.text,
+      false,
+      message.trace ?? [],
+      message.images ?? [],
+      false,
+    );
   }
+}
+
+const BOTTOM_THRESHOLD_PX = 4;
+
+function scrollMessagesTo(scrollTop: number): void {
+  const previousBehavior = elements.messages.style.scrollBehavior;
+  elements.messages.style.scrollBehavior = "auto";
+  elements.messages.scrollTop = scrollTop;
+  elements.messages.style.scrollBehavior = previousBehavior;
+}
+
+function messagesAreNearBottom(): boolean {
+  return elements.messages.scrollHeight - elements.messages.clientHeight - elements.messages.scrollTop <=
+    BOTTOM_THRESHOLD_PX;
+}
+
+function rememberSelectedScrollPosition(): void {
+  if (state.sessionId === null) return;
+  state.scrollPositions.set(state.sessionId, elements.messages.scrollTop);
+}
+
+function restoreScrollPosition(sessionId: string): void {
+  scrollMessagesTo(state.scrollPositions.get(sessionId) ?? elements.messages.scrollHeight);
 }
 
 function selectedActiveStream(): ActiveStream | undefined {
@@ -653,8 +686,10 @@ function selectSession(sessionId: string): void {
 }
 
 function applyActiveStream(activeStream: ActiveStream): void {
+  rememberSelectedScrollPosition();
   selectSession(activeStream.sessionId);
   elements.messages.replaceChildren(activeStream.transcript);
+  restoreScrollPosition(activeStream.sessionId);
   renderSessions();
   syncComposerState();
   closeSidebar();
@@ -666,8 +701,10 @@ function applySession(session: SerializedSession): void {
     applyActiveStream(activeStream);
     return;
   }
+  rememberSelectedScrollPosition();
   selectSession(session.id);
   renderTranscript(session.messages);
+  restoreScrollPosition(session.id);
   renderSessions();
   syncComposerState();
   elements.input.focus();
@@ -737,6 +774,7 @@ async function deleteSession(id: string): Promise<void> {
     );
     const deletedCurrentSession = state.sessionId === id;
     state.sessions = state.sessions.filter((item) => item.id !== id);
+    state.scrollPositions.delete(id);
     if (deletedCurrentSession) {
       clearSessionView();
       const nextSession = state.sessions[0];
@@ -776,6 +814,7 @@ function handleStreamEvent(
 ): void {
   const { node } = activeStream;
   const visible = activeStreamIsVisible(activeStream);
+  const followLatest = visible && messagesAreNearBottom();
   if (parsed.event === "status") {
     if (visible) showToast(parsed.data.message);
   } else {
@@ -786,7 +825,7 @@ function handleStreamEvent(
       showToast("自动上下文压缩失败");
     }
     if (parsed.event !== "error") {
-      if (visible) elements.messages.scrollTop = elements.messages.scrollHeight;
+      if (followLatest) scrollMessagesTo(elements.messages.scrollHeight);
       return;
     }
     const error = document.createElement("div");
@@ -797,7 +836,7 @@ function handleStreamEvent(
     node.body.append(error);
     showToast(visible ? message : `“${activeStreamTitle(activeStream)}”回答失败：${message}`);
   }
-  if (visible) elements.messages.scrollTop = elements.messages.scrollHeight;
+  if (followLatest) scrollMessagesTo(elements.messages.scrollHeight);
 }
 
 function settleStreamNode(node: StreamNode): void {

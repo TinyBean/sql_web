@@ -83,8 +83,14 @@ test("switches between independent live session answers without stealing the cur
 
   const sessions = [sessionSummary("session-a", "会话 A"), sessionSummary("session-b", "会话 B")];
   const stored = new Map([
-    ["session-a", serializedSession("session-a", "会话 A")],
-    ["session-b", serializedSession("session-b", "会话 B")],
+    ["session-a", serializedSession("session-a", "会话 A", [
+      { id: "history-user-a", role: "user", text: "A 历史问题" },
+      { id: "history-assistant-a", role: "assistant", text: "A 历史回答" },
+    ])],
+    ["session-b", serializedSession("session-b", "会话 B", [
+      { id: "history-user-b", role: "user", text: "B 历史问题" },
+      { id: "history-assistant-b", role: "assistant", text: "B 历史回答" },
+    ])],
   ]);
   const controllers = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
   const sessionLoads = new Map<string, number>();
@@ -185,6 +191,8 @@ test("switches between independent live session answers without stealing the cur
   const messages = document.querySelector("#messages") as unknown as HTMLElement;
   const sendButton = document.querySelector("#sendButton") as unknown as HTMLButtonElement;
   const newChatButton = document.querySelector("#newChatButton") as unknown as HTMLButtonElement;
+  Object.defineProperty(messages, "clientHeight", { configurable: true, value: 300 });
+  Object.defineProperty(messages, "scrollHeight", { configurable: true, value: 900 });
   const submit = (): void => {
     composer.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
   };
@@ -203,6 +211,23 @@ test("switches between independent live session answers without stealing the cur
     () => document.querySelector('[data-session-id="session-a"]')?.classList.contains("active") === true,
     "session A did not load",
   );
+  assert.equal(messages.scrollTop, 900, "a session without a saved position should open at the bottom");
+
+  messages.scrollTop = 125;
+  sessionButton("session-b").click();
+  await waitFor(() => sessionButton("session-b").classList.contains("active"), "session B did not load");
+  assert.equal(messages.scrollTop, 900, "a newly opened session should start at the bottom");
+  messages.scrollTop = 275;
+  sessionButton("session-a").click();
+  await waitFor(() => sessionButton("session-a").classList.contains("active"), "session A did not reload");
+  assert.equal(messages.scrollTop, 125, "session A should restore its historical scroll position");
+  sessionButton("session-b").click();
+  await waitFor(() => sessionButton("session-b").classList.contains("active"), "session B did not reload");
+  assert.equal(messages.scrollTop, 275, "session B should restore its historical scroll position");
+  sessionButton("session-a").click();
+  await waitFor(() => sessionButton("session-a").classList.contains("active"), "session A did not reload again");
+  assert.equal(messages.scrollTop, 125);
+  const sessionALoadsBeforeStreaming = sessionLoads.get("session-a");
 
   input.value = "问题 A";
   submit();
@@ -215,6 +240,7 @@ test("switches between independent live session answers without stealing the cur
   sendSse("session-a", "text_delta", { turn: 0, delta: "A 正在回答" });
   await waitFor(() => messages.textContent.includes("A 正在回答"), "session A progress was not rendered");
 
+  messages.scrollTop = 180;
   newChatButton.click();
   await waitFor(
     () => document.querySelector('[data-session-id="session-c"]')?.classList.contains("active") === true,
@@ -228,7 +254,8 @@ test("switches between independent live session answers without stealing the cur
   assert.equal(input.disabled, false);
   assert.equal(sendButton.getAttribute("aria-label"), "发送问题");
   assert.equal(sessionButton("session-a").classList.contains("streaming"), true);
-  assert.equal(sessionLoads.get("session-a"), 1);
+  assert.equal(sessionLoads.get("session-a"), sessionALoadsBeforeStreaming);
+  assert.equal(messages.scrollTop, 275, "session B should keep its earlier position before a new question");
 
   input.value = "问题 B";
   submit();
@@ -240,11 +267,24 @@ test("switches between independent live session answers without stealing the cur
   sendSse("session-b", "text_delta", { turn: 0, delta: "B 正在回答" });
   await waitFor(() => messages.textContent.includes("B 正在回答"), "session B progress was not rendered");
 
+  messages.scrollTop = 240;
+  sendSse("session-a", "text_delta", { turn: 0, delta: "，后台新增" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(messages.scrollTop, 240, "background growth must not move the selected session");
+
   sessionButton("session-a").click();
   await waitFor(() => sessionButton("session-a").classList.contains("active"), "session A was not restored");
   assert.equal(messages.textContent.includes("A 正在回答"), true);
   assert.equal(messages.textContent.includes("B 正在回答"), false);
-  assert.equal(sessionLoads.get("session-a"), 1, "live session A should reuse its preserved view");
+  assert.equal(sessionLoads.get("session-a"), sessionALoadsBeforeStreaming, "live session A should reuse its preserved view");
+  assert.equal(messages.scrollTop, 180, "a live session should restore the position saved before leaving");
+  sendSse("session-a", "text_delta", { turn: 0, delta: "，回来后继续" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(messages.scrollTop, 180, "new deltas must not steal a restored viewport away from the bottom");
+  messages.scrollTop = 600;
+  sendSse("session-a", "text_delta", { turn: 0, delta: "，底部继续" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(messages.scrollTop, 900, "new deltas should still follow a viewport already at the bottom");
   submit();
   await waitFor(() => aborts.length === 1, "session A abort did not start");
   assert.deepEqual(aborts, ["session-a"]);
@@ -253,11 +293,11 @@ test("switches between independent live session answers without stealing the cur
   sessionButton("session-b").click();
   await waitFor(() => sessionButton("session-b").classList.contains("active"), "session B was not restored");
   assert.equal(sendButton.disabled, false, "session A abort must not disable session B controls");
+  assert.equal(messages.scrollTop, 240, "session B should restore the position saved before switching away");
   resolveAbortA?.();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(sendButton.disabled, false);
 
-  Object.defineProperty(messages, "scrollHeight", { configurable: true, value: 900 });
   messages.scrollTop = 23;
   sendSse("session-a", "text_delta", { turn: 0, delta: "，后台继续" });
   await new Promise<void>((resolve) => setImmediate(resolve));

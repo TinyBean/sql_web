@@ -8,6 +8,38 @@ import type {
 
 export type StreamToolStatus = "queued" | "running" | "done" | "error";
 
+export interface SessionScopedStream {
+  readonly sessionId: string;
+}
+
+/** Keep independent in-flight streams isolated by their owning session. */
+export class SessionStreamRegistry<Stream extends SessionScopedStream> {
+  readonly #streams = new Map<string, Stream>();
+
+  get size(): number {
+    return this.#streams.size;
+  }
+
+  get(sessionId: string | null): Stream | undefined {
+    return sessionId === null ? undefined : this.#streams.get(sessionId);
+  }
+
+  has(sessionId: string): boolean {
+    return this.#streams.has(sessionId);
+  }
+
+  start(stream: Stream): boolean {
+    if (this.#streams.has(stream.sessionId)) return false;
+    this.#streams.set(stream.sessionId, stream);
+    return true;
+  }
+
+  finish(stream: Stream): boolean {
+    if (this.#streams.get(stream.sessionId) !== stream) return false;
+    return this.#streams.delete(stream.sessionId);
+  }
+}
+
 export function formatToolStatusText(_name: string, status: StreamToolStatus): string {
   if (status === "queued") return "准备执行工具";
   if (status === "running") return "正在执行工具";

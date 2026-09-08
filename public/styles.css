@@ -211,6 +211,10 @@ svg {
   background: var(--mint-soft);
 }
 
+.session-item.streaming {
+  grid-template-columns: 18px minmax(0, 1fr) 8px;
+}
+
 .session-item svg {
   width: 16px;
   height: 16px;
@@ -223,6 +227,17 @@ svg {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-item .session-streaming-indicator {
+  width: 7px;
+  height: 7px;
+  align-self: center;
+  overflow: visible;
+  border-radius: 50%;
+  background: var(--mint);
+  box-shadow: 0 0 0 0 rgba(89, 220, 170, 0.38);
+  animation: session-answering 1.8s ease-out infinite;
 }
 
 .session-delete {
@@ -1027,6 +1042,10 @@ svg {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 70%, 100% { opacity: 0.25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
+@keyframes session-answering {
+  0% { box-shadow: 0 0 0 0 rgba(89, 220, 170, 0.38); }
+  70%, 100% { box-shadow: 0 0 0 5px rgba(89, 220, 170, 0); }
+}
 
 .composer-wrap {
   padding: 0 24px 16px;

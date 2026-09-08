@@ -6,8 +6,50 @@ import {
   formatToolStatusText,
   latestAssistantAfterLastUser,
   reduceStreamPresentation,
+  SessionStreamRegistry,
   settleStreamPresentation,
 } from "../../src/client/stream-state.ts";
+
+test("keeps simultaneous answer streams isolated by session", () => {
+  const streams = new SessionStreamRegistry<{ sessionId: string; label: string }>();
+  const first = { sessionId: "session-a", label: "A" };
+  const second = { sessionId: "session-b", label: "B" };
+  let selectedSessionId = first.sessionId;
+
+  assert.equal(streams.start(first), true);
+  assert.equal(streams.get(selectedSessionId), first);
+  selectedSessionId = second.sessionId;
+  assert.equal(streams.get(selectedSessionId), undefined);
+  assert.equal(streams.start(second), true);
+  assert.equal(streams.size, 2);
+  assert.equal(streams.get(selectedSessionId), second);
+  assert.equal(streams.get("session-a"), first);
+  assert.equal(streams.get("session-b"), second);
+  assert.equal(streams.get(null), undefined);
+
+  assert.equal(streams.finish(first), true);
+  assert.equal(selectedSessionId, second.sessionId);
+  assert.equal(streams.has("session-a"), false);
+  assert.equal(streams.get(selectedSessionId), second);
+  assert.equal(streams.size, 1);
+});
+
+test("rejects duplicate session streams and ignores stale completion", () => {
+  const streams = new SessionStreamRegistry<{ sessionId: string; generation: number }>();
+  const first = { sessionId: "session-a", generation: 1 };
+  const duplicate = { sessionId: "session-a", generation: 2 };
+
+  assert.equal(streams.start(first), true);
+  assert.equal(streams.start(duplicate), false);
+  assert.equal(streams.get("session-a"), first);
+  assert.equal(streams.finish(duplicate), false);
+  assert.equal(streams.get("session-a"), first);
+
+  assert.equal(streams.finish(first), true);
+  assert.equal(streams.start(duplicate), true);
+  assert.equal(streams.finish(first), false);
+  assert.equal(streams.get("session-a"), duplicate);
+});
 
 test("does not reuse an older image answer when the latest user turn has no assistant", () => {
   const previousAnswer = {

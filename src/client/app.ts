@@ -28,6 +28,7 @@ import {
   formatToolStatusText,
   latestAssistantAfterLastUser,
   reduceStreamPresentation,
+  SessionStreamRegistry,
   settleStreamPresentation,
   type StreamPresentation,
   type StreamToolStatus,
@@ -88,20 +89,22 @@ interface StreamNode {
 interface ClientState {
   sessionId: string | null;
   sessions: readonly SessionSummary[];
-  activeStream: ActiveStream | null;
+  activeStreams: SessionStreamRegistry<ActiveStream>;
   deletingSessionId: string | null;
   toastTimer: number | null;
 }
 
 interface ActiveStream {
   readonly sessionId: string;
+  readonly transcript: HTMLElement;
   readonly node: StreamNode;
+  aborting: boolean;
 }
 
 const state: ClientState = {
   sessionId: null,
   sessions: [],
-  activeStream: null,
+  activeStreams: new SessionStreamRegistry<ActiveStream>(),
   deletingSessionId: null,
   toastTimer: null,
 };
@@ -175,24 +178,37 @@ function renderSessions(): void {
   }
 
   for (const session of state.sessions) {
+    const streaming = state.activeStreams.has(session.id);
     const row = document.createElement("div");
     row.className = "session-row";
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `session-item${session.id === state.sessionId ? " active" : ""}`;
+    button.className = [
+      "session-item",
+      session.id === state.sessionId ? "active" : "",
+      streaming ? "streaming" : "",
+    ].filter(Boolean).join(" ");
     button.dataset["sessionId"] = session.id;
+    const title = session.title || "新会话";
+    button.setAttribute("aria-label", streaming ? `${title}，正在回答` : title);
     button.append(
       createSvg([{ d: "M7 17.5 4 20v-4.5a8 8 0 1 1 3 2Z" }]),
-      Object.assign(document.createElement("span"), { textContent: session.title || "新会话" }),
+      Object.assign(document.createElement("span"), { textContent: title }),
     );
+    if (streaming) {
+      const status = document.createElement("span");
+      status.className = "session-streaming-indicator";
+      status.title = "正在回答";
+      status.setAttribute("aria-hidden", "true");
+      button.append(status);
+    }
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
     deleteButton.className = "session-delete";
     deleteButton.dataset["deleteSessionId"] = session.id;
     deleteButton.title = `删除会话:${session.title || "新会话"}`;
     deleteButton.setAttribute("aria-label", deleteButton.title);
-    deleteButton.disabled = state.deletingSessionId === session.id ||
-      state.activeStream?.sessionId === session.id;
+    deleteButton.disabled = state.deletingSessionId === session.id || streaming;
     deleteButton.append(createSvg([
       { d: "M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" },
       { d: "M10 11v5M14 11v5" },
@@ -617,21 +633,43 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
   }
 }
 
-function setActiveStream(activeStream: ActiveStream | null): void {
-  state.activeStream = activeStream;
-  const streaming = activeStream !== null;
+function selectedActiveStream(): ActiveStream | undefined {
+  return state.activeStreams.get(state.sessionId);
+}
+
+function syncComposerState(): void {
+  const activeStream = selectedActiveStream();
+  const streaming = activeStream !== undefined;
   elements.sendButton.classList.toggle("streaming", streaming);
   elements.sendButton.setAttribute("aria-label", streaming ? "停止回答" : "发送问题");
+  elements.sendButton.disabled = activeStream?.aborting ?? false;
   elements.input.disabled = streaming;
-  elements.newChatButton.disabled = streaming;
+  elements.newChatButton.disabled = false;
+}
+
+function selectSession(sessionId: string): void {
+  state.sessionId = sessionId;
+  history.replaceState(null, "", `#session=${encodeURIComponent(sessionId)}`);
+}
+
+function applyActiveStream(activeStream: ActiveStream): void {
+  selectSession(activeStream.sessionId);
+  elements.messages.replaceChildren(activeStream.transcript);
   renderSessions();
+  syncComposerState();
+  closeSidebar();
 }
 
 function applySession(session: SerializedSession): void {
-  state.sessionId = session.id;
-  history.replaceState(null, "", `#session=${encodeURIComponent(session.id)}`);
+  const activeStream = state.activeStreams.get(session.id);
+  if (activeStream) {
+    applyActiveStream(activeStream);
+    return;
+  }
+  selectSession(session.id);
   renderTranscript(session.messages);
   renderSessions();
+  syncComposerState();
   elements.input.focus();
 }
 
@@ -641,8 +679,7 @@ async function refreshSessions(): Promise<void> {
   renderSessions();
 }
 
-async function createSession(): Promise<SerializedSession | null> {
-  if (state.activeStream) return null;
+async function createSession(): Promise<SerializedSession> {
   const session = await api("/api/sessions", decodeSerializedSession, {
     method: "POST",
     body: "{}",
@@ -654,12 +691,19 @@ async function createSession(): Promise<SerializedSession | null> {
 }
 
 async function loadSession(id: string): Promise<void> {
-  if (state.activeStream || !id) return;
+  if (!id) return;
+  const activeStream = state.activeStreams.get(id);
+  if (activeStream) {
+    applyActiveStream(activeStream);
+    return;
+  }
   const session = await api(
     `/api/sessions/${encodeURIComponent(id)}`,
     decodeSerializedSession,
   );
-  applySession(session);
+  const startedWhileLoading = state.activeStreams.get(id);
+  if (startedWhileLoading) applyActiveStream(startedWhileLoading);
+  else applySession(session);
   closeSidebar();
 }
 
@@ -668,13 +712,14 @@ function clearSessionView(): void {
   history.replaceState(null, "", `${location.pathname}${location.search}`);
   renderTranscript([]);
   renderSessions();
+  syncComposerState();
   closeSidebar();
   elements.input.focus();
 }
 
 async function deleteSession(id: string): Promise<void> {
   if (state.deletingSessionId) return;
-  if (state.activeStream?.sessionId === id) {
+  if (state.activeStreams.has(id)) {
     showToast("该会话正在回答,请先停止回答再删除");
     return;
   }
@@ -717,31 +762,42 @@ function parseSseBlock(block: string): ParsedSseEvent | null {
   return decodeSseEvent(event, parseJson(dataLines.join("\n"), `$sse.${event}`));
 }
 
+function activeStreamIsVisible(activeStream: ActiveStream): boolean {
+  return state.sessionId === activeStream.sessionId && activeStream.transcript.isConnected;
+}
+
+function activeStreamTitle(activeStream: ActiveStream): string {
+  return state.sessions.find((session) => session.id === activeStream.sessionId)?.title || "新会话";
+}
+
 function handleStreamEvent(
   parsed: Exclude<ParsedSseEvent, { event: "done" }>,
-  node: StreamNode,
+  activeStream: ActiveStream,
 ): void {
+  const { node } = activeStream;
+  const visible = activeStreamIsVisible(activeStream);
   if (parsed.event === "status") {
-    showToast(parsed.data.message);
+    if (visible) showToast(parsed.data.message);
   } else {
     const previous = node.presentation ?? createStreamPresentation();
     node.presentation = reduceStreamPresentation(previous, parsed);
     renderStreamPresentation(node, previous);
-    if (parsed.event === "compaction_end" && parsed.data.outcome === "failed") {
+    if (visible && parsed.event === "compaction_end" && parsed.data.outcome === "failed") {
       showToast("自动上下文压缩失败");
     }
     if (parsed.event !== "error") {
-      elements.messages.scrollTop = elements.messages.scrollHeight;
+      if (visible) elements.messages.scrollTop = elements.messages.scrollHeight;
       return;
     }
     const error = document.createElement("div");
     error.className = "message-error";
     const requestSuffix = parsed.data.requestId ? `（跟踪 ID：${parsed.data.requestId}）` : "";
-    error.textContent = `${parsed.data.message}${requestSuffix}`;
+    const message = `${parsed.data.message}${requestSuffix}`;
+    error.textContent = message;
     node.body.append(error);
-    showToast(`${parsed.data.message}${requestSuffix}`);
+    showToast(visible ? message : `“${activeStreamTitle(activeStream)}”回答失败：${message}`);
   }
-  elements.messages.scrollTop = elements.messages.scrollHeight;
+  if (visible) elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
 function settleStreamNode(node: StreamNode): void {
@@ -779,7 +835,7 @@ async function streamQuestion(
       const parsed = parseSseBlock(block);
       if (!parsed) continue;
       if (parsed.event === "done") completedSession = parsed.data;
-      else handleStreamEvent(parsed, activeStream.node);
+      else handleStreamEvent(parsed, activeStream);
     }
     if (done) break;
   }
@@ -788,20 +844,29 @@ async function streamQuestion(
 
 async function submitQuestion(question: string): Promise<void> {
   const message = question.trim();
-  if (!message || state.activeStream) return;
+  if (!message) return;
   if (!state.sessionId) await createSession();
   const sessionId = state.sessionId;
   if (!sessionId) throw new Error("尚未创建会话");
+  if (state.activeStreams.has(sessionId)) return;
   elements.input.value = "";
   appendMessage("user", message);
   const streamNode = appendMessage("assistant", "", true);
-  const activeStream: ActiveStream = { sessionId, node: streamNode };
-  setActiveStream(activeStream);
+  const activeStream: ActiveStream = {
+    sessionId,
+    transcript: ensureMessageStream(),
+    node: streamNode,
+    aborting: false,
+  };
+  if (!state.activeStreams.start(activeStream)) {
+    throw new Error("该会话正在回答,请稍后再试");
+  }
+  renderSessions();
+  syncComposerState();
 
   try {
     const completed = await streamQuestion(message, activeStream);
     if (completed) {
-      state.sessionId = completed.id;
       const finalMessage = latestAssistantAfterLastUser(completed.messages);
       renderMarkdownInto(
         streamNode.text,
@@ -811,29 +876,32 @@ async function submitQuestion(question: string): Promise<void> {
       streamNode.thoughtSummary.textContent = "思考过程";
       streamNode.thoughts.open = false;
       streamNode.presentation = null;
-      try {
-        await refreshSessions();
-      } catch (error) {
-        showToast(messageFromUnknown(error, "会话列表刷新失败"));
-      }
     } else {
       settleStreamNode(streamNode);
     }
   } catch (error) {
     handleStreamEvent(
       { event: "error", data: { message: messageFromUnknown(error, "回答失败") } },
-      streamNode,
+      activeStream,
     );
   } finally {
-    setActiveStream(null);
-    elements.input.focus();
+    state.activeStreams.finish(activeStream);
+    renderSessions();
+    syncComposerState();
+    try {
+      await refreshSessions();
+    } catch (error) {
+      showToast(messageFromUnknown(error, "会话列表刷新失败"));
+    }
+    if (state.sessionId === sessionId) elements.input.focus();
   }
 }
 
 async function abortAnswer(): Promise<void> {
-  const activeStream = state.activeStream;
+  const activeStream = selectedActiveStream();
   if (!activeStream) return;
-  elements.sendButton.disabled = true;
+  activeStream.aborting = true;
+  syncComposerState();
   try {
     await api(
       `/api/sessions/${encodeURIComponent(activeStream.sessionId)}/abort`,
@@ -843,7 +911,8 @@ async function abortAnswer(): Promise<void> {
   } catch (error) {
     showToast(messageFromUnknown(error));
   } finally {
-    elements.sendButton.disabled = false;
+    activeStream.aborting = false;
+    syncComposerState();
   }
 }
 
@@ -877,7 +946,7 @@ async function initialize(): Promise<void> {
 
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (state.activeStream) void abortAnswer();
+  if (selectedActiveStream()) void abortAnswer();
   else void submitQuestion(elements.input.value).catch((error) => showToast(messageFromUnknown(error)));
 });
 elements.input.addEventListener("keydown", (event) => {

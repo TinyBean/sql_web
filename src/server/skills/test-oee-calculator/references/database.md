@@ -125,7 +125,7 @@ oee_availability:
 - lot_id(LOT_ID):物料批次号
 - final_state(FINAL_STATE):机台状态
 - step(STEP):步骤
-- date(DATE):日期
+- date(DATE):日期,ISO格式，筛选时请注意日期格式
 - shift(SHIFT):白班夜班的区分
 - time_span(TIME_SPAN):机台状态对应的时间,单位秒
 

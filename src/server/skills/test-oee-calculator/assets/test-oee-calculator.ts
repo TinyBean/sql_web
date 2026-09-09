@@ -19,6 +19,10 @@ export type AvailabilityStateGroup =
 export interface TestOeeSqlExpressions {
   readonly source: TestOeeSqlSource;
   readonly tableAlias: string | null;
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly exclusiveEndDate: string;
+  readonly dateRangePredicate: string;
   readonly lotPredicate: string;
   readonly kindExpression: string;
   readonly availabilityStateExpression?: string;
@@ -139,6 +143,7 @@ export const ST_PLATFORM_MACHINE_IDS = [
 const VALID_LOT_PREFIX_SET = new Set<string>(VALID_OEE_LOT_PREFIXES);
 const ST_PLATFORM_MACHINE_SET = new Set<string>(ST_PLATFORM_MACHINE_IDS);
 const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 const IDLE_NO_TASK_STATES = new Set([
   "IDLE_NoTask(xAllBundleReachable)",
   "IDLE_NoTask(xLeads)",
@@ -243,6 +248,27 @@ function sqlColumn(name: string, tableAlias: string | undefined): string {
   return tableAlias === undefined ? name : `${tableAlias}.${name}`;
 }
 
+function parseIsoDate(value: string, name: string): Date {
+  if (!ISO_DATE_PATTERN.test(value)) {
+    throw new TestOeeInputError(`${name} 必须是 YYYY-MM-DD 格式`);
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new TestOeeInputError(`${name} 必须是有效的自然日`);
+  }
+  return parsed;
+}
+
+function nextIsoDate(value: string): string {
+  const parsed = parseIsoDate(value, "end_date");
+  parsed.setUTCDate(parsed.getUTCDate() + 1);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function dateRangeSql(dateColumn: string, startDate: string, exclusiveEndDate: string): string {
+  return `substr(${dateColumn},1,10)>=${quoteSqlLiteral(startDate)} AND substr(${dateColumn},1,10)<${quoteSqlLiteral(exclusiveEndDate)}`;
+}
+
 function validLotSql(column: string): string {
   return `substr(${column},1,1) IN (${VALID_OEE_LOT_PREFIXES.map(quoteSqlLiteral).join(",")})`;
 }
@@ -282,16 +308,29 @@ function availabilityStateSql(finalStateColumn: string, lotIdColumn: string): st
 
 export function getTestOeeSqlExpressions(
   source: TestOeeSqlSource,
+  startDate: string,
+  endDate: string,
   tableAlias?: string,
 ): TestOeeSqlExpressions {
   if (tableAlias !== undefined && !SQL_IDENTIFIER_PATTERN.test(tableAlias)) {
     throw new TestOeeInputError("table_alias 必须是合法的 SQL 标识符");
   }
+  parseIsoDate(startDate, "start_date");
+  parseIsoDate(endDate, "end_date");
+  if (startDate > endDate) {
+    throw new TestOeeInputError("start_date 不能晚于 end_date");
+  }
+  const exclusiveEndDate = nextIsoDate(endDate);
+  const dateColumn = sqlColumn("date", tableAlias);
   const lotIdColumn = sqlColumn("lot_id", tableAlias);
   if (source === "availability") {
     return {
       source,
       tableAlias: tableAlias ?? null,
+      startDate,
+      endDate,
+      exclusiveEndDate,
+      dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
       lotPredicate: validLotSql(lotIdColumn),
       kindExpression: kindSql(
         sqlColumn("step", tableAlias),
@@ -306,6 +345,10 @@ export function getTestOeeSqlExpressions(
   return {
     source,
     tableAlias: tableAlias ?? null,
+    startDate,
+    endDate,
+    exclusiveEndDate,
+    dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
     lotPredicate: validLotSql(lotIdColumn),
     kindExpression: kindSql(
       sqlColumn("step_id", tableAlias),

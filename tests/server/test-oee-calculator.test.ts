@@ -147,8 +147,18 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   for (const row of availabilityCases) {
     insertAvailability.run(row.lotId, row.step, row.machineId, row.finalState);
   }
-  const availability = getTestOeeSqlExpressions("availability", "a");
+  const availability = getTestOeeSqlExpressions(
+    "availability",
+    "2026-08-31",
+    "2026-09-06",
+    "a",
+  );
   assert.ok(availability.availabilityStateExpression);
+  assert.equal(availability.exclusiveEndDate, "2026-09-07");
+  assert.equal(
+    availability.dateRangePredicate,
+    "substr(a.date,1,10)>='2026-08-31' AND substr(a.date,1,10)<'2026-09-07'",
+  );
   const availabilityRows = database.prepare(`SELECT
     ${availability.lotPredicate} AS eligible_lot,
     ${availability.kindExpression} AS kind,
@@ -169,7 +179,7 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
     "INSERT INTO dut_rows (lot_id,step_id,machine_id) VALUES(?,?,?)",
   );
   for (const row of dutCases) insertDut.run(row.lotId, row.step, row.machineId);
-  const dut = getTestOeeSqlExpressions("dut", "d");
+  const dut = getTestOeeSqlExpressions("dut", "2026-08-31", "2026-09-06", "d");
   assert.equal(dut.availabilityStateExpression, undefined);
   const dutRows = database.prepare(`SELECT
     ${dut.lotPredicate} AS eligible_lot,
@@ -183,9 +193,47 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   database.close();
 
   assert.throws(
-    () => getTestOeeSqlExpressions("availability", "a;DROP_TABLE"),
+    () => getTestOeeSqlExpressions(
+      "availability",
+      "2026-08-31",
+      "2026-09-06",
+      "a;DROP_TABLE",
+    ),
     /合法的 SQL 标识符/u,
   );
+  assert.throws(
+    () => getTestOeeSqlExpressions("availability", "2026-02-30", "2026-03-01"),
+    /有效的自然日/u,
+  );
+  assert.throws(
+    () => getTestOeeSqlExpressions("availability", "2026-09-07", "2026-09-06"),
+    /不能晚于/u,
+  );
+});
+
+test("generated date predicate includes the complete end date", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`CREATE TABLE rows (date TEXT NOT NULL);
+    INSERT INTO rows(date) VALUES
+      ('2026-08-30T23:59:59.999Z'),
+      ('2026-08-31T00:00:00.000Z'),
+      ('2026-09-06T00:00:00.000Z'),
+      ('2026-09-06T23:59:59.999Z'),
+      ('2026-09-07T00:00:00.000Z');`);
+  const expression = getTestOeeSqlExpressions(
+    "availability",
+    "2026-08-31",
+    "2026-09-06",
+  );
+  const dates = database.prepare(
+    `SELECT date FROM rows WHERE ${expression.dateRangePredicate} ORDER BY date`,
+  ).all().map((row) => ({ date: row["date"] }));
+  assert.deepEqual(dates, [
+    { date: "2026-08-31T00:00:00.000Z" },
+    { date: "2026-09-06T00:00:00.000Z" },
+    { date: "2026-09-06T23:59:59.999Z" },
+  ]);
+  database.close();
 });
 
 test("calculates configurable ratios and products without rounding or repair", () => {
@@ -248,9 +296,12 @@ test("publishes only composable database-free Skill tools", async () => {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const sqlExpressions = await executeTool(byName.get("get_sql_expressions")!, {
     source: "dut",
+    start_date: "2026-08-31",
+    end_date: "2026-09-06",
     table_alias: "d",
-  }) as { kindExpression: string };
+  }) as { kindExpression: string; dateRangePredicate: string };
   assert.match(sqlExpressions.kindExpression, /d\.step_id/u);
+  assert.match(sqlExpressions.dateRangePredicate, /substr\(d\.date,1,10\)/u);
   assert.deepEqual(await executeTool(byName.get("validate_lot_ids")!, {
     lot_ids: ["P1", "X1"],
   }), [

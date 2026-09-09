@@ -52,6 +52,14 @@ Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；D
 - Yield 包含所有 `test_stage`，包括 `1st`、`Rescreen` 和 `2ndRescreen`。
 - 不限制比率上限，也不静默修正源数据值。
 
+### 日期过滤与数据覆盖
+
+两张事实表的 `date` 是 ISO 日期或时间戳文本。所有查询必须原样使用 `test_oee_calculator__get_sql_expressions` 为本次范围返回的 `dateRangePredicate`。该谓词通过日期前缀和“开始日（含）至结束日次日（不含）”表达闭区间，能包含结束日全天。
+
+禁止直接将时间戳文本写成 `date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'`；这种写法会漏掉结束日带时间部分的记录。
+
+计算前必须按数据源检查范围内每个自然日的行数。日期缺失或某个组成项无数据时，在结果中列出缺失日期并说明：默认分母仍按所选全部自然日计算，因此缺失数据可能使结果偏低。不得把“查询范围正确”和“数据覆盖完整”混为一谈。
+
 对每一种 MT/ST 类型：
 
 ```text

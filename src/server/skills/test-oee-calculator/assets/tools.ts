@@ -23,11 +23,19 @@ export function createTools(): ToolDefinition[] {
     name: "get_sql_expressions",
     label: "获取 Test OEE SQL 规则",
     description:
-      "返回 Test OEE 固定关键规则对应的 SQLite 表达式，供 execute_sql 查询复用。工具只生成 LOT 过滤、MT/ST 分类和 Availability 状态分类片段，不连接或查询数据库，也不固定日期、聚合方式或最终公式。",
+      "返回 Test OEE 固定关键规则和闭区间日期范围对应的 SQLite 表达式，供 execute_sql 原样复用。日期谓词兼容 date 字段中的 ISO 时间戳并包含 end_date 全天；工具不连接或查询数据库，也不固定聚合方式或最终公式。",
     executionMode: "sequential",
     parameters: Type.Object({
       source: Type.Union([Type.Literal("availability"), Type.Literal("dut")], {
         description: "选择 oee_availability 或 oee_dut_utilization 对应的字段映射。",
+      }),
+      start_date: Type.String({
+        description: "查询闭区间的开始自然日，格式 YYYY-MM-DD。",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      }),
+      end_date: Type.String({
+        description: "查询闭区间的结束自然日，格式 YYYY-MM-DD；返回的谓词会包含该日全天。",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
       }),
       table_alias: Type.Optional(Type.String({
         description: "SQL 查询中使用的可选表别名，例如 a 或 d。",
@@ -38,7 +46,12 @@ export function createTools(): ToolDefinition[] {
     }),
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
-      const result = getTestOeeSqlExpressions(params.source, params.table_alias);
+      const result = getTestOeeSqlExpressions(
+        params.source,
+        params.start_date,
+        params.end_date,
+        params.table_alias,
+      );
       signal?.throwIfAborted();
       return jsonResult(result);
     },

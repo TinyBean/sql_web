@@ -97,10 +97,12 @@ test("defaults inline queries to 200 rows and streams bounded JSON exports", (t)
   const rowLimited = database.exportQueryJson(
     "SELECT value FROM json_each('[1,2,3]') ORDER BY value",
     [],
-    { fileDescriptor: rowDescriptor, maxRows: 2, maxBytes: 10_000 },
+    { fileDescriptor: rowDescriptor, maxRows: 2, maxBytes: 10_000, previewRows: 1 },
   );
   closeSync(rowDescriptor);
   assert.deepEqual(rowLimited, {
+    columns: ["value"],
+    previewRows: [{ value: 1 }],
     rowCount: 2,
     byteCount: readFileSync(rowLimitedPath).byteLength,
     truncated: true,

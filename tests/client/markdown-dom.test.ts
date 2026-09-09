@@ -40,6 +40,19 @@ function generatedImages(root: HTMLElement): HTMLImageElement[] {
   )];
 }
 
+test("requires double tildes for strikethrough", () => {
+  const root = container();
+
+  renderMarkdownInto(
+    root,
+    "离散度为 5.52%~33.35%，运行秒数为 3.3~4.5 万秒；~~旧口径~~。",
+  );
+
+  assert.equal(root.textContent, "离散度为 5.52%~33.35%，运行秒数为 3.3~4.5 万秒；旧口径。\n");
+  assert.equal(root.querySelectorAll("del").length, 1);
+  assert.equal(root.querySelector("del")?.textContent, "旧口径");
+});
+
 test("renders only a first exact image from the current message cache", () => {
   const current: ChatImage = {
     id: "ci-current-call",

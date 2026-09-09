@@ -102,7 +102,6 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "validate_lot_ids",
     "classify_mt_st",
     "classify_availability_states",
-    "calculate_ratio_product",
   ]) {
     assert.equal(piSession.getToolDefinition(`test_oee_calculator__${name}`), undefined);
   }
@@ -113,6 +112,9 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.ok(skillLocation);
   const skillContent = readFileSync(skillLocation, "utf8");
   assert.match(skillContent, /references\/database\.md/u);
+  assert.match(skillContent, /snapshot_rows/u);
+  assert.match(skillContent, /list\[dict\]/u);
+  assert.match(skillContent, /严禁再用 `zip\(columns, row\)`/u);
   const databaseReference = readFileSync(
     path.join(path.dirname(skillLocation), "references", "database.md"),
     "utf8",
@@ -169,7 +171,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.ok(piSession.getToolDefinition("test_oee_calculator__validate_lot_ids"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_mt_st"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_availability_states"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__calculate_ratio_product"));
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_ratio_product"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"), undefined);
   assert.deepEqual(piSession.getActiveToolNames(), [
@@ -180,7 +182,6 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "test_oee_calculator__validate_lot_ids",
     "test_oee_calculator__classify_mt_st",
     "test_oee_calculator__classify_availability_states",
-    "test_oee_calculator__calculate_ratio_product",
   ]);
   await readTool.execute(
     "read-skill-again",
@@ -262,7 +263,10 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal(listed.length, 1);
   assert.equal(listed[0]?.id, created.id);
 
-  artifacts.forSession(created.id).createJson((fileDescriptor) => writeSync(fileDescriptor, "{}"));
+  artifacts.forSession(created.id).createDataSnapshot("session-data", (fileDescriptor) => {
+    writeSync(fileDescriptor, '{"columns":[],"rows":[],"rowCount":0,"truncated":false}');
+    return { columns: [], rowCount: 0 };
+  });
   assert.equal(existsSync(path.join(directory, "artifacts", created.id)), true);
   await store.delete(created.id);
   assert.equal(existsSync(path.join(directory, "artifacts", created.id)), false);

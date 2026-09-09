@@ -2,11 +2,9 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  calculateRatioProduct,
   classifyAvailabilityStates,
   classifyTestOeeKinds,
   getTestOeeSqlExpressions,
-  MAX_RATIO_ITEMS,
   MAX_RULE_BATCH_SIZE,
   validateTestOeeLotIds,
 } from "./test-oee-calculator.ts";
@@ -134,71 +132,10 @@ export function createTools(): ToolDefinition[] {
     },
   });
 
-  const ratioSchema = Type.Object({
-    name: Type.String({ description: "比率名称。", minLength: 1 }),
-    numerator: Type.Number({ description: "原始分子。" }),
-    denominator: Type.Number({ description: "原始分母。" }),
-    include_in_product: Type.Optional(Type.Boolean({
-      description: "是否参与最终乘积，默认 true。",
-    })),
-  });
-  const factorSchema = Type.Object({
-    name: Type.String({ description: "常量因子名称。", minLength: 1 }),
-    value: Type.Number({ description: "常量因子的原始值。" }),
-    include_in_product: Type.Optional(Type.Boolean({
-      description: "是否参与最终乘积，默认 true。",
-    })),
-  });
-  const calculateRatioProductTool = defineTool({
-    name: "calculate_ratio_product",
-    label: "计算比率与乘积",
-    description:
-      "使用 execute_sql 返回的聚合值计算任意命名比率及其可配置乘积。不会套用固定 OEE 公式、舍入、封顶或修正源值；分母为零时比率为 null。",
-    executionMode: "sequential",
-    parameters: Type.Object({
-      ratios: Type.Array(ratioSchema, {
-        description: "要计算的分子/分母项目。",
-        minItems: 1,
-        maxItems: MAX_RATIO_ITEMS,
-      }),
-      factors: Type.Optional(Type.Array(factorSchema, {
-        description: "可选的常量乘数，例如默认口径中的 Test Time Performance=1。",
-        maxItems: MAX_RATIO_ITEMS,
-      })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      signal?.throwIfAborted();
-      const result = calculateRatioProduct({
-        ratios: params.ratios.map((ratio) => ({
-          name: ratio.name,
-          numerator: ratio.numerator,
-          denominator: ratio.denominator,
-          ...(ratio.include_in_product === undefined
-            ? {}
-            : { includeInProduct: ratio.include_in_product }),
-        })),
-        ...(params.factors === undefined
-          ? {}
-          : {
-            factors: params.factors.map((factor) => ({
-              name: factor.name,
-              value: factor.value,
-              ...(factor.include_in_product === undefined
-                ? {}
-                : { includeInProduct: factor.include_in_product }),
-            })),
-          }),
-      });
-      signal?.throwIfAborted();
-      return jsonResult(result);
-    },
-  });
-
   return [
     getSqlExpressionsTool,
     validateLotIdsTool,
     classifyMtStTool,
     classifyAvailabilityStatesTool,
-    calculateRatioProductTool,
   ];
 }

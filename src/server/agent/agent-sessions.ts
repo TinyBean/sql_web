@@ -95,11 +95,13 @@ export class SessionBusyError extends Error {
 function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
   const codeInterpreterRules = codeInterpreterAvailable
     ? `
-8. 少量查询结果优先使用 execute_sql 的默认 inline 模式。需要对大量明细做额外计算或渲染时,使用 output_format="json_file",再把返回的 fileUri 原样传给 code_interpreter.input_json。
-9. 只有 SQL 和当前时间工具无法完成精确计算、统计方法或 PNG 渲染时才调用 code_interpreter。
-10. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
-11. 沙箱已经为 Matplotlib 配置好简体中文字体,普通中文标题和坐标文字无需设置字体。matplotlib_chinese_font(...) 和 chinese_font(...) 是沙箱预注入的全局函数,不是 Python 模块,禁止 import 或 from import,需要显式字体对象时只能直接调用;Matplotlib 使用 fontproperties=matplotlib_chinese_font(12, bold=True),Pillow 使用 font=chinese_font(20, bold=True)。不得硬编码 SimHei 等字体族。
-12. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是不超过 24 个字符的简短具体英文名称,例如 oee-ranking 或 availability-trend;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
+8. 少量查询结果优先使用 execute_sql。优先让 SQLite 在同一条查询中完成过滤、聚合、比率和乘积;不要把数据库查询结果复制到其他工具参数或代码数据字面量中。
+9. 只有同一条 SQL 无法完成所需统计或需要 PNG 渲染时才调用 code_interpreter。先调用 execute_sql 并用 save_as 保存简短有意义的会话级数据快照,再把工具返回的规范逻辑名称传入 code_interpreter.snapshot;不得把 SQL 或预览行复制进 Python。查询被截断时应先聚合、过滤或分批后重试。
+10. 传入 snapshot 时,优先直接遍历预注入的 snapshot_rows;它固定是 list[dict],每一行已经是对象,使用 row["列名"] 取值,严禁再用 zip(columns,row) 重建。input_data 同时支持 input_data.database 和 input_data["database"],其中 database 包含 columns、rows、rowCount 和 truncated。未传 snapshot 时 input_data.database 为 None、snapshot_rows 为空,仅用于不依赖数据库的纯 Python。input_data.user 是用户明确提供的可选 user_input。数据库事实只能来自快照;用户参数只能来自 input_data.user;代码字面量只用于公式常量、单位换算、标签和绘图设置。后续计算或绘图应复用已有快照,仅在需要刷新数据库事实时重新执行 SQL 并覆盖同名快照。
+11. 每次 Python 执行必须且只能调用一次 emit_result(...)。可传 JSON 值或 summary、metrics、intermediates、data、notes 关键字;缺少 summary 时运行时补为“计算完成”,notes 字符串会转为单元素数组。最终回答中的计算数值必须来自结构化 result;print() 只用于调试日志且不能替代 emit_result。对 min、max、首项索引和除法必须先处理空集合或零分母。回答应简述数据来源、查询范围、公式和关键中间量,完整 SQL 与代码无需默认展开。
+12. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
+13. 沙箱已经为 Matplotlib 配置好简体中文字体,普通中文标题和坐标文字无需设置字体。matplotlib_chinese_font(...) 和 chinese_font(...) 是沙箱预注入的全局函数,不是 Python 模块,禁止 import 或 from import,需要显式字体对象时只能直接调用;Matplotlib 使用 fontproperties=matplotlib_chinese_font(12, bold=True),Pillow 使用 font=chinese_font(20, bold=True)。不得硬编码 SimHei 等字体族。
+14. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是不超过 24 个字符的简短具体英文名称,例如 oee-ranking 或 availability-trend;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
     : "";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
@@ -387,12 +389,50 @@ function errorHasCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
-function codeInterpreterLogFields(result: unknown): Readonly<Record<string, unknown>> {
+function codeInterpreterRejectionMessage(message: string): string {
+  return message.split("\n重试提示：", 1)[0] ?? message;
+}
+
+function codeInterpreterRejectionReason(result: unknown): string | undefined {
+  if (result instanceof Error) {
+    const message = codeInterpreterRejectionMessage(result.message);
+    if (/已移除 input_json/u.test(message)) return "legacy_input_removed";
+    if (/不再接收 query/u.test(message)) return "legacy_query_removed";
+    if (/数据快照|可用快照/u.test(message)) return "snapshot_invalid";
+    if (/emit_result/u.test(message)) return "structured_result_invalid";
+    if (/user_input/u.test(message)) return "user_input_invalid";
+    return "execution_failed";
+  }
+  if (typeof result !== "object" || result === null || !("content" in result) ||
+      !Array.isArray(result.content)) return undefined;
+  const text = codeInterpreterRejectionMessage(result.content
+    .map((part) => (
+      typeof part === "object" && part !== null && "text" in part && typeof part.text === "string"
+        ? part.text
+        : ""
+    ))
+    .join(" "));
+  if (/已移除 input_json/u.test(text)) return "legacy_input_removed";
+  if (/不再接收 query/u.test(text)) return "legacy_query_removed";
+  if (/数据快照|可用快照/u.test(text)) return "snapshot_invalid";
+  if (/emit_result/u.test(text)) return "structured_result_invalid";
+  if (/user_input/u.test(text)) return "user_input_invalid";
+  return text ? "execution_failed" : undefined;
+}
+
+function codeInterpreterLogFields(
+  toolName: string,
+  result: unknown,
+): Readonly<Record<string, unknown>> {
+  if (toolName !== "code_interpreter") return {};
   if (
     typeof result !== "object" || result === null || !("details" in result) ||
     typeof result.details !== "object" || result.details === null ||
     !("kind" in result.details) || result.details.kind !== "code_interpreter"
-  ) return {};
+  ) {
+    const rejectionReason = codeInterpreterRejectionReason(result);
+    return rejectionReason === undefined ? {} : { rejectionReason };
+  }
   const details = result.details;
   const stdoutBytes = "stdout" in details && typeof details.stdout === "string"
     ? Buffer.byteLength(details.stdout)
@@ -401,7 +441,33 @@ function codeInterpreterLogFields(result: unknown): Readonly<Record<string, unkn
     ? Buffer.byteLength(details.stderr)
     : 0;
   const imageCount = "images" in details && Array.isArray(details.images) ? details.images.length : 0;
-  return { stdoutBytes, stderrBytes, imageCount };
+  const provenance = "provenance" in details && typeof details.provenance === "object" &&
+      details.provenance !== null
+    ? details.provenance
+    : null;
+  const rowCount = provenance && "rowCount" in provenance && typeof provenance.rowCount === "number"
+    ? provenance.rowCount
+    : undefined;
+  const inputBytes = provenance && "byteCount" in provenance && typeof provenance.byteCount === "number"
+    ? provenance.byteCount
+    : undefined;
+  const hasUserInput = provenance && "hasUserInput" in provenance &&
+      typeof provenance.hasUserInput === "boolean"
+    ? provenance.hasUserInput
+    : undefined;
+  const dataSource = provenance && "source" in provenance &&
+      (provenance.source === "sqlite" || provenance.source === "none")
+    ? provenance.source
+    : undefined;
+  return {
+    stdoutBytes,
+    stderrBytes,
+    imageCount,
+    ...(rowCount === undefined ? {} : { rowCount }),
+    ...(inputBytes === undefined ? {} : { inputBytes }),
+    ...(hasUserInput === undefined ? {} : { hasUserInput }),
+    ...(dataSource === undefined ? {} : { dataSource }),
+  };
 }
 
 export class AgentSessionStore {
@@ -761,7 +827,7 @@ export class AgentSessionStore {
         toolCallId: event.toolCallId,
         toolName: event.toolName,
         isError: event.isError,
-        ...codeInterpreterLogFields(event.result),
+        ...codeInterpreterLogFields(event.toolName, event.result),
         ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }),
       };
       if (event.isError) this.#logger.warn("agent.tool.completed", fields);

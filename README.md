@@ -212,7 +212,7 @@ npm test
 | `PORT` | `3000` | HTTP 端口 |
 | `SQL_WEB_DB_PATH` | `.data/database/oee.sqlite` | SQLite 文件位置 |
 | `SQL_WEB_SESSION_DIR` | `.data/sessions` | Agent session 目录 |
-| `SQL_WEB_ARTIFACT_DIR` | `.data/artifacts` | 会话级 SQL JSON 产物目录 |
+| `SQL_WEB_ARTIFACT_DIR` | `.data/artifacts` | 会话级数据快照及历史会话产物目录 |
 | `SQL_WEB_PYTHON_PATH` | `/usr/bin/python3` | 代码解释器使用的 Python |
 | `SQL_WEB_BWRAP_PATH` | `/usr/bin/bwrap` | bubblewrap 可执行文件 |
 | `SQL_WEB_PRLIMIT_PATH` | `/usr/bin/prlimit` | 资源限制工具 |
@@ -227,22 +227,23 @@ npm test
 ## 安全边界
 
 - `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝。
-- 默认 `output_format="inline"` 直接返回最多 200 行。`output_format="json_file"` 会流式写入最多 100,000 行或 32 MiB 的 JSON，并返回当前会话专属的 `artifact://` 地址。
+- `execute_sql` 默认直接返回最多 200 行；需要 Python 计算、统计或绘图时，使用可选 `save_as` 将最多 100,000 行、32 MiB 的完整结果保存为会话级冻结快照，同时只返回元数据和最多 20 行预览。后续通过逻辑名称引用快照，不经过模型搬运完整结果。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
-- `test-oee-calculator` 被加载后，当前会话才会注册 `test_oee_calculator__calculate_test_oee` 和 `test_oee_calculator__classify_test_oee_record`；计算器、数据库连接辅助模块和工具定义位于 Skill 的 `assets/`，可执行 CLI 位于 `scripts/`，数据库结构、字段含义和业务规则位于 `references/`。计算工具每次执行都建立独立的只读连接并在结束时关闭，分类工具不连接数据库。
+- `test-oee-calculator` 被加载后，当前会话才会注册 SQL 表达式、LOT 校验、MT/ST 分类和 Availability 状态分类工具；这些工具不连接数据库。数据库派生的比率与乘积必须在同一条 SQL 或可信的 `code_interpreter` 调用中完成，纯比率计算器仅保留为规则测试基准。
 - 新增 Skill 必须沿用同一目录约定：根目录只放 `SKILL.md` 等元数据，直接执行的脚本放入 `scripts/`，静态资源和代码放入 `assets/`，按需读取的说明文档放入 `references/`。Catalog 只从 `assets/tools.js` 或 `assets/tools.ts` 加载 Skill 专有工具，不兼容根目录 `tools.*`。
 - Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 不接收或持有数据库连接；启动时只扫描元数据并调用无参工具工厂进行校验，不会把专有工具注册到全局或暴露给新会话。需要数据的业务 Skill 自主管理只读连接。
-- `code_interpreter.input_json` 接受内联 JSON 或同一会话的 `artifact://` 地址，输入在 Python 中为 `input_data`，文本通过 `print()` 返回。
+- `code_interpreter` 接收 `code`、可选的 `snapshot` 逻辑名称和可选 `user_input`，不接收或执行 SQL。传入快照时，服务端把该会话的完整冻结数据只读挂载为 `input_data.database`，并提供 `snapshot_rows` 作为 `list[dict]` 行对象列表；每行可用 `row["列名"]` 访问，无需也不应再与 `columns` 做 `zip`。`input_data` 同时支持属性和方括号访问。未传快照时 `input_data.database` 为 `None`、`snapshot_rows` 为空，可执行不依赖数据库的纯 Python。`user_input` 单独出现在 `input_data.user`，只用于用户明确提供的参数。快照查询达到 100,000 行或 32 MiB 上限时不会保存，不允许基于截断数据生成结论。
+  Python 必须且只能调用一次 `emit_result(...)`；可提交 JSON 值或结构化关键字字段，运行时会补充缺失的 `summary`，并把字符串 `notes` 规范化为数组。结构化结果上限为 64 KiB。`print()` 仅作为调试日志，不能替代 `emit_result`；工具结果同时包含查询行数、字节数、截断状态和用户输入标记。
   每张 Matplotlib/Pillow 图片必须通过 `emit_image(value, reference_name)` 显式提交；名称不超过 24 个字符并归一化为小写连字符格式，例如 `OEE Ranking` 变为 `oee-ranking`。未显式提交的 Matplotlib 图不会输出。
   图片使用不含工具调用 UUID 的短引用，例如 `![oee-ranking](/__datalens_generated_image__/ci-oee-ranking)`；同一会话重名时才追加 `-2`、`-3`。图片解析、流式展示和会话恢复只接受这种语义 ID。
   最终正文落库前会复核所有 Markdown 图片；无效地址优先按 Markdown 图片说明与当前回合 `ChatImage.alt` 的精确唯一对应关系修复。重复说明不猜测，也不参与数量兜底；其他唯一候选继续自动纠正，仍有歧义时触发至多一次不可见的模型重写。服务端保留无法确认或重复的原始引用，前端只渲染当前消息缓存中精确匹配且首次出现的图片 ID。
   Matplotlib 已预配置简体中文字体，普通中文标题和坐标文字无需手动指定字体。`matplotlib_chinese_font(...)` 与 `chinese_font(...)` 是沙箱预注入的全局函数而非 Python 模块，不得导入；需要显式字体对象时直接调用，例如 Matplotlib 使用 `fontproperties=matplotlib_chinese_font(12, bold=True)`，Pillow 使用 `font=chinese_font(20, bold=True)`。
 - Python 使用 bubblewrap、seccomp 和 prlimit 隔离：无法访问数据库、项目目录、其他会话产物或网络，并限制执行时间、内存、进程和输出大小。
-- SQL JSON 文件随会话跨轮次、跨重启保留，删除会话时同步删除；文件不通过 HTTP 提供下载。
+- 数据快照使用简短的规范逻辑名称，并在服务端映射到不可见的内部 UUID 文件；同名快照只在新查询完整成功后原子替换。快照可在同一会话的后续计算、绘图和恢复后继续使用，并随会话删除。
 - 基础 system prompt 不包含业务数据库结构或字段含义；这些上下文由 `test-oee-calculator` 的 `references/database.md` 按需提供，数据内容仍必须通过查询工具获取。
 - Agent 递归扫描 `src/server/skills` 并按 Pi 标准格式注入 Skill 名称、描述和入口路径；完整 `SKILL.md` 只在 Agent 根据任务按需读取时进入当前会话上下文。`/skill:<name>` 不会被解析为显式 Skill 调用。
 - 通用 `read` 只能读取扫描到的 Skill 目录，拒绝目录穿越、Skill 外文件和符号链接逃逸。成功读取准确的 `SKILL.md` 后，专有工具才在该会话及当前分支内激活；其他会话不受影响。
-- 代码沙箱只会挂载显式传入的单个 JSON 文件。
+- 代码沙箱只会只读挂载服务端按当前会话和逻辑名称解析的数据快照，以及独立的用户输入 JSON；不接受模型指定的 SQL、宿主路径、artifact URI 或数据正文。
 - 日志不记录用户问题正文、工具参数、查询结果或模型回答正文。
 
 应用仍是本地部署形态，不包含用户登录和租户隔离。正式开放给多用户前，应增加鉴权、限流和独立审计。

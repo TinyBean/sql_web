@@ -15,12 +15,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import type { JsonObject, JsonValue } from "../../shared/contracts.ts";
 import { isGeneratedImageReferenceName } from "../../shared/image-references.ts";
-import type { SessionArtifactStore } from "./artifact-store.ts";
+import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
 
 const MAX_CODE_BYTES = 20_000;
-const MAX_INLINE_INPUT_BYTES = 256 * 1024;
+const MAX_USER_INPUT_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
+const MAX_RESULT_BYTES = 64 * 1024;
+const MAX_DATABASE_INPUT_BYTES = MAX_QUERY_ARTIFACT_BYTES;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 3;
@@ -95,8 +98,31 @@ import json
 import os
 import re
 
-with open("/input/input.json", "r", encoding="utf-8") as input_file:
-    input_data = json.load(input_file)
+with open("/input/database.json", "r", encoding="utf-8") as database_file:
+    raw_database_data = json.load(database_file)
+with open("/input/user.json", "r", encoding="utf-8") as user_file:
+    raw_user_data = json.load(user_file)
+
+class _AttributeDict(dict):
+    """JSON object with both value["key"] and value.key access."""
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+def _attribute_json(value):
+    if isinstance(value, dict):
+        return _AttributeDict((key, _attribute_json(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return [_attribute_json(item) for item in value]
+    return value
+
+database_data = _attribute_json(raw_database_data)
+user_data = _attribute_json(raw_user_data)
+
+input_data = _AttributeDict(database=database_data, user=user_data)
+snapshot_rows = [] if database_data is None else database_data["rows"]
 
 _CJK_REGULAR_FONT_PATH = "/fonts/chinese-regular.otf"
 _CJK_BOLD_FONT_PATH = "/fonts/chinese-bold.otf"
@@ -172,6 +198,61 @@ def _apply_chinese_font_to_figure(figure):
         artist.set_fontproperties(matplotlib_chinese_font(artist.get_fontsize(), bold=bold))
 
 _image_count = 0
+_result_count = 0
+_RESULT_MISSING = object()
+_RESULT_KEYS = {"summary", "metrics", "intermediates", "data", "notes"}
+
+def _json_default(value):
+    item = getattr(value, "item", None)
+    if callable(item):
+        return item()
+    to_list = getattr(value, "tolist", None)
+    if callable(to_list):
+        return to_list()
+    iso_format = getattr(value, "isoformat", None)
+    if callable(iso_format):
+        return iso_format()
+    if value.__class__.__module__ == "decimal" and value.__class__.__name__ == "Decimal":
+        return str(value)
+    raise TypeError(f"{value.__class__.__name__} 不是 JSON 值")
+
+def _normalize_result(value):
+    if not isinstance(value, dict):
+        return {"summary": "计算完成", "data": value}
+    normalized = dict(value)
+    unknown = {key: normalized.pop(key) for key in list(normalized) if key not in _RESULT_KEYS}
+    if unknown:
+        if "data" not in normalized:
+            normalized["data"] = unknown
+        else:
+            normalized["data"] = {"value": normalized["data"], "additional": unknown}
+    summary = normalized.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        normalized["summary"] = "计算完成"
+    notes = normalized.get("notes")
+    if isinstance(notes, str):
+        normalized["notes"] = [notes]
+    elif isinstance(notes, tuple):
+        normalized["notes"] = list(notes)
+    return normalized
+
+def emit_result(value=_RESULT_MISSING, **fields):
+    global _result_count
+    if _result_count != 0:
+        raise RuntimeError("每次代码执行只能调用一次 emit_result")
+    if value is not _RESULT_MISSING and fields:
+        raise TypeError("emit_result 不能同时使用位置值和关键字字段")
+    submitted = fields if value is _RESULT_MISSING else value
+    with open("/work/result.json", "x", encoding="utf-8") as result_file:
+        json.dump(
+            _normalize_result(submitted),
+            result_file,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            default=_json_default,
+        )
+    _result_count = 1
 
 def _normalize_reference_name(value):
     if not isinstance(value, str):
@@ -232,6 +313,8 @@ namespace = {
     "__builtins__": __builtins__,
     "__name__": "__main__",
     "input_data": input_data,
+    "snapshot_rows": snapshot_rows,
+    "emit_result": emit_result,
     "emit_image": emit_image,
     "CJK_FONT_PATH": CJK_FONT_PATH,
     "CJK_BOLD_FONT_PATH": CJK_BOLD_FONT_PATH,
@@ -242,6 +325,8 @@ namespace = {
 with open("/input/code.py", "r", encoding="utf-8") as code_file:
     source = code_file.read()
 exec(compile(source, "<code_interpreter>", "exec"), namespace, namespace)
+if _result_count != 1:
+    raise RuntimeError("代码必须且只能调用一次 emit_result")
 `;
 
 const NETWORK_SYSCALLS_X64 = [
@@ -270,8 +355,43 @@ export interface CodeInterpreterImage {
   readonly referenceName: string;
 }
 
+export interface CodeInterpreterStructuredResult {
+  readonly summary: string;
+  readonly metrics?: JsonObject;
+  readonly intermediates?: JsonObject;
+  readonly data?: JsonValue;
+  readonly notes?: readonly string[];
+}
+
+export interface CodeInterpreterSnapshotInput {
+  readonly name: string;
+  readonly version: string;
+  readonly createdAt: string;
+  readonly databasePath: string;
+  readonly rowCount: number;
+  readonly byteCount: number;
+}
+
+export interface CodeInterpreterInput {
+  readonly snapshot: CodeInterpreterSnapshotInput | null;
+  readonly userInput: JsonObject | null;
+}
+
+export interface CodeInterpreterProvenance {
+  readonly source: "sqlite" | "none";
+  readonly snapshotName: string | null;
+  readonly snapshotVersion: string | null;
+  readonly snapshotCreatedAt: string | null;
+  readonly rowCount: number;
+  readonly byteCount: number;
+  readonly truncated: false;
+  readonly hasUserInput: boolean;
+}
+
 export interface CodeInterpreterDetails {
   readonly kind: "code_interpreter";
+  readonly result: CodeInterpreterStructuredResult;
+  readonly provenance: CodeInterpreterProvenance;
   readonly stdout: string;
   readonly stderr: string;
   readonly stdoutTruncated: boolean;
@@ -490,12 +610,82 @@ function collectImages(workDir: string): CodeInterpreterImage[] {
   return images;
 }
 
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    Object.values(value).every(isJsonValue);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (
+    value === null || typeof value === "string" || typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonObject(value);
+}
+
+function collectStructuredResult(workDir: string): CodeInterpreterStructuredResult {
+  const filename = path.join(workDir, "result.json");
+  let metadata;
+  try {
+    metadata = lstatSync(filename);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      throw new CodeInterpreterError("代码必须且只能调用一次 emit_result");
+    }
+    throw error;
+  }
+  if (
+    !metadata.isFile() || metadata.isSymbolicLink() ||
+    metadata.size < 1 || metadata.size > MAX_RESULT_BYTES
+  ) {
+    throw new CodeInterpreterError(`emit_result 结果必须是小于等于 ${MAX_RESULT_BYTES} 字节的 JSON 文件`);
+  }
+
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(readFileSync(filename, "utf8")) as unknown;
+  } catch {
+    throw new CodeInterpreterError("emit_result 生成了无效 JSON");
+  }
+  if (!isJsonObject(decoded)) {
+    throw new CodeInterpreterError("emit_result 必须接收 JSON 对象");
+  }
+  const allowedKeys = new Set(["summary", "metrics", "intermediates", "data", "notes"]);
+  if (Object.keys(decoded).some((key) => !allowedKeys.has(key))) {
+    throw new CodeInterpreterError(
+      "emit_result 只允许 summary、metrics、intermediates、data 和 notes 字段",
+    );
+  }
+  if (typeof decoded["summary"] !== "string" || !decoded["summary"].trim()) {
+    throw new CodeInterpreterError("emit_result.summary 必须是非空字符串");
+  }
+  if (decoded["metrics"] !== undefined && !isJsonObject(decoded["metrics"])) {
+    throw new CodeInterpreterError("emit_result.metrics 必须是 JSON 对象");
+  }
+  if (decoded["intermediates"] !== undefined && !isJsonObject(decoded["intermediates"])) {
+    throw new CodeInterpreterError("emit_result.intermediates 必须是 JSON 对象");
+  }
+  if (decoded["data"] !== undefined && !isJsonValue(decoded["data"])) {
+    throw new CodeInterpreterError("emit_result.data 必须是 JSON 值");
+  }
+  if (
+    decoded["notes"] !== undefined &&
+    (!Array.isArray(decoded["notes"]) || !decoded["notes"].every((note) => typeof note === "string"))
+  ) {
+    throw new CodeInterpreterError("emit_result.notes 必须是字符串数组");
+  }
+  return decoded as unknown as CodeInterpreterStructuredResult;
+}
+
 export function formatCodeInterpreterResult(
   details: CodeInterpreterDetails,
   imageReferences: readonly CodeInterpreterImageReference[] = [],
 ): string {
   return JSON.stringify({
-    stdout: details.stdout || "(no stdout)",
+    result: details.result,
+    provenance: details.provenance,
+    ...(details.stdout ? { stdout: details.stdout } : {}),
     ...(details.stderr ? { stderr: details.stderr } : {}),
     stdoutTruncated: details.stdoutTruncated,
     stderrTruncated: details.stderrTruncated,
@@ -503,6 +693,40 @@ export function formatCodeInterpreterResult(
     imageDelivery: details.images.length ? "attached_to_answer" : "none",
     ...(imageReferences.length ? { imageReferences } : {}),
   });
+}
+
+function assertSnapshotInput(snapshot: CodeInterpreterSnapshotInput): void {
+  if (!snapshot.name || !snapshot.version || Number.isNaN(Date.parse(snapshot.createdAt))) {
+    throw new CodeInterpreterError("数据快照元数据无效");
+  }
+  if (!Number.isInteger(snapshot.rowCount) || snapshot.rowCount < 0) {
+    throw new CodeInterpreterError("数据库输入行数无效");
+  }
+  if (
+    !Number.isInteger(snapshot.byteCount) || snapshot.byteCount < 1 ||
+    snapshot.byteCount > MAX_DATABASE_INPUT_BYTES
+  ) {
+    throw new CodeInterpreterError("数据库输入大小无效");
+  }
+  let metadata;
+  try {
+    metadata = lstatSync(snapshot.databasePath);
+  } catch {
+    throw new CodeInterpreterError("数据库输入文件不存在");
+  }
+  if (
+    !metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== snapshot.byteCount ||
+    metadata.size > MAX_DATABASE_INPUT_BYTES
+  ) {
+    throw new CodeInterpreterError("数据库输入文件无效");
+  }
+}
+
+function pythonRetryHint(input: CodeInterpreterInput): string {
+  const databaseHint = input.snapshot === null
+    ? "本次未传数据快照，input_data.database 为 None，snapshot_rows 为空列表。"
+    : "snapshot_rows 是 list[dict]；每行已经是对象，请直接使用 row['列名']，不要再执行 zip(columns, row)。input_data 同时支持方括号和属性访问。";
+  return `${databaseHint} 最终结果请调用一次 emit_result(...)；notes 可传字符串或字符串数组。`;
 }
 
 export class CodeInterpreterRuntime {
@@ -582,13 +806,19 @@ export class CodeInterpreterRuntime {
           "    raise RuntimeError('sandbox isolation probe failed')",
           "image = Image.new('RGB', (8, 8), 'white')",
           "emit_image(image, 'sandbox-probe')",
+          "emit_result({'summary': 'sandbox ok', 'metrics': {'sandbox': 'ok'}})",
           "print(json.dumps({'sandbox': 'ok'}))",
         ].join("\n"),
-        "{}",
-        undefined,
+        {
+          snapshot: null,
+          userInput: null,
+        },
         undefined,
       );
-      if (!probe.details.stdout.includes('"sandbox": "ok"') || probe.details.images.length !== 1) {
+      if (
+        !probe.details.stdout.includes('"sandbox": "ok"') || probe.details.images.length !== 1 ||
+        probe.details.result.summary !== "sandbox ok"
+      ) {
         throw new CodeInterpreterError("沙箱自检未返回预期结果");
       }
       return runtime;
@@ -601,8 +831,7 @@ export class CodeInterpreterRuntime {
 
   async execute(
     code: string,
-    inputJson: string | undefined,
-    artifacts: SessionArtifactStore | undefined,
+    input: CodeInterpreterInput,
     signal: AbortSignal | undefined,
   ): Promise<CodeInterpreterExecution> {
     if (
@@ -614,6 +843,11 @@ export class CodeInterpreterRuntime {
     if (Buffer.byteLength(code, "utf8") > MAX_CODE_BYTES) {
       throw new CodeInterpreterError(`Python 代码不能超过 ${MAX_CODE_BYTES} 字节`);
     }
+    if (input.snapshot !== null) assertSnapshotInput(input.snapshot);
+    const userInputJson = JSON.stringify(input.userInput);
+    if (Buffer.byteLength(userInputJson, "utf8") > MAX_USER_INPUT_BYTES) {
+      throw new CodeInterpreterError(`user_input 不能超过 ${MAX_USER_INPUT_BYTES} 字节`);
+    }
     signal?.throwIfAborted();
 
     const executionDir = mkdtempSync(path.join(tmpdir(), "sql-web-code-exec-"));
@@ -624,25 +858,12 @@ export class CodeInterpreterRuntime {
       mkdirSync(inputDir, { mode: 0o700 });
       mkdirSync(workDir, { mode: 0o700 });
       const codePath = path.join(inputDir, "code.py");
+      const emptyDatabasePath = path.join(inputDir, "database.json");
+      const userInputPath = path.join(inputDir, "user.json");
       writeFileSync(codePath, code, { mode: 0o600 });
-
-      let inputPath: string;
-      if (inputJson?.startsWith("artifact://")) {
-        if (!artifacts) throw new CodeInterpreterError("当前执行没有可用的会话查询文件");
-        inputPath = artifacts.resolveJsonUri(inputJson);
-      } else {
-        const inline = inputJson ?? "null";
-        if (Buffer.byteLength(inline, "utf8") > MAX_INLINE_INPUT_BYTES) {
-          throw new CodeInterpreterError(`内联 input_json 不能超过 ${MAX_INLINE_INPUT_BYTES} 字节`);
-        }
-        try {
-          JSON.parse(inline);
-        } catch {
-          throw new CodeInterpreterError("input_json 不是有效 JSON 或 artifact:// 文件地址");
-        }
-        inputPath = path.join(inputDir, "input.json");
-        writeFileSync(inputPath, inline, { mode: 0o600 });
-      }
+      if (input.snapshot === null) writeFileSync(emptyDatabasePath, "null", { mode: 0o600 });
+      writeFileSync(userInputPath, userInputJson, { mode: 0o600 });
+      const databasePath = input.snapshot?.databasePath ?? emptyDatabasePath;
 
       filterDescriptor = openSync(this.#seccompPath, "r");
       const args = [
@@ -704,8 +925,11 @@ export class CodeInterpreterRuntime {
         codePath,
         "/input/code.py",
         "--ro-bind",
-        inputPath,
-        "/input/input.json",
+        databasePath,
+        "/input/database.json",
+        "--ro-bind",
+        userInputPath,
+        "/input/user.json",
         "--bind",
         workDir,
         "/work",
@@ -756,10 +980,23 @@ export class CodeInterpreterRuntime {
       if (processResult.exitCode !== 0) {
         const diagnostic = processResult.stderr.text.trim() ||
           `进程被 ${processResult.signal ?? `退出码 ${processResult.exitCode}`} 终止`;
-        throw new CodeInterpreterError(`Python 执行失败：${diagnostic}`);
+        throw new CodeInterpreterError(
+          `Python 执行失败：${diagnostic}\n重试提示：${pythonRetryHint(input)}`,
+        );
       }
       const details: CodeInterpreterDetails = {
         kind: "code_interpreter",
+        result: collectStructuredResult(workDir),
+        provenance: {
+          source: input.snapshot === null ? "none" : "sqlite",
+          snapshotName: input.snapshot?.name ?? null,
+          snapshotVersion: input.snapshot?.version ?? null,
+          snapshotCreatedAt: input.snapshot?.createdAt ?? null,
+          rowCount: input.snapshot?.rowCount ?? 0,
+          byteCount: input.snapshot?.byteCount ?? 0,
+          truncated: false,
+          hasUserInput: input.userInput !== null,
+        },
         stdout: processResult.stdout.text,
         stderr: processResult.stderr.text,
         stdoutTruncated: processResult.stdout.truncated,

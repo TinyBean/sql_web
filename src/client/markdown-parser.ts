@@ -30,6 +30,13 @@ export function parseMarkdownWithImagePlaceholders(
 ): ParsedMarkdownWithImagePlaceholders {
   const imageReferences: MarkdownImageReference[] = [];
   const parser = new marked.Marked({
+    tokenizer: {
+      del(source) {
+        // Marked's GFM tokenizer also accepts ~text~. Keep single tildes as
+        // ordinary text so multiple ranges cannot accidentally span a <del>.
+        return source.startsWith("~~") ? false : undefined;
+      },
+    },
     renderer: {
       image(token) {
         const index = imageReferences.push({

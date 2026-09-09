@@ -43,10 +43,13 @@ export interface QueryJsonExportOptions {
   readonly fileDescriptor: number;
   readonly maxRows: number;
   readonly maxBytes: number;
+  readonly previewRows?: number;
   readonly signal?: AbortSignal;
 }
 
 export interface QueryJsonExportResult {
+  readonly columns: readonly string[];
+  readonly previewRows: readonly NormalizedRow[];
   readonly rowCount: number;
   readonly byteCount: number;
   readonly truncated: boolean;
@@ -57,6 +60,7 @@ const DEFAULT_MAX_ROWS = 200;
 const ABSOLUTE_MAX_ROWS = 200;
 const ABSOLUTE_MAX_EXPORT_ROWS = 100_000;
 const ABSOLUTE_MAX_EXPORT_BYTES = 32 * 1024 * 1024;
+const ABSOLUTE_MAX_PREVIEW_ROWS = 20;
 const MAX_SQL_BYTES = 20_000;
 const QUERY_KEYWORDS = new Set(["SELECT", "VALUES"]);
 const STATEMENT_KEYWORDS = new Set(["SELECT", "VALUES", "INSERT", "UPDATE", "DELETE", "REPLACE"]);
@@ -440,6 +444,13 @@ export class AppDatabase {
     ) {
       throw new DatabaseInputError(`JSON 文件大小上限必须是 1 到 ${ABSOLUTE_MAX_EXPORT_BYTES}`);
     }
+    const requestedPreviewRows = options.previewRows ?? 0;
+    if (
+      !Number.isInteger(requestedPreviewRows) || requestedPreviewRows < 0 ||
+      requestedPreviewRows > ABSOLUTE_MAX_PREVIEW_ROWS
+    ) {
+      throw new DatabaseInputError(`查询预览行数必须是 0 到 ${ABSOLUTE_MAX_PREVIEW_ROWS}`);
+    }
 
     const statement = reader.prepare(sql);
     const columns = statement.columns().map((column) => column.name);
@@ -457,6 +468,7 @@ export class AppDatabase {
     writeSync(options.fileDescriptor, header);
     let byteCount = Buffer.byteLength(header);
     let rowCount = 0;
+    const previewRows: NormalizedRow[] = [];
     let truncationReason: QueryTruncationReason | null = null;
 
     for (const row of statement.iterate(...bindParameters(parameters))) {
@@ -465,7 +477,8 @@ export class AppDatabase {
         truncationReason = "row_limit";
         break;
       }
-      const rowJson = `${rowCount === 0 ? "" : ","}${JSON.stringify(normalizeRow(row))}`;
+      const normalizedRow = normalizeRow(row);
+      const rowJson = `${rowCount === 0 ? "" : ","}${JSON.stringify(normalizedRow)}`;
       const byteLimitFooter =
         `],"rowCount":${rowCount + 1},"truncated":true,"truncationReason":"byte_limit"}`;
       const rowBytes = Buffer.byteLength(rowJson);
@@ -476,6 +489,7 @@ export class AppDatabase {
       writeSync(options.fileDescriptor, rowJson);
       byteCount += rowBytes;
       rowCount += 1;
+      if (previewRows.length < requestedPreviewRows) previewRows.push(normalizedRow);
     }
     options.signal?.throwIfAborted();
 
@@ -485,7 +499,7 @@ export class AppDatabase {
     }}`;
     writeSync(options.fileDescriptor, footer);
     byteCount += Buffer.byteLength(footer);
-    return { rowCount, byteCount, truncated, truncationReason };
+    return { columns, previewRows, rowCount, byteCount, truncated, truncationReason };
   }
 
   getSchema(): SchemaObject[] {

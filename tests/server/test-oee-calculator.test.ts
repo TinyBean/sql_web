@@ -281,6 +281,69 @@ test("calculates configurable ratios and products without rounding or repair", (
   );
 });
 
+test("matches the SQL ratio and product semantics used for database-derived OEE", () => {
+  const source = {
+    availabilityNumerator: 50,
+    availabilityDenominator: 100,
+    dutOnNumerator: 80,
+    dutOnDenominator: 100,
+    yieldNumerator: 90,
+    yieldDenominator: 100,
+  };
+  const expected = calculateRatioProduct({
+    ratios: [
+      {
+        name: "Availability",
+        numerator: source.availabilityNumerator,
+        denominator: source.availabilityDenominator,
+      },
+      {
+        name: "DUT-On",
+        numerator: source.dutOnNumerator,
+        denominator: source.dutOnDenominator,
+      },
+      {
+        name: "Yield",
+        numerator: source.yieldNumerator,
+        denominator: source.yieldDenominator,
+      },
+    ],
+  });
+  const database = new DatabaseSync(":memory:");
+  const actual = database.prepare(`SELECT
+    CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS availability,
+    CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS dut_on,
+    CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS yield,
+    CASE WHEN ? = 0 OR ? = 0 OR ? = 0 THEN NULL ELSE
+      (CAST(? AS REAL) / ?) * (CAST(? AS REAL) / ?) * (CAST(? AS REAL) / ?)
+    END AS product`).get(
+    source.availabilityDenominator,
+    source.availabilityNumerator,
+    source.availabilityDenominator,
+    source.dutOnDenominator,
+    source.dutOnNumerator,
+    source.dutOnDenominator,
+    source.yieldDenominator,
+    source.yieldNumerator,
+    source.yieldDenominator,
+    source.availabilityDenominator,
+    source.dutOnDenominator,
+    source.yieldDenominator,
+    source.availabilityNumerator,
+    source.availabilityDenominator,
+    source.dutOnNumerator,
+    source.dutOnDenominator,
+    source.yieldNumerator,
+    source.yieldDenominator,
+  );
+  database.close();
+  assert.ok(actual);
+  assert.equal(actual["availability"], expected.ratios[0]?.value);
+  assert.equal(actual["dut_on"], expected.ratios[1]?.value);
+  assert.equal(actual["yield"], expected.ratios[2]?.value);
+  assert.equal(actual["product"], expected.product);
+});
+
 test("publishes only composable database-free Skill tools", async () => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
@@ -288,7 +351,6 @@ test("publishes only composable database-free Skill tools", async () => {
     "validate_lot_ids",
     "classify_mt_st",
     "classify_availability_states",
-    "calculate_ratio_product",
   ]);
   assert.equal(tools.some((tool) => tool.name === "calculate_test_oee"), false);
   assert.equal(tools.some((tool) => tool.name === "classify_test_oee_record"), false);
@@ -323,10 +385,7 @@ test("publishes only composable database-free Skill tools", async () => {
       machineRunning: true,
     },
   ]);
-  const calculated = await executeTool(byName.get("calculate_ratio_product")!, {
-    ratios: [{ name: "A", numerator: 1, denominator: 2 }],
-  }) as { product: number };
-  assert.equal(calculated.product, 0.5);
+  assert.equal(byName.has("calculate_ratio_product"), false);
 });
 
 test("contains no Skill-owned database adapter or CLI", () => {

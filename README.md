@@ -234,7 +234,7 @@ npm test
 - Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 不接收或持有数据库连接；启动时只扫描元数据并调用无参工具工厂进行校验，不会把专有工具注册到全局或暴露给新会话。需要数据的业务 Skill 自主管理只读连接。
 - `code_interpreter` 接收 `code`、可选的 `snapshot` 逻辑名称和可选 `user_input`，不接收或执行 SQL。传入快照时，服务端把该会话的完整冻结数据只读挂载为 `input_data.database`，并提供 `snapshot_rows` 作为 `list[dict]` 行对象列表；每行可用 `row["列名"]` 访问，无需也不应再与 `columns` 做 `zip`。`input_data` 同时支持属性和方括号访问。未传快照时 `input_data.database` 为 `None`、`snapshot_rows` 为空，可执行不依赖数据库的纯 Python。`user_input` 单独出现在 `input_data.user`，只用于用户明确提供的参数。快照查询达到 100,000 行或 32 MiB 上限时不会保存，不允许基于截断数据生成结论。
   Python 必须且只能调用一次 `emit_result(...)`；可提交 JSON 值或结构化关键字字段，运行时会补充缺失的 `summary`，并把字符串 `notes` 规范化为数组。结构化结果上限为 64 KiB。`print()` 仅作为调试日志，不能替代 `emit_result`；工具结果同时包含查询行数、字节数、截断状态和用户输入标记。
-  每张 Matplotlib/Pillow 图片必须通过 `emit_image(value, reference_name)` 显式提交；名称不超过 24 个字符并归一化为小写连字符格式，例如 `OEE Ranking` 变为 `oee-ranking`。未显式提交的 Matplotlib 图不会输出。
+  每张 Matplotlib/Pillow 图片必须通过 `emit_image(value, reference_name)` 显式提交；名称应具体表达图片含义，归一化后不超过 50 个字符。空格和标点会统一转成小写连字符格式，例如 `2026 OEE / Top 10` 变为 `2026-oee-top-10`；纯数字、纯符号或空名称会被拒绝。未显式提交的 Matplotlib 图不会输出。
   图片使用不含工具调用 UUID 的短引用，例如 `![oee-ranking](/__datalens_generated_image__/ci-oee-ranking)`；同一会话重名时才追加 `-2`、`-3`。图片解析、流式展示和会话恢复只接受这种语义 ID。
   最终正文落库前会复核所有 Markdown 图片；无效地址优先按 Markdown 图片说明与当前回合 `ChatImage.alt` 的精确唯一对应关系修复。重复说明不猜测，也不参与数量兜底；其他唯一候选继续自动纠正，仍有歧义时触发至多一次不可见的模型重写。服务端保留无法确认或重复的原始引用，前端只渲染当前消息缓存中精确匹配且首次出现的图片 ID。
   Matplotlib 已预配置简体中文字体，普通中文标题和坐标文字无需手动指定字体。`matplotlib_chinese_font(...)` 与 `chinese_font(...)` 是沙箱预注入的全局函数而非 Python 模块，不得导入；需要显式字体对象时直接调用，例如 Matplotlib 使用 `fontproperties=matplotlib_chinese_font(12, bold=True)`，Pillow 使用 `font=chinese_font(20, bold=True)`。

@@ -96,8 +96,12 @@ test("allocates short semantic image IDs and adds suffixes only for collisions",
   const used = new Set<string>();
 
   assert.equal(isGeneratedImageReferenceName("oee-ranking"), true);
+  assert.equal(isGeneratedImageReferenceName("2026-oee-ranking"), true);
+  assert.equal(isGeneratedImageReferenceName("a".repeat(50)), true);
+  assert.equal(isGeneratedImageReferenceName("a".repeat(51)), false);
   assert.equal(isGeneratedImageReferenceName("OEE Ranking"), false);
   assert.equal(isGeneratedImageReferenceName("趋势图"), false);
+  assert.equal(isGeneratedImageReferenceName("12345"), false);
   assert.equal(reserveSemanticGeneratedImageId("oee-ranking", used), "ci-oee-ranking");
   assert.equal(reserveSemanticGeneratedImageId("yield-trend", used), "ci-yield-trend");
   assert.equal(reserveSemanticGeneratedImageId("oee-ranking", used), "ci-oee-ranking-2");

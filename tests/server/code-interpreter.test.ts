@@ -254,9 +254,9 @@ test("requires and validates a semantic image reference name", async () => {
     ["emit_image(image)", /required positional argument|缺少/u],
     ["emit_image(image, '')", /reference_name/u],
     ["emit_image(image, 123)", /reference_name 必须是字符串/u],
-    ["emit_image(image, '趋势图')", /reference_name 只能包含/u],
-    ["emit_image(image, 'oee@ranking')", /reference_name 只能包含/u],
-    ["emit_image(image, 'aaaaaaaaaaaaaaaaaaaaaaaaa')", /不超过 24 个字符/u],
+    ["emit_image(image, '趋势图')", /必须包含有意义的英文字母/u],
+    ["emit_image(image, '12345')", /必须包含有意义的英文字母/u],
+    [`emit_image(image, '${"a".repeat(51)}')`, /不能超过 50 个字符/u],
   ] as const;
 
   for (const [call, expected] of invalidCalls) {
@@ -273,11 +273,11 @@ test("requires and validates a semantic image reference name", async () => {
   const normalized = await runtime.execute([
     "from PIL import Image",
     "image = Image.new('RGB', (8, 8), 'white')",
-    "emit_image(image, 'OEE Ranking')",
+    "emit_image(image, '2026 OEE / Top 10')",
     "emit_result({'summary':'rendered'})",
   ].join("\n"), trustedInput(), undefined);
-  assert.equal(normalized.details.images[0]?.referenceName, "oee-ranking");
-  assert.equal(normalized.details.images[0]?.alt, "oee-ranking");
+  assert.equal(normalized.details.images[0]?.referenceName, "2026-oee-top-10");
+  assert.equal(normalized.details.images[0]?.alt, "2026-oee-top-10");
 });
 
 test("does not automatically capture Matplotlib figures", async () => {

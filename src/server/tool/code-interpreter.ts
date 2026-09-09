@@ -257,18 +257,11 @@ def emit_result(value=_RESULT_MISSING, **fields):
 def _normalize_reference_name(value):
     if not isinstance(value, str):
         raise TypeError("reference_name 必须是字符串")
-    if not value or any(
-        not (
-            "a" <= character.lower() <= "z"
-            or "0" <= character <= "9"
-            or character in " _-"
-        )
-        for character in value
-    ):
-        raise ValueError("reference_name 只能包含英文字母、数字、空格、下划线和连字符")
-    normalized = re.sub(r"[ _-]+", "-", value.strip(" _-").lower())
-    if not re.fullmatch(r"[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,23}", normalized):
-        raise ValueError("reference_name 归一化后必须以字母开头、以字母或数字结尾且不超过 24 个字符")
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    if not normalized or not re.search(r"[a-z]", normalized):
+        raise ValueError("reference_name 归一化后必须包含有意义的英文字母")
+    if len(normalized) > 50:
+        raise ValueError("reference_name 归一化后长度不能超过 50 个字符")
     return normalized
 
 def _normalize_png(filename):

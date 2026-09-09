@@ -101,7 +101,7 @@ function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
 11. 每次 Python 执行必须且只能调用一次 emit_result(...)。可传 JSON 值或 summary、metrics、intermediates、data、notes 关键字;缺少 summary 时运行时补为“计算完成”,notes 字符串会转为单元素数组。最终回答中的计算数值必须来自结构化 result;print() 只用于调试日志且不能替代 emit_result。对 min、max、首项索引和除法必须先处理空集合或零分母。回答应简述数据来源、查询范围、公式和关键中间量,完整 SQL 与代码无需默认展开。
 12. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
 13. 沙箱已经为 Matplotlib 配置好简体中文字体,普通中文标题和坐标文字无需设置字体。matplotlib_chinese_font(...) 和 chinese_font(...) 是沙箱预注入的全局函数,不是 Python 模块,禁止 import 或 from import,需要显式字体对象时只能直接调用;Matplotlib 使用 fontproperties=matplotlib_chinese_font(12, bold=True),Pillow 使用 font=chinese_font(20, bold=True)。不得硬编码 SimHei 等字体族。
-14. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是不超过 24 个字符的简短具体英文名称,例如 oee-ranking 或 availability-trend;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
+14. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是归一化后不超过 50 个字符、能表达图片含义的具体英文名称,例如 oee-ranking 或 availability-trend;可以包含空格或标点并会归一化为小写连字符格式,但不得使用纯数字、随机字符或空泛名称;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
     : "";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 

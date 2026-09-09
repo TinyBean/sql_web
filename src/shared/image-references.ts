@@ -1,17 +1,20 @@
 export const GENERATED_IMAGE_PATH_PREFIX = "/__datalens_generated_image__/";
-export const GENERATED_IMAGE_REFERENCE_NAME_MAX_LENGTH = 24;
+export const GENERATED_IMAGE_REFERENCE_NAME_MAX_LENGTH = 50;
 
 const GENERATED_IMAGE_REFERENCE_NAME_PATTERN =
-  /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,23}$/u;
+  /^(?=.*[a-z])[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const SEMANTIC_GENERATED_IMAGE_ID_PATTERN =
-  /^ci-[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,79}$/u;
+  /^ci-(?=.*[a-z])[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 
 export function isGeneratedImageReferenceName(value: unknown): value is string {
-  return typeof value === "string" && GENERATED_IMAGE_REFERENCE_NAME_PATTERN.test(value);
+  return typeof value === "string" &&
+    value.length <= GENERATED_IMAGE_REFERENCE_NAME_MAX_LENGTH &&
+    GENERATED_IMAGE_REFERENCE_NAME_PATTERN.test(value);
 }
 
 export function isSemanticGeneratedImageId(value: unknown): value is string {
-  return typeof value === "string" && SEMANTIC_GENERATED_IMAGE_ID_PATTERN.test(value);
+  return typeof value === "string" && value.length <= 83 &&
+    SEMANTIC_GENERATED_IMAGE_ID_PATTERN.test(value);
 }
 
 export function reserveSemanticGeneratedImageId(

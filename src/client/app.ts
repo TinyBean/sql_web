@@ -10,6 +10,7 @@ import type {
   SerializedSession,
   SessionSummary,
 } from "../shared/contracts.ts";
+import type { DashboardState } from "../shared/dashboard.ts";
 import {
   decodeAbortResponse,
   decodeDeleteSessionResponse,
@@ -38,6 +39,7 @@ import {
   renderMarkdownInto,
   type MarkdownRenderOptions,
 } from "./markdown.ts";
+import { DashboardRenderer } from "./dashboard.ts";
 
 interface ElementConstructor<ElementType extends Element> {
   readonly prototype: ElementType;
@@ -56,14 +58,22 @@ function requiredElement<ElementType extends Element>(
 }
 
 const elements = {
-  sidebar: requiredElement("#sidebar", HTMLElement),
-  sidebarScrim: requiredElement("#sidebarScrim", HTMLElement),
-  menuButton: requiredElement("#menuButton", HTMLButtonElement),
+  dashboardMain: requiredElement("#dashboardMain", HTMLElement),
+  dashboardGrid: requiredElement("#dashboardGrid", HTMLElement),
+  dashboardDateRange: requiredElement("#dashboardDateRange", HTMLElement),
+  dashboardUpdatedAt: requiredElement("#dashboardUpdatedAt", HTMLElement),
+  chatDock: requiredElement("#chatDock", HTMLElement),
+  chatTitle: requiredElement("#chatTitle", HTMLElement),
+  chatCollapseButton: requiredElement("#chatCollapseButton", HTMLButtonElement),
+  historyButton: requiredElement("#historyButton", HTMLButtonElement),
+  chatHistoryButton: requiredElement("#chatHistoryButton", HTMLButtonElement),
+  historyPopover: requiredElement("#historyPopover", HTMLElement),
   newChatButton: requiredElement("#newChatButton", HTMLButtonElement),
   sessionList: requiredElement("#sessionList", HTMLElement),
   messages: requiredElement("#messages", HTMLElement),
   welcome: requiredElement("#welcome", HTMLElement),
   composer: requiredElement("#composer", HTMLFormElement),
+  composerStatus: requiredElement("#composerStatus", HTMLElement),
   input: requiredElement("#questionInput", HTMLTextAreaElement),
   sendButton: requiredElement("#sendButton", HTMLButtonElement),
   modelBadge: requiredElement("#modelBadge", HTMLElement),
@@ -91,6 +101,7 @@ interface ClientState {
   sessions: readonly SessionSummary[];
   activeStreams: SessionStreamRegistry<ActiveStream>;
   scrollPositions: Map<string, number>;
+  dashboards: Map<string, DashboardState>;
   deletingSessionId: string | null;
   toastTimer: number | null;
 }
@@ -99,6 +110,9 @@ interface ActiveStream {
   readonly sessionId: string;
   readonly transcript: HTMLElement;
   readonly node: StreamNode;
+  dashboard: DashboardState;
+  readonly pendingDashboardWidgetIds: Set<string>;
+  readonly pendingDashboardToolIds: Map<string, readonly string[]>;
   aborting: boolean;
 }
 
@@ -107,9 +121,12 @@ const state: ClientState = {
   sessions: [],
   activeStreams: new SessionStreamRegistry<ActiveStream>(),
   scrollPositions: new Map<string, number>(),
+  dashboards: new Map<string, DashboardState>(),
   deletingSessionId: null,
   toastTimer: null,
 };
+
+const dashboardRenderer = new DashboardRenderer(elements.dashboardGrid);
 
 function createSvg(paths: readonly Readonly<Record<string, string>>[]): SVGSVGElement {
   const namespace = "http://www.w3.org/2000/svg";
@@ -158,9 +175,55 @@ async function api<ResponseBody>(
   return decode(payload, `$response(${response.status})`);
 }
 
-function closeSidebar(): void {
-  elements.sidebar.classList.remove("open");
-  elements.sidebarScrim.classList.remove("open");
+function setChatOpen(open: boolean, focus = false): void {
+  elements.chatDock.classList.toggle("open", open);
+  if (!open) {
+    elements.historyPopover.classList.remove("open");
+    elements.chatHistoryButton.setAttribute("aria-expanded", "false");
+  }
+  if (open && focus) window.setTimeout(() => elements.input.focus(), 0);
+}
+
+function toggleHistory(force?: boolean): void {
+  setChatOpen(true);
+  const open = force ?? !elements.historyPopover.classList.contains("open");
+  elements.historyPopover.classList.toggle("open", open);
+  elements.chatHistoryButton.setAttribute("aria-expanded", String(open));
+}
+
+function formatDashboardDateRange(dashboard: DashboardState): string {
+  const { start, end } = dashboard.dateRange;
+  return start && end ? `${start} — ${end}` : "数据范围不可用";
+}
+
+function formatDataAsOf(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? `快照 ${value}`
+    : `快照 ${date.toLocaleString("zh-CN", { hour12: false })}`;
+}
+
+function renderDashboard(dashboard: DashboardState, pending: ReadonlySet<string> = new Set()): void {
+  dashboardRenderer.render(dashboard, pending);
+  elements.dashboardDateRange.textContent = formatDashboardDateRange(dashboard);
+  elements.dashboardUpdatedAt.textContent = `${formatDataAsOf(dashboard.dataAsOf)} · r${dashboard.revision}`;
+}
+
+function cacheDashboard(sessionId: string, dashboard: DashboardState): boolean {
+  const current = state.dashboards.get(sessionId);
+  if (current && current.revision > dashboard.revision) return false;
+  state.dashboards.set(sessionId, dashboard);
+  return true;
+}
+
+function pendingWidgetIdsForCurrentSession(): ReadonlySet<string> {
+  return selectedActiveStream()?.pendingDashboardWidgetIds ?? new Set();
+}
+
+function renderCurrentDashboard(): void {
+  if (!state.sessionId) return;
+  const dashboard = state.dashboards.get(state.sessionId);
+  if (dashboard) renderDashboard(dashboard, pendingWidgetIdsForCurrentSession());
 }
 
 function toggleSchema(force?: boolean): void {
@@ -678,6 +741,11 @@ function syncComposerState(): void {
   elements.sendButton.disabled = activeStream?.aborting ?? false;
   elements.input.disabled = streaming;
   elements.newChatButton.disabled = false;
+  elements.chatDock.classList.toggle("streaming", streaming);
+  const statusLabel = elements.composerStatus.querySelector("span");
+  const statusDetail = elements.composerStatus.querySelector("small");
+  if (statusLabel) statusLabel.textContent = streaming ? "Agent 正在计算" : "Agent 指标入口";
+  if (statusDetail) statusDetail.textContent = streaming ? "可停止或点击展开查看" : "点击展开会话";
 }
 
 function selectSession(sessionId: string): void {
@@ -688,11 +756,13 @@ function selectSession(sessionId: string): void {
 function applyActiveStream(activeStream: ActiveStream): void {
   rememberSelectedScrollPosition();
   selectSession(activeStream.sessionId);
+  cacheDashboard(activeStream.sessionId, activeStream.dashboard);
   elements.messages.replaceChildren(activeStream.transcript);
   restoreScrollPosition(activeStream.sessionId);
+  elements.chatTitle.textContent = activeStreamTitle(activeStream);
+  renderCurrentDashboard();
   renderSessions();
   syncComposerState();
-  closeSidebar();
 }
 
 function applySession(session: SerializedSession): void {
@@ -703,11 +773,13 @@ function applySession(session: SerializedSession): void {
   }
   rememberSelectedScrollPosition();
   selectSession(session.id);
+  cacheDashboard(session.id, session.dashboard);
   renderTranscript(session.messages);
   restoreScrollPosition(session.id);
+  elements.chatTitle.textContent = session.title || "新会话";
+  renderCurrentDashboard();
   renderSessions();
   syncComposerState();
-  elements.input.focus();
 }
 
 async function refreshSessions(): Promise<void> {
@@ -723,7 +795,6 @@ async function createSession(): Promise<SerializedSession> {
   });
   await refreshSessions();
   applySession(session);
-  closeSidebar();
   return session;
 }
 
@@ -741,17 +812,24 @@ async function loadSession(id: string): Promise<void> {
   const startedWhileLoading = state.activeStreams.get(id);
   if (startedWhileLoading) applyActiveStream(startedWhileLoading);
   else applySession(session);
-  closeSidebar();
 }
 
 function clearSessionView(): void {
   state.sessionId = null;
   history.replaceState(null, "", `${location.pathname}${location.search}`);
   renderTranscript([]);
+  dashboardRenderer.render({
+    schemaVersion: 1,
+    revision: 0,
+    dataAsOf: new Date(0).toISOString(),
+    dateRange: { start: null, end: null },
+    widgets: [],
+  });
+  elements.dashboardDateRange.textContent = "尚未选择会话";
+  elements.dashboardUpdatedAt.textContent = "无快照";
+  elements.chatTitle.textContent = "新会话";
   renderSessions();
   syncComposerState();
-  closeSidebar();
-  elements.input.focus();
 }
 
 async function deleteSession(id: string): Promise<void> {
@@ -775,10 +853,12 @@ async function deleteSession(id: string): Promise<void> {
     const deletedCurrentSession = state.sessionId === id;
     state.sessions = state.sessions.filter((item) => item.id !== id);
     state.scrollPositions.delete(id);
+    state.dashboards.delete(id);
     if (deletedCurrentSession) {
       clearSessionView();
       const nextSession = state.sessions[0];
       if (nextSession) await loadSession(nextSession.id);
+      else await createSession();
     } else {
       renderSessions();
     }
@@ -808,6 +888,42 @@ function activeStreamTitle(activeStream: ActiveStream): string {
   return state.sessions.find((session) => session.id === activeStream.sessionId)?.title || "新会话";
 }
 
+function decodedDashboardArgument(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function dashboardTargets(arguments_: JsonObject, dashboard: DashboardState): readonly string[] {
+  const action = arguments_["action"];
+  if (action === "upsert") {
+    const widget = decodedDashboardArgument(arguments_["widget"]);
+    if (typeof widget === "object" && widget !== null && !Array.isArray(widget)) {
+      const id = (widget as JsonObject)["id"];
+      return typeof id === "string" ? [id] : [];
+    }
+  }
+  if (action === "remove") {
+    const id = arguments_["widget_id"];
+    return typeof id === "string" ? [id] : [];
+  }
+  if (action === "reorder") {
+    const ids = decodedDashboardArgument(arguments_["widget_ids"]);
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+  }
+  if (action === "reset") return dashboard.widgets.map((widget) => widget.id);
+  return [];
+}
+
+function clearPendingDashboardTool(activeStream: ActiveStream, toolCallId: string): void {
+  const widgetIds = activeStream.pendingDashboardToolIds.get(toolCallId) ?? [];
+  activeStream.pendingDashboardToolIds.delete(toolCallId);
+  for (const id of widgetIds) activeStream.pendingDashboardWidgetIds.delete(id);
+}
+
 function handleStreamEvent(
   parsed: Exclude<ParsedSseEvent, { event: "done" }>,
   activeStream: ActiveStream,
@@ -815,6 +931,25 @@ function handleStreamEvent(
   const { node } = activeStream;
   const visible = activeStreamIsVisible(activeStream);
   const followLatest = visible && messagesAreNearBottom();
+  if (parsed.event === "dashboard_update") {
+    clearPendingDashboardTool(activeStream, parsed.data.toolCallId);
+    if (parsed.data.dashboard.revision >= activeStream.dashboard.revision) {
+      activeStream.dashboard = parsed.data.dashboard;
+      cacheDashboard(activeStream.sessionId, parsed.data.dashboard);
+    }
+    if (visible) renderCurrentDashboard();
+    return;
+  }
+  if (parsed.event === "tool_call" && parsed.data.name === "update_dashboard") {
+    const targets = dashboardTargets(parsed.data.arguments, activeStream.dashboard);
+    activeStream.pendingDashboardToolIds.set(parsed.data.id, targets);
+    for (const id of targets) activeStream.pendingDashboardWidgetIds.add(id);
+    if (visible) renderCurrentDashboard();
+  }
+  if (parsed.event === "tool_end" && parsed.data.name === "update_dashboard" && parsed.data.isError) {
+    clearPendingDashboardTool(activeStream, parsed.data.id);
+    if (visible) renderCurrentDashboard();
+  }
   if (parsed.event === "status") {
     if (visible) showToast(parsed.data.message);
   } else {
@@ -891,10 +1026,15 @@ async function submitQuestion(question: string): Promise<void> {
   elements.input.value = "";
   appendMessage("user", message);
   const streamNode = appendMessage("assistant", "", true);
+  const dashboard = state.dashboards.get(sessionId);
+  if (!dashboard) throw new Error("当前会话看板尚未加载");
   const activeStream: ActiveStream = {
     sessionId,
     transcript: ensureMessageStream(),
     node: streamNode,
+    dashboard,
+    pendingDashboardWidgetIds: new Set<string>(),
+    pendingDashboardToolIds: new Map<string, readonly string[]>(),
     aborting: false,
   };
   if (!state.activeStreams.start(activeStream)) {
@@ -906,6 +1046,11 @@ async function submitQuestion(question: string): Promise<void> {
   try {
     const completed = await streamQuestion(message, activeStream);
     if (completed) {
+      if (completed.dashboard.revision >= activeStream.dashboard.revision) {
+        activeStream.dashboard = completed.dashboard;
+        cacheDashboard(sessionId, completed.dashboard);
+        if (activeStreamIsVisible(activeStream)) renderCurrentDashboard();
+      }
       const finalMessage = latestAssistantAfterLastUser(completed.messages);
       renderMarkdownInto(
         streamNode.text,
@@ -932,7 +1077,9 @@ async function submitQuestion(question: string): Promise<void> {
     } catch (error) {
       showToast(messageFromUnknown(error, "会话列表刷新失败"));
     }
-    if (state.sessionId === sessionId) elements.input.focus();
+    if (state.sessionId === sessionId && elements.chatDock.classList.contains("open")) {
+      elements.input.focus();
+    }
   }
 }
 
@@ -976,6 +1123,7 @@ async function initialize(): Promise<void> {
     const requestedId = new URLSearchParams(location.hash.slice(1)).get("session");
     const initialId = requestedId || state.sessions[0]?.id;
     if (initialId) await loadSession(initialId);
+    else await createSession();
   } catch (error) {
     showToast(`初始化失败:${messageFromUnknown(error)}`);
     elements.modelBadge.textContent = "服务不可用";
@@ -994,8 +1142,12 @@ elements.input.addEventListener("keydown", (event) => {
     elements.composer.requestSubmit();
   }
 });
+elements.input.addEventListener("focus", () => setChatOpen(true));
+elements.composer.addEventListener("click", () => setChatOpen(true));
 elements.newChatButton.addEventListener("click", () => {
-  void createSession().catch((error) => showToast(messageFromUnknown(error)));
+  void createSession()
+    .then(() => setChatOpen(true, true))
+    .catch((error) => showToast(messageFromUnknown(error)));
 });
 elements.sessionList.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
@@ -1010,6 +1162,7 @@ elements.sessionList.addEventListener("click", (event) => {
   const button = candidate instanceof HTMLElement ? candidate : null;
   const sessionId = button?.dataset["sessionId"];
   if (sessionId) {
+    toggleHistory(false);
     void loadSession(sessionId).catch((error) => showToast(messageFromUnknown(error)));
   }
 });
@@ -1024,10 +1177,18 @@ elements.messages.addEventListener("click", (event) => {
 });
 elements.schemaButton.addEventListener("click", () => toggleSchema());
 elements.schemaCloseButton.addEventListener("click", () => toggleSchema(false));
-elements.menuButton.addEventListener("click", () => {
-  elements.sidebar.classList.add("open");
-  elements.sidebarScrim.classList.add("open");
+elements.historyButton.addEventListener("click", () => toggleHistory());
+elements.chatHistoryButton.addEventListener("click", () => toggleHistory());
+elements.chatCollapseButton.addEventListener("click", () => setChatOpen(false));
+elements.dashboardMain.addEventListener("click", (event) => {
+  if (event.target === elements.dashboardMain || event.target === elements.dashboardGrid) {
+    setChatOpen(false);
+  }
 });
-elements.sidebarScrim.addEventListener("click", closeSidebar);
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  setChatOpen(false);
+  toggleSchema(false);
+});
 
 void initialize();

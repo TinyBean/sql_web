@@ -4,145 +4,107 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#09110f" />
-    <title>DataLens · 数据库问答</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta name="theme-color" content="#07100d" />
+    <title>DataLens · OEE 指标驾驶舱</title>
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar" id="sidebar">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 32 32" role="img">
-              <path d="M7 8c0-2 4-4 9-4s9 2 9 4-4 4-9 4-9-2-9-4Z" />
-              <path d="M7 8v8c0 2 4 4 9 4s9-2 9-4V8M7 16v8c0 2 4 4 9 4s9-2 9-4v-8" />
-            </svg>
-          </div>
-          <div>
-            <strong>DataLens</strong>
-            <span>SQLite Intelligence</span>
-          </div>
+      <header class="topbar">
+        <div class="brand" aria-label="DataLens">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M7 8c0-2 4-4 9-4s9 2 9 4-4 4-9 4-9-2-9-4Z"/><path d="M7 8v8c0 2 4 4 9 4s9-2 9-4V8M7 16v8c0 2 4 4 9 4s9-2 9-4v-8"/></svg>
+          </span>
+          <span><strong>DataLens</strong><small>OEE INTELLIGENCE</small></span>
         </div>
-
-        <button class="new-chat" id="newChatButton" type="button">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-          新建会话
-        </button>
-
-        <div class="sidebar-section">
-          <div class="section-label">最近会话</div>
-          <nav class="session-list" id="sessionList" aria-label="最近会话">
-            <div class="session-placeholder">还没有会话</div>
-          </nav>
+        <div class="dashboard-heading">
+          <div class="heading-line"><span class="live-dot"></span><h1>Test OEE 综合看板</h1></div>
+          <p><span id="dashboardDateRange">读取数据范围…</span><span class="heading-separator">/</span><span id="dashboardUpdatedAt">准备快照…</span></p>
         </div>
-
-        <div class="guard-card">
-          <div class="guard-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.8 8.6 7 10 4.2-1.4 7-5.5 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></svg>
-          </div>
-          <div>
-            <strong id="guardTitle">正在检查工具隔离…</strong>
-          </div>
-        </div>
-      </aside>
-
-      <main class="main-panel">
-        <header class="topbar">
-          <button class="icon-button mobile-only" id="menuButton" type="button" aria-label="打开会话列表">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+        <div class="topbar-actions">
+          <span class="model-badge" id="modelBadge">检查模型…</span>
+          <span class="guard-status" id="guardTitle">检查工具隔离…</span>
+          <button class="topbar-button" id="historyButton" type="button" aria-label="查看历史会话">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v4l3 2"/></svg>历史
           </button>
-          <div class="database-title">
-            <div class="database-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7" /></svg>
-            </div>
-            <div>
-              <h1>OEE2026年数据</h1>
-              <div class="connection-line"><span class="status-dot"></span>SQLite · 本地连接</div>
-            </div>
+          <button class="topbar-button primary" id="newChatButton" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新建会话
+          </button>
+          <button class="icon-button" id="schemaButton" type="button" aria-label="查看数据库结构" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="dashboard-main" id="dashboardMain">
+        <section class="dashboard-grid" id="dashboardGrid" aria-label="指标看板" aria-live="polite">
+          <article class="metric-card dashboard-loading"><span></span><p>正在构建会话看板…</p></article>
+        </section>
+      </main>
+    </div>
+
+    <section class="chat-dock" id="chatDock" aria-label="Agent 会话">
+      <div class="chat-expanded">
+        <header class="chat-header">
+          <div>
+            <span class="agent-status"><i></i>DATA AGENT</span>
+            <h2 id="chatTitle">新会话</h2>
           </div>
-          <div class="topbar-actions">
-            <div class="model-badge" id="modelBadge">正在检查模型…</div>
-            <button class="icon-button" id="schemaButton" type="button" aria-label="查看数据库结构" aria-expanded="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" /></svg>
+          <div class="chat-header-actions">
+            <button class="icon-button" id="chatHistoryButton" type="button" aria-label="历史会话" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v4l3 2"/></svg>
+            </button>
+            <button class="icon-button" id="chatCollapseButton" type="button" aria-label="收起会话">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </button>
           </div>
         </header>
 
-        <div class="workspace">
-          <section class="chat-column" aria-label="数据库问答">
-            <div class="messages" id="messages" aria-live="polite">
-              <section class="welcome" id="welcome">
-                <div class="welcome-orbit" aria-hidden="true">
-                  <div class="welcome-core">
-                    <svg viewBox="0 0 32 32"><path d="M7 9c0-2.2 4-4 9-4s9 1.8 9 4-4 4-9 4-9-1.8-9-4Z" /><path d="M7 9v7c0 2.2 4 4 9 4s9-1.8 9-4V9M7 16v7c0 2.2 4 4 9 4s9-1.8 9-4v-7" /></svg>
-                  </div>
-                </div>
-                <p class="eyebrow">NATURAL LANGUAGE → SQL → ANSWER</p>
-                <h2>用自然语言探索你的数据</h2>
-                <p class="welcome-copy">直接描述你想了解的业务问题。Agent 会选择合适的查询、读取真实结果，再给出清晰结论。</p>
-                <div class="suggestions">
-                  <button type="button" data-question="按设备统计当前数据范围内的 Availability 时间，并列出最高的设备。">
-                    <span class="suggestion-icon mint">↗</span>
-                    <span><strong>分析设备 Availability</strong><small>哪些设备时间最高？</small></span>
-                  </button>
-                  <button type="button" data-question="按月和机器统计 DUT 的投入量、产出量与产出率。">
-                    <span class="suggestion-icon blue">▥</span>
-                    <span><strong>查看 DUT 利用情况</strong><small>投入、产出与产出率</small></span>
-                  </button>
-                  <button type="button" data-question="检查当前数据库的数据覆盖范围、缺失日期和最近一次导入结果。">
-                    <span class="suggestion-icon amber">!</span>
-                    <span><strong>检查数据完整性</strong><small>覆盖范围与日期缺口</small></span>
-                  </button>
-                  <button type="button" data-question="比较不同班次的 Availability 状态分布和总时长。">
-                    <span class="suggestion-icon violet">⌁</span>
-                    <span><strong>比较班次表现</strong><small>状态分布和总时长</small></span>
-                  </button>
-                </div>
-              </section>
-            </div>
+        <aside class="history-popover" id="historyPopover" aria-label="历史会话">
+          <div class="history-title"><strong>历史会话</strong><span>看板快照相互独立</span></div>
+          <nav class="session-list" id="sessionList"><div class="session-placeholder">还没有会话</div></nav>
+        </aside>
 
-            <div class="composer-wrap">
-              <form class="composer" id="composer">
-                <textarea
-                  id="questionInput"
-                  rows="2"
-                  maxlength="4000"
-                  placeholder="询问数据库中的任何问题…"
-                  aria-label="输入数据库问题"
-                ></textarea>
-                <div class="composer-footer">
-                  <div class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</div>
-                  <button class="send-button" id="sendButton" type="submit" aria-label="发送问题">
-                    <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z" /><path d="m12 13 7-8" /></svg>
-                    <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" /></svg>
-                  </button>
-                </div>
-              </form>
-              <p class="disclaimer">回答基于当前 OEE 数据库；请结合数据覆盖范围与缺口状态核对统计口径。</p>
+        <div class="messages" id="messages" aria-live="polite">
+          <section class="welcome" id="welcome">
+            <span class="welcome-kicker">ASK YOUR DATA</span>
+            <h3>从指标开始提问</h3>
+            <p>Agent 会查询真实数据，并在适合时自动更新看板。</p>
+            <div class="suggestions">
+              <button type="button" data-question="比较过去 7 天 MT 和 ST 的 Yield，并更新看板。">比较 7 天 Yield</button>
+              <button type="button" data-question="分析最近 14 天 Test OEE 的异常日期，并更新相关图表。">定位 OEE 异常</button>
+              <button type="button" data-question="检查当前数据库的数据覆盖范围和缺失日期。">检查数据覆盖</button>
             </div>
           </section>
-
-          <aside class="schema-panel" id="schemaPanel" aria-label="数据库结构">
-            <div class="schema-header">
-              <div>
-                <span class="eyebrow">SCHEMA</span>
-                <h2>数据库结构</h2>
-              </div>
-              <button class="icon-button schema-close" id="schemaCloseButton" type="button" aria-label="关闭数据库结构">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
-              </button>
-            </div>
-            <p class="schema-copy">Agent 已获得以下结构信息；代码计算仅能读取显式传入的 JSON 数据。</p>
-            <div class="schema-list" id="schemaList"><div class="schema-loading">正在读取结构…</div></div>
-          </aside>
         </div>
-      </main>
-    </div>
+      </div>
 
-    <div class="sidebar-scrim" id="sidebarScrim"></div>
+      <form class="composer" id="composer">
+        <div class="composer-status" id="composerStatus"><span>Agent 指标入口</span><small>点击展开会话</small></div>
+        <textarea id="questionInput" rows="1" maxlength="4000" placeholder="询问任意口径的指标…" aria-label="输入指标问题"></textarea>
+        <div class="composer-actions">
+          <span class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
+          <button class="send-button" id="sendButton" type="submit" aria-label="发送问题">
+            <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>
+            <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <aside class="schema-panel" id="schemaPanel" aria-label="数据库结构">
+      <div class="schema-header">
+        <div><span>SCHEMA</span><h2>数据库结构</h2></div>
+        <button class="icon-button" id="schemaCloseButton" type="button" aria-label="关闭数据库结构"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <p class="schema-copy">Agent 可依据以下只读结构查询；Python 沙箱无法直接访问数据库。</p>
+      <div class="schema-list" id="schemaList"><div class="schema-loading">正在读取结构…</div></div>
+    </aside>
+
     <div class="toast" id="toast" role="status"></div>
     <script src="/vendor/marked.js"></script>
     <script src="/vendor/dompurify.js"></script>
+    <script src="/vendor/echarts.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

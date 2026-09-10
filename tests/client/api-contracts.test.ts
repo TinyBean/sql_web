@@ -22,6 +22,13 @@ const validSession = {
     "example_skill__calculate",
   ],
   streaming: false,
+  dashboard: {
+    schemaVersion: 1,
+    revision: 0,
+    dataAsOf: "2026-09-08T00:00:00.000Z",
+    dateRange: { start: "2026-08-26", end: "2026-09-08" },
+    widgets: [],
+  },
   messages: [{ id: "user-1", role: "user", text: "你好", timestamp: 1 }],
 };
 
@@ -174,6 +181,32 @@ test("decodes generated image stream events", () => {
       event: "generated_image",
       data: { turn: 2, toolCallId: "call-1", image },
     },
+  );
+});
+
+test("decodes a complete dashboard update event", () => {
+  assert.deepEqual(
+    decodeSseEvent("dashboard_update", {
+      turn: 1,
+      toolCallId: "dashboard-call",
+      dashboard: validSession.dashboard,
+    }),
+    {
+      event: "dashboard_update",
+      data: {
+        turn: 1,
+        toolCallId: "dashboard-call",
+        dashboard: validSession.dashboard,
+      },
+    },
+  );
+  assert.throws(
+    () => decodeSseEvent("dashboard_update", {
+      turn: 1,
+      toolCallId: "dashboard-call",
+      dashboard: { ...validSession.dashboard, revision: -1 },
+    }),
+    ContractValidationError,
   );
 });
 

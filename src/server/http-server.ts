@@ -26,6 +26,7 @@ import type {
 import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.ts";
 import { DatabaseInputError } from "./database/database.ts";
 import { extractCodeInterpreterImages } from "./tool/code-interpreter-images.ts";
+import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";
@@ -40,7 +41,9 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/", { root: "public", filename: "index.html", contentType: "text/html; charset=utf-8" }],
   ["/app.js", { root: "public", filename: "generated/client/app.js", contentType: "text/javascript; charset=utf-8" }],
   ["/api-contracts.js", { root: "public", filename: "generated/client/api-contracts.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/dashboard.js", { root: "public", filename: "generated/client/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/contracts.js", { root: "public", filename: "generated/shared/contracts.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/shared/dashboard.js", { root: "public", filename: "generated/shared/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/image-references.js", { root: "public", filename: "generated/shared/image-references.js", contentType: "text/javascript; charset=utf-8" }],
   ["/image-placeholders.js", { root: "public", filename: "generated/client/image-placeholders.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown-parser.js", { root: "public", filename: "generated/client/markdown-parser.js", contentType: "text/javascript; charset=utf-8" }],
@@ -49,6 +52,7 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/styles.css", { root: "public", filename: "styles.css", contentType: "text/css; charset=utf-8" }],
   ["/vendor/marked.js", { root: "vendor", filename: "marked/lib/marked.umd.js", contentType: "text/javascript; charset=utf-8" }],
   ["/vendor/dompurify.js", { root: "vendor", filename: "dompurify/dist/purify.min.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/vendor/echarts.js", { root: "vendor", filename: "echarts/dist/echarts.min.js", contentType: "text/javascript; charset=utf-8" }],
 ]);
 
 interface Logger {
@@ -257,6 +261,18 @@ function createAgentEventStreamer(response: ServerResponse): (event: AgentSessio
         id: event.toolCallId,
         name: event.toolName,
       });
+    } else if (event.type === "tool_execution_update") {
+      const details = typeof event.partialResult === "object" && event.partialResult !== null &&
+          "details" in event.partialResult
+        ? event.partialResult.details
+        : undefined;
+      if (event.toolName === "update_dashboard" && isDashboardUpdateDetails(details)) {
+        writeSse(response, "dashboard_update", {
+          turn,
+          toolCallId: event.toolCallId,
+          dashboard: details.dashboard,
+        });
+      }
     } else if (event.type === "tool_execution_end") {
       writeSse(response, "tool_end", {
         turn,

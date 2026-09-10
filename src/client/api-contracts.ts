@@ -24,6 +24,11 @@ import type {
 } from "../shared/contracts.ts";
 import { isAgentToolName } from "../shared/contracts.ts";
 import { isSemanticGeneratedImageId } from "../shared/image-references.ts";
+import {
+  DashboardValidationError,
+  parseDashboardState,
+  type DashboardState,
+} from "../shared/dashboard.ts";
 
 export type Decoder<Value> = (value: unknown, path?: string) => Value;
 
@@ -94,6 +99,17 @@ function array<Value>(
 ): Value[] {
   if (!Array.isArray(value)) return invalid(path, "数组");
   return value.map((item, index) => decode(item, `${path}[${index}]`));
+}
+
+function dashboardState(value: unknown, path: string): DashboardState {
+  try {
+    return parseDashboardState(value, path);
+  } catch (error) {
+    if (error instanceof DashboardValidationError) {
+      throw new ContractValidationError(error.path, error.message.replace(/^.* 应为/u, ""));
+    }
+    throw error;
+  }
 }
 
 function chatRole(value: unknown, path: string): ChatRole {
@@ -246,6 +262,7 @@ export const decodeSerializedSession: Decoder<SerializedSession> = (value, path 
     model: model === null ? null : modelDescriptor(model, `${path}.model`),
     tools: array(item["tools"], `${path}.tools`, agentToolName),
     streaming: boolean(item["streaming"], `${path}.streaming`),
+    dashboard: dashboardState(item["dashboard"], `${path}.dashboard`),
     messages: array(item["messages"], `${path}.messages`, chatMessage),
   };
 };
@@ -385,6 +402,17 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
         turn: nonNegativeInteger(data["turn"], `${path}.turn`),
         toolCallId: nonEmptyString(data["toolCallId"], `${path}.toolCallId`),
         image: chatImage(data["image"], `${path}.image`),
+      },
+    };
+  }
+  if (event === "dashboard_update") {
+    const item = record(value, path);
+    return {
+      event,
+      data: {
+        turn: nonNegativeInteger(item["turn"], `${path}.turn`),
+        toolCallId: nonEmptyString(item["toolCallId"], `${path}.toolCallId`),
+        dashboard: dashboardState(item["dashboard"], `${path}.dashboard`),
       },
     };
   }

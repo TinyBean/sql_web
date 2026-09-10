@@ -1,3 +1,5 @@
+import type { DashboardState } from "./dashboard.ts";
+
 export type ChatRole = "user" | "assistant";
 export type AgentToolName = string;
 
@@ -56,6 +58,7 @@ export interface SerializedSession {
   readonly model: ModelDescriptor | null;
   readonly tools: readonly AgentToolName[];
   readonly streaming: boolean;
+  readonly dashboard: DashboardState;
   readonly messages: readonly ChatMessage[];
 }
 
@@ -138,6 +141,7 @@ export interface SseEventMap {
   tool_start: { turn: number; id: string; name: string };
   tool_end: { turn: number; id: string; name: string; isError: boolean };
   generated_image: { turn: number; toolCallId: string; image: ChatImage };
+  dashboard_update: { turn: number; toolCallId: string; dashboard: DashboardState };
   turn_end: { turn: number; final: boolean };
   compaction_start: { reason: AutomaticCompactionReason };
   compaction_end: { reason: AutomaticCompactionReason; outcome: CompactionOutcome };

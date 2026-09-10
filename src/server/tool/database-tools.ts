@@ -16,10 +16,19 @@ import {
 } from "./code-interpreter.ts";
 import type { AppDatabase } from "../database/database.ts";
 import type { QueryResult } from "../database/database.ts";
+import type { DashboardModule } from "./dashboard.ts";
+import {
+  createDashboardTools,
+  DASHBOARD_AGENT_TOOL_NAMES,
+} from "./dashboard-tools.ts";
 
 export const BASE_AGENT_TOOL_NAMES = ["execute_sql", "get_current_time"] as const satisfies
   readonly AgentToolName[];
-export const ALL_AGENT_TOOL_NAMES = [...BASE_AGENT_TOOL_NAMES, "code_interpreter"] as const satisfies
+export const ALL_AGENT_TOOL_NAMES = [
+  ...BASE_AGENT_TOOL_NAMES,
+  ...DASHBOARD_AGENT_TOOL_NAMES,
+  "code_interpreter",
+] as const satisfies
   readonly AgentToolName[];
 
 const INLINE_MAX_ROWS = 200;
@@ -85,8 +94,19 @@ export function getCurrentTime(now = new Date()): CurrentTimeResult {
   };
 }
 
-export function activeAgentToolNames(codeInterpreter: CodeInterpreterRuntime): AgentToolName[] {
-  return codeInterpreter.status.available ? [...ALL_AGENT_TOOL_NAMES] : [...BASE_AGENT_TOOL_NAMES];
+export function activeAgentToolNames(
+  codeInterpreter: CodeInterpreterRuntime,
+  dashboardAvailable = false,
+): AgentToolName[] {
+  const names: AgentToolName[] = [...BASE_AGENT_TOOL_NAMES];
+  if (dashboardAvailable) names.push(...DASHBOARD_AGENT_TOOL_NAMES);
+  if (codeInterpreter.status.available) names.push("code_interpreter");
+  return names;
+}
+
+export interface DashboardToolContext {
+  readonly dashboard: DashboardModule;
+  readonly sessionId: string;
 }
 
 export function createAgentTools(
@@ -94,6 +114,7 @@ export function createAgentTools(
   artifacts: SessionArtifactStore,
   codeInterpreter: CodeInterpreterRuntime,
   usedGeneratedImageIds: Set<string> = new Set<string>(),
+  dashboardContext?: DashboardToolContext,
 ) {
   const executeSqlTool = defineTool({
     name: "execute_sql",
@@ -209,7 +230,11 @@ export function createAgentTools(
     },
   });
 
-  if (!codeInterpreter.status.available) return [executeSqlTool, currentTimeTool];
+  const tools = [executeSqlTool, currentTimeTool];
+  if (dashboardContext) {
+    tools.push(...createDashboardTools(dashboardContext.dashboard, dashboardContext.sessionId));
+  }
+  if (!codeInterpreter.status.available) return tools;
   const codeInterpreterTool = defineTool({
     name: "code_interpreter",
     label: "执行可信数据分析",
@@ -283,5 +308,5 @@ export function createAgentTools(
     },
   });
 
-  return [executeSqlTool, currentTimeTool, codeInterpreterTool];
+  return [...tools, codeInterpreterTool];
 }

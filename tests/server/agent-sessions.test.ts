@@ -67,6 +67,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "get_dashboard",
+    "update_dashboard",
   ]);
   assert.equal(created.model?.provider, "test-provider");
   assert.equal(created.model?.id, "test-model");
@@ -74,6 +76,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "get_dashboard",
+    "update_dashboard",
   ]);
 
   const piSession = await store.get(created.id);
@@ -92,6 +96,13 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.doesNotMatch(piSession.systemPrompt, /Machine_Running、全部机台 Availability/u);
   assert.match(piSession.systemPrompt, /execute_sql 只允许执行一条会返回结果集的只读 SQL/u);
   assert.match(piSession.systemPrompt, /get_current_time/u);
+  assert.match(piSession.systemPrompt, /Dashboard 使用说明:/u);
+  assert.match(
+    piSession.systemPrompt,
+    /标准流程固定为 get_dashboard → execute_sql\(save_as\) → update_dashboard/u,
+  );
+  assert.match(piSession.systemPrompt, /kpi 用于单值,line 用于有序趋势/u);
+  assert.match(piSession.systemPrompt, /只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset/u);
   assert.doesNotMatch(piSession.systemPrompt, /code_interpreter\.input_json/u);
   assert.doesNotMatch(piSession.systemPrompt, /SimHei|matplotlib_chinese_font|chinese_font/u);
 
@@ -181,6 +192,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "get_dashboard",
+    "update_dashboard",
     "test_oee_calculator__get_default_sql",
     "test_oee_calculator__get_sql_expressions",
     "test_oee_calculator__validate_lot_ids",
@@ -255,7 +268,13 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   restoredStore.dispose();
 
   const isolated = await store.create();
-  assert.deepEqual(isolated.tools, ["read", "execute_sql", "get_current_time"]);
+  assert.deepEqual(isolated.tools, [
+    "read",
+    "execute_sql",
+    "get_current_time",
+    "get_dashboard",
+    "update_dashboard",
+  ]);
   const isolatedSession = await store.get(isolated.id);
   assert.equal(
     isolatedSession.getToolDefinition("test_oee_calculator__get_sql_expressions"),

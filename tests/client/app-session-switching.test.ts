@@ -7,15 +7,23 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { parseHTML } from "linkedom";
 import type { ChatMessage, SerializedSession, SessionSummary } from "../../src/shared/contracts.ts";
+import type { DashboardState } from "../../src/shared/dashboard.ts";
 
 const projectRoot = process.cwd();
+const EMPTY_DASHBOARD: DashboardState = {
+  schemaVersion: 1,
+  revision: 0,
+  dataAsOf: "2026-09-08T00:00:00.000Z",
+  dateRange: { start: null, end: null },
+  widgets: [],
+};
 
 function serializedSession(
   id: string,
   title: string,
   messages: readonly ChatMessage[] = [],
 ): SerializedSession {
-  return { id, title, model: null, tools: [], streaming: false, messages };
+  return { id, title, model: null, tools: [], streaming: false, dashboard: EMPTY_DASHBOARD, messages };
 }
 
 function sessionSummary(id: string, title: string): SessionSummary {
@@ -191,6 +199,10 @@ test("switches between independent live session answers without stealing the cur
   const messages = document.querySelector("#messages") as unknown as HTMLElement;
   const sendButton = document.querySelector("#sendButton") as unknown as HTMLButtonElement;
   const newChatButton = document.querySelector("#newChatButton") as unknown as HTMLButtonElement;
+  const chatDock = document.querySelector("#chatDock") as HTMLElement;
+  const chatCollapseButton = document.querySelector("#chatCollapseButton") as HTMLButtonElement;
+  const dashboardMain = document.querySelector("#dashboardMain") as HTMLElement;
+  const dashboardUpdatedAt = document.querySelector("#dashboardUpdatedAt") as HTMLElement;
   Object.defineProperty(messages, "clientHeight", { configurable: true, value: 300 });
   Object.defineProperty(messages, "scrollHeight", { configurable: true, value: 900 });
   const submit = (): void => {
@@ -212,6 +224,17 @@ test("switches between independent live session answers without stealing the cur
     "session A did not load",
   );
   assert.equal(messages.scrollTop, 900, "a session without a saved position should open at the bottom");
+  assert.equal(chatDock.classList.contains("open"), false, "chat should start collapsed");
+  input.value = "保留的草稿";
+  input.dispatchEvent(new browser.Event("focus"));
+  assert.equal(chatDock.classList.contains("open"), true);
+  chatCollapseButton.click();
+  assert.equal(chatDock.classList.contains("open"), false);
+  assert.equal(input.value, "保留的草稿");
+  input.dispatchEvent(new browser.Event("focus"));
+  dashboardMain.click();
+  assert.equal(chatDock.classList.contains("open"), false, "dashboard blank area should collapse chat");
+  input.value = "";
 
   messages.scrollTop = 125;
   sessionButton("session-b").click();
@@ -238,7 +261,16 @@ test("switches between independent live session answers without stealing the cur
   assert.equal(deleteButton("session-b").disabled, false);
   sendSse("session-a", "turn_start", { turn: 0 });
   sendSse("session-a", "text_delta", { turn: 0, delta: "A 正在回答" });
+  sendSse("session-a", "dashboard_update", {
+    turn: 0,
+    toolCallId: "dashboard-a-1",
+    dashboard: { ...EMPTY_DASHBOARD, revision: 1, dataAsOf: "2026-09-08T01:00:00.000Z" },
+  });
   await waitFor(() => messages.textContent.includes("A 正在回答"), "session A progress was not rendered");
+  assert.match(dashboardUpdatedAt.textContent ?? "", /r1/u);
+  chatCollapseButton.click();
+  assert.equal(chatDock.classList.contains("open"), false, "running chat can be collapsed");
+  assert.equal(chatDock.classList.contains("streaming"), true);
 
   messages.scrollTop = 180;
   newChatButton.click();
@@ -251,6 +283,7 @@ test("switches between independent live session answers without stealing the cur
 
   sessionButton("session-b").click();
   await waitFor(() => sessionButton("session-b").classList.contains("active"), "session B did not load");
+  assert.match(dashboardUpdatedAt.textContent ?? "", /r0/u);
   assert.equal(input.disabled, false);
   assert.equal(sendButton.getAttribute("aria-label"), "发送问题");
   assert.equal(sessionButton("session-a").classList.contains("streaming"), true);
@@ -269,13 +302,26 @@ test("switches between independent live session answers without stealing the cur
 
   messages.scrollTop = 240;
   sendSse("session-a", "text_delta", { turn: 0, delta: "，后台新增" });
+  sendSse("session-a", "dashboard_update", {
+    turn: 0,
+    toolCallId: "dashboard-a-2",
+    dashboard: { ...EMPTY_DASHBOARD, revision: 2, dataAsOf: "2026-09-08T02:00:00.000Z" },
+  });
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(messages.scrollTop, 240, "background growth must not move the selected session");
+  assert.match(dashboardUpdatedAt.textContent ?? "", /r0/u, "background dashboard must not replace selected session");
 
   sessionButton("session-a").click();
   await waitFor(() => sessionButton("session-a").classList.contains("active"), "session A was not restored");
   assert.equal(messages.textContent.includes("A 正在回答"), true);
   assert.equal(messages.textContent.includes("B 正在回答"), false);
+  assert.match(dashboardUpdatedAt.textContent ?? "", /r2/u);
+  sendSse("session-a", "dashboard_update", {
+    turn: 0,
+    toolCallId: "dashboard-a-late",
+    dashboard: { ...EMPTY_DASHBOARD, revision: 1, dataAsOf: "2026-09-08T01:30:00.000Z" },
+  });
+  assert.match(dashboardUpdatedAt.textContent ?? "", /r2/u, "late revision must be ignored");
   assert.equal(sessionLoads.get("session-a"), sessionALoadsBeforeStreaming, "live session A should reuse its preserved view");
   assert.equal(messages.scrollTop, 180, "a live session should restore the position saved before leaving");
   sendSse("session-a", "text_delta", { turn: 0, delta: "，回来后继续" });

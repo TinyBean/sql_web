@@ -23,9 +23,17 @@ import {
   type WebSessionPort,
 } from "../../src/server/http-server.ts";
 import type { ChatImage, ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
+import type { DashboardState } from "../../src/shared/dashboard.ts";
 import { generatedImageMarkdown } from "../../src/shared/image-references.ts";
 
 const projectRoot = process.cwd();
+const EMPTY_DASHBOARD: DashboardState = {
+  schemaVersion: 1,
+  revision: 0,
+  dataAsOf: "2026-09-08T00:00:00.000Z",
+  dateRange: { start: null, end: null },
+  widgets: [],
+};
 
 async function fetchContract<ResponseBody>(
   url: string,
@@ -59,6 +67,7 @@ async function createFixture(
       model: null,
       tools: ["execute_sql", "get_current_time"],
       streaming: false,
+      dashboard: EMPTY_DASHBOARD,
       messages: [],
     }),
     get: async () => { throw new Error("not used in this test"); },
@@ -207,6 +216,12 @@ test("serves the app with restrictive security headers", async (t) => {
   const domPurifyVendor = await fetch(`${baseUrl}/vendor/dompurify.js`);
   assert.equal(domPurifyVendor.status, 200);
   assert.match(await domPurifyVendor.text(), /DOMPurify/u);
+  const eChartsVendor = await fetch(`${baseUrl}/vendor/echarts.js`);
+  assert.equal(eChartsVendor.status, 200);
+  assert.match(await eChartsVendor.text(), /echarts/u);
+  const dashboardModule = await fetch(`${baseUrl}/dashboard.js`);
+  assert.equal(dashboardModule.status, 200);
+  assert.match(dashboardModule.headers.get("content-type") ?? "", /javascript/u);
 });
 
 test("exposes health, schema, and session endpoints", async (t) => {
@@ -245,6 +260,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     model: null,
     tools: ["execute_sql", "get_current_time"],
     streaming: false,
+    dashboard: EMPTY_DASHBOARD,
     messages: [
       { id: "user-1", role: "user", text: "统计销售额" },
       {
@@ -394,6 +410,89 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
   });
 });
 
+test("streams a persisted dashboard update before tool end and reconciles it in done", async (t) => {
+  const dashboard: DashboardState = { ...EMPTY_DASHBOARD, revision: 1 };
+  const completedSession: SerializedSession = {
+    id: "fake-session",
+    title: "更新看板",
+    model: null,
+    tools: ["get_dashboard", "update_dashboard"],
+    streaming: false,
+    dashboard,
+    messages: [],
+  };
+  const listeners = new Set<(event: AgentSessionEvent) => void>();
+  const streamable: StreamableAgentSession = {
+    isStreaming: false,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const emit = (event: AgentSessionEvent): void => {
+    for (const listener of listeners) listener(event);
+  };
+  const sessions: WebSessionPort = {
+    status: () => ({
+      tools: ["get_dashboard", "update_dashboard"],
+      codeInterpreter: { available: false, reason: "test" },
+      model: { provider: "test-provider", model: "test-model" },
+      availableModelCount: 0,
+      activeSessionCount: 1,
+    }),
+    list: async () => [],
+    create: async () => completedSession,
+    get: async () => streamable,
+    getSerialized: async () => completedSession,
+    delete: async () => {},
+    prompt: async () => {
+      emit({ type: "turn_start" } as AgentSessionEvent);
+      emit({
+        type: "tool_execution_start",
+        toolCallId: "dashboard-call",
+        toolName: "update_dashboard",
+        args: {},
+      } as AgentSessionEvent);
+      emit({
+        type: "tool_execution_update",
+        toolCallId: "dashboard-call",
+        toolName: "update_dashboard",
+        partialResult: { details: { kind: "dashboard_update", dashboard } },
+      } as AgentSessionEvent);
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "dashboard-call",
+        toolName: "update_dashboard",
+        result: { details: { kind: "dashboard_summary", revision: 1 } },
+        isError: false,
+      } as AgentSessionEvent);
+    },
+    abort: async () => {},
+  };
+  const baseUrl = await createFixture(t, sessions);
+  const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "更新看板" }),
+  });
+  const events = parseSseBody(await response.text());
+  const names = events.map((event) => event.event);
+  const start = names.indexOf("tool_start");
+  const update = names.indexOf("dashboard_update");
+  const end = names.indexOf("tool_end");
+  const done = names.indexOf("done");
+  assert.ok(start < update && update < end && end < done);
+  assert.equal(events[update]?.event, "dashboard_update");
+  if (events[update]?.event === "dashboard_update") {
+    assert.equal(events[update].data.dashboard.revision, 1);
+  }
+  const finalEvent = events.at(-1);
+  assert.equal(finalEvent?.event, "done");
+  if (finalEvent?.event === "done") {
+    assert.equal(finalEvent.data.dashboard.revision, 1);
+  }
+});
+
 test("streams validated generated images after tool completion and reconciles with done", async (t) => {
   const imageData = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
   const expectedImages = [
@@ -406,6 +505,7 @@ test("streams validated generated images after tool completion and reconciles wi
     model: null,
     tools: ["code_interpreter"],
     streaming: false,
+    dashboard: EMPTY_DASHBOARD,
     messages: [{
       id: "assistant-1",
       role: "assistant",
@@ -546,6 +646,7 @@ test("does not stream images from failed, unrelated, or malformed tool results",
     model: null,
     tools: ["code_interpreter", "execute_sql"],
     streaming: false,
+    dashboard: EMPTY_DASHBOARD,
     messages: [],
   };
   const listeners = new Set<(event: AgentSessionEvent) => void>();
@@ -638,6 +739,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
     model: null,
     tools: [],
     streaming: false,
+    dashboard: EMPTY_DASHBOARD,
     messages: [],
   };
   const listeners = new Set<(event: AgentSessionEvent) => void>();

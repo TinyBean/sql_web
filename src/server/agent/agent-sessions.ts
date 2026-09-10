@@ -30,6 +30,7 @@ import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
 import { extractCodeInterpreterImages } from "../tool/code-interpreter-images.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
+import { DashboardModule } from "../tool/dashboard.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import { createGeneratedTextReviewExtension } from "./generated-text-review.ts";
 import type { AppLogger } from "../logger.ts";
@@ -95,13 +96,13 @@ export class SessionBusyError extends Error {
 function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
   const codeInterpreterRules = codeInterpreterAvailable
     ? `
-8. 少量查询结果优先使用 execute_sql。优先让 SQLite 在同一条查询中完成过滤、聚合、比率和乘积;不要把数据库查询结果复制到其他工具参数或代码数据字面量中。
-9. 只有同一条 SQL 无法完成所需统计或需要 PNG 渲染时才调用 code_interpreter。先调用 execute_sql 并用 save_as 保存简短有意义的会话级数据快照,再把工具返回的规范逻辑名称传入 code_interpreter.snapshot;不得把 SQL 或预览行复制进 Python。查询被截断时应先聚合、过滤或分批后重试。
-10. 传入 snapshot 时,优先直接遍历预注入的 snapshot_rows;它固定是 list[dict],每一行已经是对象,使用 row["列名"] 取值,严禁再用 zip(columns,row) 重建。input_data 同时支持 input_data.database 和 input_data["database"],其中 database 包含 columns、rows、rowCount 和 truncated。未传 snapshot 时 input_data.database 为 None、snapshot_rows 为空,仅用于不依赖数据库的纯 Python。input_data.user 是用户明确提供的可选 user_input。数据库事实只能来自快照;用户参数只能来自 input_data.user;代码字面量只用于公式常量、单位换算、标签和绘图设置。后续计算或绘图应复用已有快照,仅在需要刷新数据库事实时重新执行 SQL 并覆盖同名快照。
-11. 每次 Python 执行必须且只能调用一次 emit_result(...)。可传 JSON 值或 summary、metrics、intermediates、data、notes 关键字;缺少 summary 时运行时补为“计算完成”,notes 字符串会转为单元素数组。最终回答中的计算数值必须来自结构化 result;print() 只用于调试日志且不能替代 emit_result。对 min、max、首项索引和除法必须先处理空集合或零分母。回答应简述数据来源、查询范围、公式和关键中间量,完整 SQL 与代码无需默认展开。
-12. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
-13. 沙箱已经为 Matplotlib 配置好简体中文字体,普通中文标题和坐标文字无需设置字体。matplotlib_chinese_font(...) 和 chinese_font(...) 是沙箱预注入的全局函数,不是 Python 模块,禁止 import 或 from import,需要显式字体对象时只能直接调用;Matplotlib 使用 fontproperties=matplotlib_chinese_font(12, bold=True),Pillow 使用 font=chinese_font(20, bold=True)。不得硬编码 SimHei 等字体族。
-14. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是归一化后不超过 50 个字符、能表达图片含义的具体英文名称,例如 oee-ranking 或 availability-trend;可以包含空格或标点并会归一化为小写连字符格式,但不得使用纯数字、随机字符或空泛名称;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。`
+16. 少量查询结果优先使用 execute_sql。优先让 SQLite 在同一条查询中完成过滤、聚合、比率和乘积;不要把数据库查询结果复制到其他工具参数或代码数据字面量中。
+17. 只有同一条 SQL 无法完成所需统计或需要 PNG 渲染时才调用 code_interpreter。先调用 execute_sql 并用 save_as 保存简短有意义的会话级数据快照,再把工具返回的规范逻辑名称传入 code_interpreter.snapshot;不得把 SQL 或预览行复制进 Python。查询被截断时应先聚合、过滤或分批后重试。
+18. 传入 snapshot 时,优先直接遍历预注入的 snapshot_rows;它固定是 list[dict],每一行已经是对象,使用 row["列名"] 取值,严禁再用 zip(columns,row) 重建。input_data 同时支持 input_data.database 和 input_data["database"],其中 database 包含 columns、rows、rowCount 和 truncated。未传 snapshot 时 input_data.database 为 None、snapshot_rows 为空,仅用于不依赖数据库的纯 Python。input_data.user 是用户明确提供的可选 user_input。数据库事实只能来自快照;用户参数只能来自 input_data.user;代码字面量只用于公式常量、单位换算、标签和绘图设置。后续计算或绘图应复用已有快照,仅在需要刷新数据库事实时重新执行 SQL 并覆盖同名快照。
+19. 每次 Python 执行必须且只能调用一次 emit_result(...)。可传 JSON 值或 summary、metrics、intermediates、data、notes 关键字;缺少 summary 时运行时补为“计算完成”,notes 字符串会转为单元素数组。最终回答中的计算数值必须来自结构化 result;print() 只用于调试日志且不能替代 emit_result。对 min、max、首项索引和除法必须先处理空集合或零分母。回答应简述数据来源、查询范围、公式和关键中间量,完整 SQL 与代码无需默认展开。
+20. code_interpreter 是禁网且与项目隔离的临时沙箱,不得尝试访问 SQLite、项目文件、任意宿主路径或安装依赖。
+21. 沙箱已经为 Matplotlib 配置好简体中文字体,普通中文标题和坐标文字无需设置字体。matplotlib_chinese_font(...) 和 chinese_font(...) 是沙箱预注入的全局函数,不是 Python 模块,禁止 import 或 from import,需要显式字体对象时只能直接调用;Matplotlib 使用 fontproperties=matplotlib_chinese_font(12, bold=True),Pillow 使用 font=chinese_font(20, bold=True)。不得硬编码 SimHei 等字体族。
+22. 生成 PNG 时必须显式调用 emit_image(value, reference_name),其中 reference_name 是归一化后不超过 50 个字符、能表达图片含义的具体英文名称,例如 oee-ranking 或 availability-trend;可以包含空格或标点并会归一化为小写连字符格式,但不得使用纯数字、随机字符或空泛名称;未显式提交的 Matplotlib 图不会输出。生成图片会由前端自动附加并持久化。工具结果包含 imageReferences 时,必须将每个 markdown 字段原样且只使用一次,放在最终回答希望展示该图的位置;不得修改引用 ID 或虚构其他 Markdown 图片地址。复杂统计 PNG 只属于聊天内容,不得尝试写入结构化看板。`
     : "";
   return `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
@@ -112,7 +113,17 @@ function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
 4. execute_sql 只允许执行一条会返回结果集的只读 SQL;不得尝试新增、修改、删除数据或执行 DDL。
 5. 用户询问当前日期、时间或相对时间范围时,先调用 get_current_time 获取真实的当前时间。
 6. 回答使用中文,先给结论,再简洁说明口径。比率说明分子与分母;没有数据时明确说明。
-7. 不要声称自己访问了未由工具提供的文件、终端或网络。只能使用当前会话已注册并启用的工具。${codeInterpreterRules}`;
+7. 不要声称自己访问了未由工具提供的文件、终端或网络。只能使用当前会话已注册并启用的工具。
+
+Dashboard 使用说明:
+8. Dashboard 是当前会话持久化的结构化看板,用于展示值得持续查看的指标、趋势、排名、构成或明细表;它不同于聊天正文中的一次性 PNG。
+9. 指标问题产生适合可视化的结果时,标准流程固定为 get_dashboard → execute_sql(save_as) → update_dashboard。先读取当前 revision 和已有组件,再由 SQL 完成过滤、聚合、比率、排序和清晰的输出列命名,并把完整且未截断的结果保存为会话快照。
+10. update_dashboard 只能引用当前会话由 execute_sql.save_as 返回的规范快照名并映射其中真实存在的列;不得复制查询结果,不得传入 ECharts 配置、函数、HTML 或样式。
+11. 根据结果选择受控组件类型:kpi 用于单值,line 用于有序趋势,bar 或 stacked-bar 用于分类比较,donut 用于少量构成,table 用于需要精确阅读的多列明细。组件字段必须与快照列及数据粒度匹配。
+12. 更新同一主题时复用已有稳定组件 ID,只有新分析才创建新 ID。date_range 必须填写查询实际覆盖范围,metric_definition 必须说明口径,数据缺失或不可计算条件写入 warnings。
+13. 每次 update_dashboard 都使用最近一次 get_dashboard 返回的 revision。出现 revision 冲突时重新读取看板并只重试一次。只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset。
+14. 纯口径解释、定义说明、SQL 失败、快照被截断或结果无法合理可视化时不得修改看板;不要为了调用工具而创建无意义组件。
+15. OEE 查询继续遵循 Test OEE Skill 中的日期、LOT、MT/ST 与 Machine_Running 口径。${codeInterpreterRules}`;
 }
 
 async function createLockedResourceLoader(
@@ -477,6 +488,7 @@ export class AgentSessionStore {
   readonly #agentDir: string;
   readonly #model: ModelSelection;
   readonly #artifacts: ArtifactStore;
+  readonly #dashboard: DashboardModule;
   readonly #codeInterpreter: CodeInterpreterRuntime;
   readonly #toolNames: readonly AgentToolName[];
   readonly #skillCatalog: AgentSkillCatalog;
@@ -500,8 +512,9 @@ export class AgentSessionStore {
     this.#agentDir = agentDir;
     this.#model = model;
     this.#artifacts = artifacts;
+    this.#dashboard = new DashboardModule(database, artifacts);
     this.#codeInterpreter = codeInterpreter;
-    this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter)];
+    this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter, true)];
     this.#skillCatalog = skillCatalog;
     this.#modelRuntime = modelRuntime;
     this.#logger = logger ?? NOOP_LOGGER;
@@ -541,9 +554,10 @@ export class AgentSessionStore {
 
   async create(): Promise<SerializedSession> {
     const manager = SessionManager.create(this.#cwd, this.#sessionDir);
+    this.#initializeDashboardEntry(manager);
     const session = await this.#createPiSession(manager);
-    // Pi persists a new session lazily on its first entry. Naming it here makes
-    // the in-memory web session presentable before the first assistant response.
+    // The dashboard marker has already made the empty session durable. Naming
+    // it here keeps both the persisted session list and web response presentable.
     session.setSessionName("新会话");
     this.#sessions.set(session.sessionId, session);
     const now = new Date();
@@ -594,7 +608,7 @@ export class AgentSessionStore {
     const info = infos.find((candidate) => candidate.id === id);
     if (!info) throw new SessionNotFoundError(id);
     const session = await this.#createPiSession(
-      SessionManager.open(info.path, this.#sessionDir, this.#cwd),
+      this.#openInitializedManager(info.path),
     );
     this.#sessions.set(id, session);
     this.#sessionTimes.set(id, { created: info.created, modified: info.modified });
@@ -705,6 +719,7 @@ export class AgentSessionStore {
       tools: validatedAgentToolNames(session),
       streaming: session.isStreaming,
       messages: serializeMessages(session.messages),
+      dashboard: this.#dashboard.loadOrInitialize(session.sessionId),
     };
   }
 
@@ -758,6 +773,7 @@ export class AgentSessionStore {
       artifacts,
       this.#codeInterpreter,
       usedGeneratedImageIds,
+      { dashboard: this.#dashboard, sessionId: sessionManager.getSessionId() },
     );
     const resourceLoader = await createLockedResourceLoader(
       buildSystemPrompt(this.#codeInterpreter.status.available),
@@ -871,6 +887,20 @@ export class AgentSessionStore {
 
   #assertValidId(id: string): void {
     if (!SESSION_ID_PATTERN.test(id)) throw new SessionNotFoundError(id);
+  }
+
+  #openInitializedManager(filePath: string): SessionManager {
+    const manager = SessionManager.open(filePath, this.#sessionDir, this.#cwd);
+    this.#initializeDashboardEntry(manager);
+    return manager;
+  }
+
+  #initializeDashboardEntry(manager: SessionManager): void {
+    this.#dashboard.loadOrInitialize(manager.getSessionId());
+    const hasMarker = manager.getEntries().some((entry) => (
+      entry.type === "custom" && entry.customType === "datalens_dashboard_v1"
+    ));
+    if (!hasMarker) manager.appendCustomEntry("datalens_dashboard_v1", { schemaVersion: 1 });
   }
 
 }

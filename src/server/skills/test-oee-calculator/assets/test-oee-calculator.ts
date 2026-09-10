@@ -22,10 +22,28 @@ export interface TestOeeSqlExpressions {
   readonly startDate: string;
   readonly endDate: string;
   readonly exclusiveEndDate: string;
+  readonly dayExpression: string;
+  readonly machineExpression: string;
   readonly dateRangePredicate: string;
   readonly lotPredicate: string;
+  readonly platformPredicate: string;
   readonly kindExpression: string;
   readonly availabilityStateExpression?: string;
+  readonly touchdownLabelExpression?: string;
+  readonly testTimeSecondsExpression?: string;
+}
+
+export interface DefaultTestOeeSql {
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly exclusiveEndDate: string;
+  readonly dailyGrain: readonly ["day", "kind"];
+  readonly trimPercent: 0.2;
+  readonly trimFraction: 0.002;
+  readonly trimPercentPerTail: 0.1;
+  readonly trimFractionPerTail: 0.001;
+  readonly periodAggregation: "average_of_daily_oee";
+  readonly sql: string;
 }
 
 export interface LotEligibilityResult {
@@ -41,6 +59,8 @@ export interface MtStClassificationInput {
 export interface MtStClassificationResult extends MtStClassificationInput {
   readonly kind: TestOeeKind | null;
   readonly source: TestOeeKindSource | null;
+  readonly excludedPciePlatform: boolean;
+  readonly includedInOee: boolean;
 }
 
 export interface AvailabilityStateInput {
@@ -91,6 +111,28 @@ export interface RatioProductResult {
 export const VALID_OEE_LOT_PREFIXES = ["P", "M", "R", "A", "F", "L"] as const;
 export const MAX_RULE_BATCH_SIZE = 200;
 export const MAX_RATIO_ITEMS = 20;
+export const TEST_OEE_DAY_SECONDS = 86_400;
+export const TEST_TIME_TRIM_PERCENT = 0.2;
+export const TEST_TIME_TRIM_FRACTION = 0.002;
+export const TEST_TIME_TRIM_PERCENT_PER_TAIL = 0.1;
+export const TEST_TIME_TRIM_FRACTION_PER_TAIL = 0.001;
+
+/** Excel 平台表中平台名称包含 PCIe 的机台；这些机台不参与 Test OEE。 */
+export const PCIE_PLATFORM_MACHINE_IDS = [
+  "TSPH001",
+  "TSPH002",
+  "TSPH003",
+  "TSPH004",
+  "TSPH005",
+  "TSPH006",
+  "TSPH007",
+  "TSPH008",
+  "TSPH009",
+  "TSPH010",
+  "TSPH011",
+  "TSPH012",
+  "TSPH013",
+] as const;
 
 /** 所配置的平台会触发 ST 回退规则的机台 ID。 */
 export const ST_PLATFORM_MACHINE_IDS = [
@@ -142,6 +184,7 @@ export const ST_PLATFORM_MACHINE_IDS = [
 
 const VALID_LOT_PREFIX_SET = new Set<string>(VALID_OEE_LOT_PREFIXES);
 const ST_PLATFORM_MACHINE_SET = new Set<string>(ST_PLATFORM_MACHINE_IDS);
+const PCIE_PLATFORM_MACHINE_SET = new Set<string>(PCIE_PLATFORM_MACHINE_IDS);
 const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 const IDLE_NO_TASK_STATES = new Set([
@@ -181,6 +224,10 @@ export function validateTestOeeLotIds(lotIds: readonly string[]): LotEligibility
   return lotIds.map((lotId) => ({ lotId, eligibleLot: isValidOeeLotId(lotId) }));
 }
 
+export function isExcludedPciePlatformMachine(machineId: string): boolean {
+  return PCIE_PLATFORM_MACHINE_SET.has(machineId);
+}
+
 export function classifyTestOeeKindWithSource(
   step: string,
   machineId: string,
@@ -199,10 +246,16 @@ export function classifyTestOeeKinds(
   records: readonly MtStClassificationInput[],
 ): MtStClassificationResult[] {
   assertBatchSize(records, "records");
-  return records.map((record) => ({
-    ...record,
-    ...classifyTestOeeKindWithSource(record.step, record.machineId),
-  }));
+  return records.map((record) => {
+    const classification = classifyTestOeeKindWithSource(record.step, record.machineId);
+    const excludedPciePlatform = isExcludedPciePlatformMachine(record.machineId);
+    return {
+      ...record,
+      ...classification,
+      excludedPciePlatform,
+      includedInOee: !excludedPciePlatform && classification.kind !== null,
+    };
+  });
 }
 
 export function classifyAvailabilityState(
@@ -273,6 +326,10 @@ function validLotSql(column: string): string {
   return `substr(${column},1,1) IN (${VALID_OEE_LOT_PREFIXES.map(quoteSqlLiteral).join(",")})`;
 }
 
+function eligiblePlatformSql(machineColumn: string): string {
+  return `${machineColumn} NOT IN (${PCIE_PLATFORM_MACHINE_IDS.map(quoteSqlLiteral).join(",")})`;
+}
+
 function kindSql(stepColumn: string, machineColumn: string): string {
   return `CASE
     WHEN substr(${stepColumn},1,1)='5' THEN 'MT'
@@ -324,17 +381,21 @@ export function getTestOeeSqlExpressions(
   const dateColumn = sqlColumn("date", tableAlias);
   const lotIdColumn = sqlColumn("lot_id", tableAlias);
   if (source === "availability") {
+    const machineColumn = sqlColumn("tool_name", tableAlias);
     return {
       source,
       tableAlias: tableAlias ?? null,
       startDate,
       endDate,
       exclusiveEndDate,
+      dayExpression: `substr(${dateColumn},1,10)`,
+      machineExpression: machineColumn,
       dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
       lotPredicate: validLotSql(lotIdColumn),
+      platformPredicate: eligiblePlatformSql(machineColumn),
       kindExpression: kindSql(
         sqlColumn("step", tableAlias),
-        sqlColumn("tool_name", tableAlias),
+        machineColumn,
       ),
       availabilityStateExpression: availabilityStateSql(
         sqlColumn("final_state", tableAlias),
@@ -342,18 +403,246 @@ export function getTestOeeSqlExpressions(
       ),
     };
   }
+  const machineColumn = sqlColumn("machine_id", tableAlias);
+  const touchdownColumn = sqlColumn("touchdown_index", tableAlias);
+  const trimmedTouchdownColumn = `trim(${touchdownColumn})`;
   return {
     source,
     tableAlias: tableAlias ?? null,
     startDate,
     endDate,
     exclusiveEndDate,
+    dayExpression: `substr(${dateColumn},1,10)`,
+    machineExpression: machineColumn,
     dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
     lotPredicate: validLotSql(lotIdColumn),
+    platformPredicate: eligiblePlatformSql(machineColumn),
     kindExpression: kindSql(
       sqlColumn("step_id", tableAlias),
-      sqlColumn("machine_id", tableAlias),
+      machineColumn,
     ),
+    touchdownLabelExpression: `CASE
+    WHEN ${touchdownColumn} IS NULL OR ${trimmedTouchdownColumn}='' THEN NULL
+    WHEN ${trimmedTouchdownColumn} GLOB '*[^0-9]*' THEN NULL
+    WHEN CAST(${trimmedTouchdownColumn} AS INTEGER)=0 THEN NULL
+    ELSE 1
+  END`,
+    testTimeSecondsExpression: `CASE
+    WHEN unixepoch(${sqlColumn("start_time", tableAlias)},'subsec') IS NULL
+      OR unixepoch(${sqlColumn("end_time", tableAlias)},'subsec') IS NULL THEN NULL
+    ELSE CAST(
+      unixepoch(${sqlColumn("end_time", tableAlias)},'subsec')
+      - unixepoch(${sqlColumn("start_time", tableAlias)},'subsec') AS REAL
+    )
+  END`,
+  };
+}
+
+export function getDefaultTestOeeSql(startDate: string, endDate: string): DefaultTestOeeSql {
+  const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
+  const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
+  if (
+    availability.availabilityStateExpression === undefined ||
+    dut.touchdownLabelExpression === undefined ||
+    dut.testTimeSecondsExpression === undefined
+  ) {
+    throw new TestOeeInputError("默认 Test OEE SQL 表达式不完整");
+  }
+
+  const sql = `WITH RECURSIVE
+calendar(day) AS (
+  SELECT ${quoteSqlLiteral(startDate)}
+  UNION ALL
+  SELECT date(day,'+1 day') FROM calendar WHERE day<${quoteSqlLiteral(endDate)}
+),
+kinds(kind) AS (VALUES ('MT'),('ST')),
+availability_classified AS (
+  SELECT
+    ${availability.dayExpression} AS day,
+    ${availability.machineExpression} AS machine,
+    ${availability.kindExpression} AS kind,
+    ${availability.availabilityStateExpression} AS state_group,
+    CAST(a.time_span AS REAL) AS state_seconds
+  FROM oee_availability AS a
+  WHERE ${availability.dateRangePredicate}
+    AND ${availability.lotPredicate}
+    AND ${availability.platformPredicate}
+),
+availability_daily AS (
+  SELECT
+    day,
+    kind,
+    COUNT(*) AS availability_rows,
+    COUNT(DISTINCT machine) AS machine_count,
+    SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
+      AS machine_running_seconds,
+    COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS} AS available_seconds,
+    CASE
+      WHEN COUNT(DISTINCT machine)=0 THEN NULL
+      ELSE SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
+        / (COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS}.0)
+    END AS availability
+  FROM availability_classified
+  WHERE kind IN ('MT','ST')
+  GROUP BY day, kind
+),
+dut_base AS (
+  SELECT
+    d.id,
+    ${dut.dayExpression} AS day,
+    ${dut.kindExpression} AS kind,
+    CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
+    CAST(NULLIF(trim(d.out_qty),'') AS REAL) AS output_quantity,
+    CAST(NULLIF(trim(d.dut_num),'') AS REAL) AS socket_quantity,
+    ${dut.touchdownLabelExpression} AS touchdown_label,
+    ${dut.testTimeSecondsExpression} AS test_time_seconds
+  FROM oee_dut_utilization AS d
+  WHERE ${dut.dateRangePredicate}
+    AND ${dut.lotPredicate}
+    AND ${dut.platformPredicate}
+),
+dut_daily_aggregate AS (
+  SELECT
+    day,
+    kind,
+    COUNT(*) AS dut_rows,
+    SUM(input_quantity) AS input_quantity,
+    SUM(output_quantity) AS output_quantity,
+    SUM(socket_quantity) AS socket_quantity,
+    SUM(touchdown_label) AS touchdown_count,
+    SUM(test_time_seconds) AS actual_test_seconds
+  FROM dut_base
+  WHERE kind IN ('MT','ST')
+  GROUP BY day, kind
+),
+duration_ranked AS (
+  SELECT
+    id,
+    day,
+    kind,
+    test_time_seconds,
+    ROW_NUMBER() OVER (
+      PARTITION BY day, kind ORDER BY test_time_seconds, id
+    ) AS low_rank,
+    ROW_NUMBER() OVER (
+      PARTITION BY day, kind ORDER BY test_time_seconds DESC, id DESC
+    ) AS high_rank,
+    COUNT(*) OVER (PARTITION BY day, kind) AS duration_count
+  FROM dut_base
+  WHERE kind IN ('MT','ST') AND test_time_seconds IS NOT NULL
+),
+duration_trimmed AS (
+  SELECT
+    day,
+    kind,
+    MAX(duration_count) AS valid_duration_rows,
+    MAX(CAST(duration_count / 1000 AS INTEGER)) AS trimmed_rows_each_tail,
+    AVG(CASE
+      WHEN low_rank>CAST(duration_count / 1000 AS INTEGER)
+        AND high_rank>CAST(duration_count / 1000 AS INTEGER)
+      THEN test_time_seconds
+    END) AS trimmed_mean_test_seconds
+  FROM duration_ranked
+  GROUP BY day, kind
+),
+dut_daily AS (
+  SELECT
+    q.day,
+    q.kind,
+    q.dut_rows,
+    q.input_quantity,
+    q.output_quantity,
+    q.socket_quantity,
+    q.touchdown_count,
+    q.actual_test_seconds,
+    t.valid_duration_rows,
+    t.trimmed_rows_each_tail,
+    t.trimmed_mean_test_seconds,
+    CASE
+      WHEN q.socket_quantity IS NULL OR q.socket_quantity=0 THEN NULL
+      ELSE q.input_quantity / q.socket_quantity
+    END AS dut_on,
+    CASE
+      WHEN q.actual_test_seconds IS NULL OR q.actual_test_seconds=0
+        OR q.touchdown_count IS NULL OR t.trimmed_mean_test_seconds IS NULL THEN NULL
+      ELSE t.trimmed_mean_test_seconds * q.touchdown_count / q.actual_test_seconds
+    END AS test_time_performance,
+    CASE
+      WHEN q.input_quantity IS NULL OR q.input_quantity=0 THEN NULL
+      ELSE q.output_quantity / q.input_quantity
+    END AS final_yield
+  FROM dut_daily_aggregate AS q
+  LEFT JOIN duration_trimmed AS t ON t.day=q.day AND t.kind=q.kind
+),
+daily_results AS (
+  SELECT
+    a.day,
+    a.kind,
+    a.availability_rows,
+    a.machine_count,
+    a.machine_running_seconds,
+    a.available_seconds,
+    d.dut_rows,
+    d.input_quantity,
+    d.output_quantity,
+    d.socket_quantity,
+    d.touchdown_count,
+    d.actual_test_seconds,
+    d.valid_duration_rows,
+    d.trimmed_rows_each_tail,
+    d.trimmed_mean_test_seconds,
+    a.availability,
+    d.dut_on,
+    d.test_time_performance,
+    d.final_yield,
+    CASE
+      WHEN a.availability IS NULL OR d.dut_on IS NULL
+        OR d.test_time_performance IS NULL OR d.final_yield IS NULL THEN NULL
+      ELSE a.availability * d.dut_on * d.test_time_performance * d.final_yield
+    END AS daily_test_oee
+  FROM availability_daily AS a
+  LEFT JOIN dut_daily AS d ON d.day=a.day AND d.kind=a.kind
+)
+SELECT
+  c.day,
+  k.kind,
+  COALESCE(r.availability_rows,0) AS availability_rows,
+  COALESCE(r.machine_count,0) AS machine_count,
+  r.machine_running_seconds,
+  r.available_seconds,
+  r.dut_rows,
+  r.input_quantity,
+  r.output_quantity,
+  r.socket_quantity,
+  r.touchdown_count,
+  r.actual_test_seconds,
+  r.valid_duration_rows,
+  r.trimmed_rows_each_tail,
+  r.trimmed_mean_test_seconds,
+  r.availability,
+  r.dut_on,
+  r.test_time_performance,
+  r.final_yield,
+  r.daily_test_oee,
+  COUNT(r.daily_test_oee) OVER (PARTITION BY k.kind) AS calculable_day_count,
+  COUNT(*) OVER (PARTITION BY k.kind) AS selected_day_count,
+  AVG(r.daily_test_oee) OVER (PARTITION BY k.kind) AS period_test_oee
+FROM calendar AS c
+CROSS JOIN kinds AS k
+LEFT JOIN daily_results AS r ON r.day=c.day AND r.kind=k.kind
+ORDER BY c.day, k.kind`;
+
+  return {
+    startDate,
+    endDate,
+    exclusiveEndDate: availability.exclusiveEndDate,
+    dailyGrain: ["day", "kind"],
+    trimPercent: TEST_TIME_TRIM_PERCENT,
+    trimFraction: TEST_TIME_TRIM_FRACTION,
+    trimPercentPerTail: TEST_TIME_TRIM_PERCENT_PER_TAIL,
+    trimFractionPerTail: TEST_TIME_TRIM_FRACTION_PER_TAIL,
+    periodAggregation: "average_of_daily_oee",
+    sql,
   };
 }
 

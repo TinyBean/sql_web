@@ -1,6 +1,8 @@
 # Test OEE 数据库
 
-这是 Test OEE Skill 使用的 SQLite 数据库。
+这是 Test OEE Skill 使用的 SQLite 数据库。Word 中的
+`R_OEE_MT_TOP_AVAILABILITY` 对应本地表 `oee_availability`；DUT-On、Test Time
+和 Yield 使用本地表 `oee_dut_utilization`。
 
 ## 数据库结构
 
@@ -125,7 +127,7 @@ oee_availability:
 - lot_id(LOT_ID):物料批次号
 - final_state(FINAL_STATE):机台状态
 - step(STEP):步骤
-- date(DATE):日期,ISO格式，筛选时请注意日期格式
+- date(DATE):ISO 格式的业务日标签；标签日当天 08:30 至次日 08:30
 - shift(SHIFT):白班夜班的区分
 - time_span(TIME_SPAN):机台状态对应的时间,单位秒
 
@@ -133,11 +135,15 @@ oee_dut_utilization:
 
 - machine_id(MACHINE_ID):机台号
 - lot_id(LOT_ID):物料批次号
+- touchdown_index(TOUCHDOWN_INDEX):touchdown 序号；非零整数用于生成 TD_Label=1
+- start_time(START_TIME):单次测试开始时间戳
+- end_time(END_TIME):单次测试结束时间戳；与 START_TIME 的差转换为测试秒数
 - in_qty(IN_QTY):实际的 Socket 使用数量
 - out_qty(OUT_QTY):好品数量(包含复测)
 - test_stage(TEST_STAGE):1st 表示初测,Rescreen 表示复测
 - dut_num(DUT_NUM):Socket 数量
 - step_id(STEP_ID):步骤
+- date(DATE):ISO 格式的业务日标签；已经按 08:30 至次日 08:30 归日，不要根据 START_TIME/END_TIME 二次移日
 
 导入审计表:
 

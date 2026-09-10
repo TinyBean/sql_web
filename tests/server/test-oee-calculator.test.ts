@@ -9,9 +9,12 @@ import {
   classifyAvailabilityStates,
   classifyTestOeeKind,
   classifyTestOeeKinds,
+  getDefaultTestOeeSql,
   getTestOeeSqlExpressions,
+  isExcludedPciePlatformMachine,
   isValidOeeLotId,
   MAX_RULE_BATCH_SIZE,
+  PCIE_PLATFORM_MACHINE_IDS,
   TestOeeInputError,
   validateTestOeeLotIds,
 } from "../../src/server/skills/test-oee-calculator/assets/test-oee-calculator.ts";
@@ -68,13 +71,45 @@ test("classifies MT/ST with step precedence and platform fallback", () => {
   assert.equal(classifyTestOeeKind("1000", "ADH001"), null);
   assert.deepEqual(classifyTestOeeKinds([
     { step: "5000", machineId: "ADH092" },
-    { step: "1000", machineId: "ADH092" },
+    { step: "1000", machineId: "TSPH001" },
     { step: "1000", machineId: "ADH001" },
   ]), [
-    { step: "5000", machineId: "ADH092", kind: "MT", source: "step" },
-    { step: "1000", machineId: "ADH092", kind: "ST", source: "platform" },
-    { step: "1000", machineId: "ADH001", kind: null, source: null },
+    {
+      step: "5000",
+      machineId: "ADH092",
+      kind: "MT",
+      source: "step",
+      excludedPciePlatform: false,
+      includedInOee: true,
+    },
+    {
+      step: "1000",
+      machineId: "TSPH001",
+      kind: "ST",
+      source: "platform",
+      excludedPciePlatform: true,
+      includedInOee: false,
+    },
+    {
+      step: "1000",
+      machineId: "ADH001",
+      kind: null,
+      source: null,
+      excludedPciePlatform: false,
+      includedInOee: false,
+    },
   ]);
+});
+
+test("excludes every machine whose configured platform contains PCIe", () => {
+  assert.equal(PCIE_PLATFORM_MACHINE_IDS.length, 13);
+  assert.equal(new Set(PCIE_PLATFORM_MACHINE_IDS).size, 13);
+  for (let index = 1; index <= 13; index += 1) {
+    const machineId = `TSPH${String(index).padStart(3, "0")}`;
+    assert.equal(isExcludedPciePlatformMachine(machineId), true);
+  }
+  assert.equal(isExcludedPciePlatformMachine("ADH092"), false);
+  assert.equal(isExcludedPciePlatformMachine("UNKNOWN"), false);
 });
 
 test("covers every Availability state classification branch", () => {
@@ -159,6 +194,9 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
     availability.dateRangePredicate,
     "substr(a.date,1,10)>='2026-08-31' AND substr(a.date,1,10)<'2026-09-07'",
   );
+  assert.match(availability.platformPredicate, /a\.tool_name NOT IN/u);
+  assert.match(availability.platformPredicate, /'TSPH001'/u);
+  assert.match(availability.platformPredicate, /'TSPH013'/u);
   const availabilityRows = database.prepare(`SELECT
     ${availability.lotPredicate} AS eligible_lot,
     ${availability.kindExpression} AS kind,
@@ -181,6 +219,11 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   for (const row of dutCases) insertDut.run(row.lotId, row.step, row.machineId);
   const dut = getTestOeeSqlExpressions("dut", "2026-08-31", "2026-09-06", "d");
   assert.equal(dut.availabilityStateExpression, undefined);
+  assert.equal(dut.dayExpression, "substr(d.date,1,10)");
+  assert.equal(dut.machineExpression, "d.machine_id");
+  assert.match(dut.platformPredicate, /d\.machine_id NOT IN/u);
+  assert.match(dut.touchdownLabelExpression ?? "", /d\.touchdown_index/u);
+  assert.match(dut.testTimeSecondsExpression ?? "", /unixepoch\(d\.end_time,'subsec'\)/u);
   const dutRows = database.prepare(`SELECT
     ${dut.lotPredicate} AS eligible_lot,
     ${dut.kindExpression} AS kind
@@ -233,6 +276,126 @@ test("generated date predicate includes the complete end date", () => {
     { date: "2026-09-06T00:00:00.000Z" },
     { date: "2026-09-06T23:59:59.999Z" },
   ]);
+  database.close();
+});
+
+test("generates DUT expressions for valid touchdown labels and timestamp durations", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`CREATE TABLE dut_rows (
+    id INTEGER PRIMARY KEY,
+    touchdown_index TEXT,
+    start_time TEXT,
+    end_time TEXT
+  );
+  INSERT INTO dut_rows(touchdown_index,start_time,end_time) VALUES
+    ('12','2026-01-01T00:00:00.000Z','2026-01-01T00:00:05.500Z'),
+    ('0','2026-01-01T00:00:00.000Z','2026-01-01T00:00:07.000Z'),
+    ('12x','invalid','2026-01-01T00:00:07.000Z'),
+    (NULL,NULL,NULL);`);
+  const expressions = getTestOeeSqlExpressions("dut", "2026-01-01", "2026-01-01", "d");
+  const rows = database.prepare(`SELECT
+    ${expressions.touchdownLabelExpression} AS touchdown_label,
+    ${expressions.testTimeSecondsExpression} AS test_time_seconds
+    FROM dut_rows AS d ORDER BY d.id`).all();
+  assert.deepEqual(rows.map((row) => ({
+    touchdownLabel: row["touchdown_label"],
+    testTimeSeconds: row["test_time_seconds"],
+  })), [
+    { touchdownLabel: 1, testTimeSeconds: 5.5 },
+    { touchdownLabel: null, testTimeSeconds: 7 },
+    { touchdownLabel: null, testTimeSeconds: null },
+    { touchdownLabel: null, testTimeSeconds: null },
+  ]);
+  database.close();
+});
+
+test("default SQL aggregates components by day and kind, then averages daily OEE", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`CREATE TABLE oee_availability (
+    id INTEGER PRIMARY KEY,
+    tool_name TEXT NOT NULL,
+    lot_id TEXT NOT NULL,
+    final_state TEXT NOT NULL,
+    step TEXT NOT NULL,
+    date TEXT NOT NULL,
+    time_span INTEGER NOT NULL
+  );
+  CREATE TABLE oee_dut_utilization (
+    id INTEGER PRIMARY KEY,
+    machine_id TEXT NOT NULL,
+    lot_id TEXT NOT NULL,
+    touchdown_index TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    in_qty TEXT NOT NULL,
+    out_qty TEXT NOT NULL,
+    dut_num TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    date TEXT
+  );`);
+  const insertAvailability = database.prepare(
+    "INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)",
+  );
+  const day1 = "2026-01-01T00:00:00.000Z";
+  const day2 = "2026-01-02T00:00:00.000Z";
+  insertAvailability.run("ADH001", "P1", "Test(Normal)", "5000", day1, 43_200);
+  insertAvailability.run("ADH001", "P1", "IDLE", "5000", day1, 43_200);
+  insertAvailability.run("ADH002", "P2", "Test(Normal)", "5000", day1, 86_400);
+  insertAvailability.run("ADH003", "P3", "Test(Normal)", "5000", day1, 86_400);
+  insertAvailability.run("ADH001", "P1", "Test(Normal)", "5000", day2, 86_400);
+  insertAvailability.run("TSPH001", "P4", "Test(Normal)", "5000", day1, 86_400);
+
+  const insertDut = database.prepare(
+    "INSERT INTO oee_dut_utilization(machine_id,lot_id,touchdown_index,start_time,end_time,in_qty,out_qty,dut_num,step_id,date) VALUES(?,?,?,?,?,?,?,?,?,?)",
+  );
+  const addDut = (machine: string, day: string, durationSeconds: number, index: number): void => {
+    const start = `${day}T00:00:00.000Z`;
+    const end = new Date(Date.parse(start) + durationSeconds * 1_000).toISOString();
+    insertDut.run(machine, "P1", String(index), start, end, "10", "8", "20", "5000", `${day}T00:00:00.000Z`);
+  };
+  const day1Durations = [1, ...Array.from({ length: 998 }, () => 10), 100];
+  day1Durations.forEach((duration, index) => {
+    addDut(index < 500 ? "ADH001" : "ADH004", "2026-01-01", duration, index + 1);
+  });
+  addDut("ADH001", "2026-01-02", 10, 1);
+  addDut("TSPH001", "2026-01-01", 10_000, 1);
+
+  const generated = getDefaultTestOeeSql("2026-01-01", "2026-01-02");
+  assert.deepEqual(generated.dailyGrain, ["day", "kind"]);
+  assert.equal(generated.trimPercent, 0.2);
+  assert.equal(generated.trimFraction, 0.002);
+  assert.equal(generated.trimPercentPerTail, 0.1);
+  assert.equal(generated.trimFractionPerTail, 0.001);
+  assert.equal(generated.periodAggregation, "average_of_daily_oee");
+  const rows = database.prepare(generated.sql).all();
+  assert.equal(rows.length, 4);
+  const day1Mt = rows.find((row) => row["day"] === "2026-01-01" && row["kind"] === "MT");
+  const day2Mt = rows.find((row) => row["day"] === "2026-01-02" && row["kind"] === "MT");
+  const day1St = rows.find((row) => row["day"] === "2026-01-01" && row["kind"] === "ST");
+  assert.ok(day1Mt);
+  assert.ok(day2Mt);
+  assert.ok(day1St);
+  assert.equal(day1Mt["availability_rows"], 4);
+  assert.equal(day1Mt["machine_count"], 3);
+  assert.equal(day1Mt["machine_running_seconds"], 216_000);
+  assert.equal(day1Mt["available_seconds"], 259_200);
+  assert.ok(Math.abs(Number(day1Mt["availability"]) - 5 / 6) < 1e-12);
+  assert.equal(day1Mt["dut_rows"], 1_000);
+  assert.equal(day1Mt["valid_duration_rows"], 1_000);
+  assert.equal(day1Mt["trimmed_rows_each_tail"], 1);
+  assert.equal(day1Mt["trimmed_mean_test_seconds"], 10);
+  assert.ok(Math.abs(Number(day1Mt["test_time_performance"]) - 10_000 / 10_081) < 1e-12);
+  assert.ok(Math.abs(Number(day1Mt["daily_test_oee"]) - 10_000 / 30_243) < 1e-12);
+  assert.ok(Math.abs(Number(day2Mt["daily_test_oee"]) - 0.4) < 1e-12);
+  assert.equal(day1Mt["calculable_day_count"], 2);
+  assert.equal(day1Mt["selected_day_count"], 2);
+  const expectedPeriodOee = (10_000 / 30_243 + 0.4) / 2;
+  assert.ok(Math.abs(Number(day1Mt["period_test_oee"]) - expectedPeriodOee) < 1e-12);
+  assert.equal(day1St["availability_rows"], 0);
+  assert.equal(day1St["machine_count"], 0);
+  assert.equal(day1St["daily_test_oee"], null);
+  assert.equal(day1St["calculable_day_count"], 0);
+  assert.equal(day1St["period_test_oee"], null);
   database.close();
 });
 
@@ -344,9 +507,10 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
   assert.equal(actual["product"], expected.product);
 });
 
-test("publishes only composable database-free Skill tools", async () => {
+test("publishes deterministic database-free Skill tools", async () => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
+    "get_default_sql",
     "get_sql_expressions",
     "validate_lot_ids",
     "classify_mt_st",
@@ -356,6 +520,23 @@ test("publishes only composable database-free Skill tools", async () => {
   assert.equal(tools.some((tool) => tool.name === "classify_test_oee_record"), false);
 
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  const defaultSql = await executeTool(byName.get("get_default_sql")!, {
+    start_date: "2026-08-31",
+    end_date: "2026-09-06",
+  }) as {
+    sql: string;
+    dailyGrain: readonly string[];
+    trimPercent: number;
+    trimFraction: number;
+    periodAggregation: string;
+  };
+  assert.match(defaultSql.sql, /LEFT JOIN dut_daily AS d ON d\.day=a\.day AND d\.kind=a\.kind/u);
+  assert.match(defaultSql.sql, /duration_count \/ 1000/u);
+  assert.match(defaultSql.sql, /AVG\(r\.daily_test_oee\) OVER/u);
+  assert.deepEqual(defaultSql.dailyGrain, ["day", "kind"]);
+  assert.equal(defaultSql.trimPercent, 0.2);
+  assert.equal(defaultSql.trimFraction, 0.002);
+  assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");
   const sqlExpressions = await executeTool(byName.get("get_sql_expressions")!, {
     source: "dut",
     start_date: "2026-08-31",
@@ -371,9 +552,16 @@ test("publishes only composable database-free Skill tools", async () => {
     { lotId: "X1", eligibleLot: false },
   ]);
   assert.deepEqual(await executeTool(byName.get("classify_mt_st")!, {
-    records: [{ step: "1000", machine_id: "ADH092" }],
+    records: [{ step: "1000", machine_id: "TSPH001" }],
   }), [
-    { step: "1000", machineId: "ADH092", kind: "ST", source: "platform" },
+    {
+      step: "1000",
+      machineId: "TSPH001",
+      kind: "ST",
+      source: "platform",
+      excludedPciePlatform: true,
+      includedInOee: false,
+    },
   ]);
   assert.deepEqual(await executeTool(byName.get("classify_availability_states")!, {
     records: [{ final_state: "Test(Normal)", lot_id: "P1" }],

@@ -86,7 +86,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /数据库结构和字段含义由适用的 Skill 提供/u);
   assert.match(piSession.systemPrompt, /<available_skills>/u);
   assert.match(piSession.systemPrompt, /<name>test-oee-calculator<\/name>/u);
-  assert.match(piSession.systemPrompt, /<description>使用可组合的固定 LOT、MT\/ST/u);
+  assert.match(piSession.systemPrompt, /<description>使用固定 LOT、PCIe 平台排除、MT\/ST/u);
   assert.doesNotMatch(piSession.systemPrompt, /## Test OEE 固定计算口径/u);
   assert.doesNotMatch(piSession.systemPrompt, /test_oee_calculator__get_sql_expressions/u);
   assert.doesNotMatch(piSession.systemPrompt, /Machine_Running、全部机台 Availability/u);
@@ -98,6 +98,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   const codeInterpreterDefinition = piSession.getToolDefinition("code_interpreter");
   assert.equal(codeInterpreterDefinition, undefined);
   for (const name of [
+    "get_default_sql",
     "get_sql_expressions",
     "validate_lot_ids",
     "classify_mt_st",
@@ -129,7 +130,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(databaseReference, /lot_id\(LOT_ID\):物料批次号/u);
   assert.match(databaseReference, /final_state\(FINAL_STATE\):机台状态/u);
   assert.match(databaseReference, /step\(STEP\):步骤/u);
-  assert.match(databaseReference, /date\(DATE\):日期/u);
+  assert.match(databaseReference, /date\(DATE\):ISO 格式的业务日标签/u);
   assert.match(databaseReference, /shift\(SHIFT\):白班夜班的区分/u);
   assert.match(databaseReference, /time_span\(TIME_SPAN\):机台状态对应的时间,单位秒/u);
   assert.match(databaseReference, /machine_id\(MACHINE_ID\):机台号/u);
@@ -157,6 +158,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined,
     undefined as never,
   );
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__get_default_sql"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"), undefined);
 
   const beforeSkillEntryId = piSession.sessionManager.appendCustomEntry("test.before-skill");
@@ -167,6 +169,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined,
     undefined as never,
   );
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_sql"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__validate_lot_ids"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_mt_st"));
@@ -178,6 +181,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "test_oee_calculator__get_default_sql",
     "test_oee_calculator__get_sql_expressions",
     "test_oee_calculator__validate_lot_ids",
     "test_oee_calculator__classify_mt_st",

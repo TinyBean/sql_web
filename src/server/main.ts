@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { loadConfig, loadProjectEnvironment, PROJECT_ROOT } from "./config.ts";
-import { DailyFileLogger } from "./logger.ts";
+import { DailyFileLogger, reportStartupError } from "./logger.ts";
 import type { AppLogger } from "./logger.ts";
 import { startWebService } from "./service-runtime.ts";
 import type { RunningWebService } from "./service-runtime.ts";
@@ -66,6 +66,7 @@ try {
     durationMs: Date.now() - processStartedAt,
     retryable: false,
   });
+  reportStartupError(error);
   process.exitCode = 1;
 }
 

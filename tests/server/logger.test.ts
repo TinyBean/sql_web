@@ -3,7 +3,11 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { DailyFileLogger, FileLogger } from "../../src/server/logger.ts";
+import {
+  DailyFileLogger,
+  FileLogger,
+  reportStartupError,
+} from "../../src/server/logger.ts";
 
 function readEntries(filename: string): unknown[] {
   return readFileSync(filename, "utf8")
@@ -11,6 +15,15 @@ function readEntries(filename: string): unknown[] {
     .split("\n")
     .map((line) => JSON.parse(line) as unknown);
 }
+
+test("reports startup failures to the terminal", () => {
+  const output: unknown[][] = [];
+  const error = Object.assign(new Error("address already in use"), { code: "EADDRINUSE" });
+
+  reportStartupError(error, (...data) => output.push(data));
+
+  assert.deepEqual(output, [["数据库问答网站启动失败:", error]]);
+});
 
 test("writes Shanghai timestamps and rolls on the Shanghai calendar date", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-logs-"));

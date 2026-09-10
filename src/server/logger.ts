@@ -22,6 +22,13 @@ export interface DailyFileLoggerOptions extends LoggerOptions {
 
 export type FileLoggerOptions = LoggerOptions;
 
+export function reportStartupError(
+  error: unknown,
+  report: (...data: unknown[]) => void = console.error,
+): void {
+  report("数据库问答网站启动失败:", error);
+}
+
 type LogLevel = "INFO" | "WARN" | "ERROR";
 const SHANGHAI_UTC_OFFSET_MS = 8 * 60 * 60 * 1_000;
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -74,6 +74,21 @@ function lineRequest(id = "yield-7d"): DashboardWidgetRequest {
     warnings: [],
   };
 }
+
+test("previews a default dashboard without creating session artifacts", (t) => {
+  const { dashboard, artifacts } = fixture(t);
+  const sessionDirectory = path.join(artifacts.rootDir, SESSION_A);
+
+  const first = dashboard.loadOrPreview(SESSION_A);
+  assert.equal(first.revision, 0);
+  assert.equal(first.widgets.length, 5);
+  assert.equal(existsSync(sessionDirectory), false);
+
+  const second = dashboard.loadOrPreview(SESSION_A);
+  assert.equal(second.revision, 0);
+  assert.equal(second.widgets.length, 5);
+  assert.equal(existsSync(sessionDirectory), false);
+});
 
 test("initializes and restores a frozen five-widget weekly OEE dashboard per session", (t) => {
   const { dashboard, artifacts } = fixture(t);

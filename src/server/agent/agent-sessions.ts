@@ -554,10 +554,10 @@ export class AgentSessionStore {
 
   async create(): Promise<SerializedSession> {
     const manager = SessionManager.create(this.#cwd, this.#sessionDir);
-    this.#initializeDashboardEntry(manager);
+    this.#ensureDashboardMarker(manager);
     const session = await this.#createPiSession(manager);
-    // The dashboard marker has already made the empty session durable. Naming
-    // it here keeps both the persisted session list and web response presentable.
+    // Pi keeps entries in memory until the first assistant message, so naming
+    // and marking an empty session do not create its JSONL file.
     session.setSessionName("新会话");
     this.#sessions.set(session.sessionId, session);
     const now = new Date();
@@ -710,6 +710,7 @@ export class AgentSessionStore {
   }
 
   serialize(session: AgentSession): SerializedSession {
+    const messages = serializeMessages(session.messages);
     return {
       id: session.sessionId,
       title: sessionTitle(session),
@@ -718,8 +719,10 @@ export class AgentSessionStore {
         : null,
       tools: validatedAgentToolNames(session),
       streaming: session.isStreaming,
-      messages: serializeMessages(session.messages),
-      dashboard: this.#dashboard.loadOrInitialize(session.sessionId),
+      messages,
+      dashboard: messages.length === 0
+        ? this.#dashboard.loadOrPreview(session.sessionId)
+        : this.#dashboard.loadOrInitialize(session.sessionId),
     };
   }
 
@@ -891,12 +894,11 @@ export class AgentSessionStore {
 
   #openInitializedManager(filePath: string): SessionManager {
     const manager = SessionManager.open(filePath, this.#sessionDir, this.#cwd);
-    this.#initializeDashboardEntry(manager);
+    this.#ensureDashboardMarker(manager);
     return manager;
   }
 
-  #initializeDashboardEntry(manager: SessionManager): void {
-    this.#dashboard.loadOrInitialize(manager.getSessionId());
+  #ensureDashboardMarker(manager: SessionManager): void {
     const hasMarker = manager.getEntries().some((entry) => (
       entry.type === "custom" && entry.customType === "datalens_dashboard_v1"
     ));

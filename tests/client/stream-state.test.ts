@@ -4,11 +4,21 @@ import {
   createStreamPresentation,
   formatToolArguments,
   formatToolStatusText,
+  initialSessionTarget,
   latestAssistantAfterLastUser,
   reduceStreamPresentation,
   SessionStreamRegistry,
   settleStreamPresentation,
 } from "../../src/client/stream-state.ts";
+
+test("selects startup behavior only from an explicit session hash", () => {
+  assert.deepEqual(initialSessionTarget(""), { kind: "create" });
+  assert.deepEqual(initialSessionTarget("#view=dashboard"), { kind: "create" });
+  assert.deepEqual(initialSessionTarget("#session=session-a"), {
+    kind: "load",
+    sessionId: "session-a",
+  });
+});
 
 test("keeps simultaneous answer streams isolated by session", () => {
   const streams = new SessionStreamRegistry<{ sessionId: string; label: string }>();

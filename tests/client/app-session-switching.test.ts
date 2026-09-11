@@ -26,13 +26,13 @@ function serializedSession(
   return { id, title, model: null, tools: [], streaming: false, dashboard: EMPTY_DASHBOARD, messages };
 }
 
-function sessionSummary(id: string, title: string): SessionSummary {
+function sessionSummary(id: string, title: string, messageCount = 0): SessionSummary {
   return {
     id,
     title,
     createdAt: "2026-09-08T00:00:00.000Z",
     updatedAt: "2026-09-08T00:00:00.000Z",
-    messageCount: 0,
+    messageCount,
     active: true,
   };
 }
@@ -89,7 +89,10 @@ test("switches between independent live session answers without stealing the cur
   expose("HTMLFormElement", document.querySelector("#composer")?.constructor);
   expose("HTMLTextAreaElement", document.querySelector("#questionInput")?.constructor);
 
-  const sessions = [sessionSummary("session-a", "会话 A"), sessionSummary("session-b", "会话 B")];
+  const sessions = [
+    sessionSummary("session-a", "会话 A", 2),
+    sessionSummary("session-b", "会话 B", 2),
+  ];
   const stored = new Map([
     ["session-a", serializedSession("session-a", "会话 A", [
       { id: "history-user-a", role: "user", text: "A 历史问题" },
@@ -103,6 +106,7 @@ test("switches between independent live session answers without stealing the cur
   const controllers = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
   const sessionLoads = new Map<string, number>();
   const aborts: string[] = [];
+  const createdSessionIds = ["session-c", "session-d"];
   let resolveAbortA: (() => void) | undefined;
   const encoder = new TextEncoder();
   const originalFetch = globalThis.fetch;
@@ -126,7 +130,9 @@ test("switches between independent live session answers without stealing the cur
     if (url === "/api/schema") return jsonResponse({ objects: [] });
     if (url === "/api/sessions" && method === "GET") return jsonResponse({ sessions });
     if (url === "/api/sessions" && method === "POST") {
-      const created = serializedSession("session-c", "新会话");
+      const createdId = createdSessionIds.shift();
+      assert.ok(createdId, "unexpected extra session creation");
+      const created = serializedSession(createdId, "新会话");
       if (!stored.has(created.id)) {
         stored.set(created.id, created);
         sessions.unshift(sessionSummary(created.id, created.title));
@@ -220,11 +226,35 @@ test("switches between independent live session answers without stealing the cur
 
   await import(pathToFileURL(path.join(projectRoot, "public", "generated", "client", "app.js")).href);
   await waitFor(
-    () => document.querySelector('[data-session-id="session-a"]')?.classList.contains("active") === true,
+    () => locationState.hash === "#session=session-c",
+    "a fresh session was not created for a URL without a session ID",
+  );
+  assert.equal(document.querySelector('[data-session-id="session-c"]'), null);
+  assert.equal(sessionLoads.size, 0, "startup must not load the most recent persisted session");
+  assert.equal(chatDock.classList.contains("open"), false, "chat should start collapsed");
+  input.value = "问题 C";
+  submit();
+  await waitFor(() => controllers.has("session-c"), "fresh session stream did not start");
+  assert.equal(sessionButton("session-c").classList.contains("streaming"), true);
+  const completedC = serializedSession("session-c", "问题 C", [
+    { id: "user-c", role: "user", text: "问题 C" },
+    { id: "assistant-c", role: "assistant", text: "C 已完成" },
+  ]);
+  stored.set("session-c", completedC);
+  const sessionCIndex = sessions.findIndex((session) => session.id === "session-c");
+  assert.notEqual(sessionCIndex, -1);
+  sessions[sessionCIndex] = sessionSummary("session-c", "问题 C", 2);
+  complete("session-c", completedC);
+  await waitFor(
+    () => !sessionButton("session-c").classList.contains("streaming"),
+    "fresh session did not remain in history after completion",
+  );
+  sessionButton("session-a").click();
+  await waitFor(
+    () => sessionButton("session-a").classList.contains("active"),
     "session A did not load",
   );
   assert.equal(messages.scrollTop, 900, "a session without a saved position should open at the bottom");
-  assert.equal(chatDock.classList.contains("open"), false, "chat should start collapsed");
   input.value = "保留的草稿";
   input.dispatchEvent(new browser.Event("focus"));
   assert.equal(chatDock.classList.contains("open"), true);
@@ -275,9 +305,10 @@ test("switches between independent live session answers without stealing the cur
   messages.scrollTop = 180;
   newChatButton.click();
   await waitFor(
-    () => document.querySelector('[data-session-id="session-c"]')?.classList.contains("active") === true,
-    "new session did not load while session A was answering",
+    () => locationState.hash === "#session=session-d",
+    "new session did not open while session A was answering",
   );
+  assert.equal(document.querySelector('[data-session-id="session-d"]'), null);
   assert.equal(input.disabled, false);
   assert.equal(sessionButton("session-a").classList.contains("streaming"), true);
 

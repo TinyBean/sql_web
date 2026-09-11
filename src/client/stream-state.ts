@@ -12,6 +12,16 @@ export interface SessionScopedStream {
   readonly sessionId: string;
 }
 
+export type InitialSessionTarget =
+  | { readonly kind: "create" }
+  | { readonly kind: "load"; readonly sessionId: string };
+
+export function initialSessionTarget(hash: string): InitialSessionTarget {
+  const value = hash.startsWith("#") ? hash.slice(1) : hash;
+  const sessionId = new URLSearchParams(value).get("session");
+  return sessionId ? { kind: "load", sessionId } : { kind: "create" };
+}
+
 /** Keep independent in-flight streams isolated by their owning session. */
 export class SessionStreamRegistry<Stream extends SessionScopedStream> {
   readonly #streams = new Map<string, Stream>();

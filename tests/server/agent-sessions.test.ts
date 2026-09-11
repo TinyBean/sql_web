@@ -81,6 +81,16 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   ]);
 
   const piSession = await store.get(created.id);
+  const emptySessionFile = piSession.sessionFile;
+  assert.ok(emptySessionFile);
+  const sessionArtifactDirectory = path.join(artifacts.rootDir, created.id);
+  assert.equal(existsSync(emptySessionFile), false);
+  assert.equal(existsSync(sessionArtifactDirectory), false);
+  const emptySerialized = await store.getSerialized(created.id);
+  assert.deepEqual(emptySerialized.messages, []);
+  assert.equal(emptySerialized.dashboard.widgets.length, 5);
+  assert.equal(existsSync(emptySessionFile), false);
+  assert.equal(existsSync(sessionArtifactDirectory), false);
   assert.doesNotMatch(piSession.systemPrompt, /## 数据库结构/u);
   assert.doesNotMatch(piSession.systemPrompt, /CREATE TABLE oee_availability/u);
   assert.doesNotMatch(piSession.systemPrompt, /CREATE TABLE oee_dut_utilization/u);
@@ -213,10 +223,20 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined as never,
   );
   assert.equal(new Set(piSession.getActiveToolNames()).size, piSession.getActiveToolNames().length);
+  assert.equal(existsSync(emptySessionFile), false);
+  assert.equal(existsSync(sessionArtifactDirectory), false);
 
   const sessionFile = piSession.sessionFile;
   assert.ok(sessionFile);
-  piSession.sessionManager.appendMessage({
+  const firstUserMessage = {
+    role: "user",
+    content: [{ type: "text", text: "test persistence question" }],
+    timestamp: Date.now(),
+  } as never;
+  piSession.agent.state.messages.push(firstUserMessage);
+  piSession.sessionManager.appendMessage(firstUserMessage);
+  assert.equal(existsSync(sessionFile), false);
+  const firstAssistantMessage = {
     role: "assistant",
     content: [{ type: "text", text: "test persistence marker" }],
     api: "openai-completions",
@@ -232,7 +252,12 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     },
     stopReason: "stop",
     timestamp: Date.now(),
-  } as never);
+  } as never;
+  piSession.agent.state.messages.push(firstAssistantMessage);
+  piSession.sessionManager.appendMessage(firstAssistantMessage);
+  assert.equal(existsSync(sessionFile), true);
+  await store.getSerialized(created.id);
+  assert.equal(existsSync(path.join(sessionArtifactDirectory, "dashboard.json")), true);
   const persistedBranch = piSession.sessionManager.getEntries();
   const loadedEntry = persistedBranch.find((entry) => (
     entry.type === "custom" && entry.customType === "sql_web.skill.loaded"

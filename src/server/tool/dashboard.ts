@@ -544,6 +544,11 @@ export class DashboardModule {
     this.#artifacts = artifacts;
   }
 
+  loadOrPreview(sessionId: string): DashboardState {
+    const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
+    return readDocument(filePath)?.current ?? buildDefaultDashboard(this.#database);
+  }
+
   loadOrInitialize(sessionId: string): DashboardState {
     const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
     const existing = readDocument(filePath);

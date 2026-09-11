@@ -27,6 +27,7 @@ import {
   createStreamPresentation,
   formatToolArguments,
   formatToolStatusText,
+  initialSessionTarget,
   latestAssistantAfterLastUser,
   reduceStreamPresentation,
   SessionStreamRegistry,
@@ -234,7 +235,10 @@ function toggleSchema(force?: boolean): void {
 
 function renderSessions(): void {
   elements.sessionList.replaceChildren();
-  if (!state.sessions.length) {
+  const visibleSessions = state.sessions.filter((session) => (
+    session.messageCount > 0 || state.activeStreams.has(session.id)
+  ));
+  if (!visibleSessions.length) {
     const placeholder = document.createElement("div");
     placeholder.className = "session-placeholder";
     placeholder.textContent = "还没有会话";
@@ -242,7 +246,7 @@ function renderSessions(): void {
     return;
   }
 
-  for (const session of state.sessions) {
+  for (const session of visibleSessions) {
     const streaming = state.activeStreams.has(session.id);
     const row = document.createElement("div");
     row.className = "session-row";
@@ -1120,9 +1124,8 @@ async function initialize(): Promise<void> {
     state.sessions = sessionPayload.sessions;
     renderSessions();
 
-    const requestedId = new URLSearchParams(location.hash.slice(1)).get("session");
-    const initialId = requestedId || state.sessions[0]?.id;
-    if (initialId) await loadSession(initialId);
+    const initialTarget = initialSessionTarget(location.hash);
+    if (initialTarget.kind === "load") await loadSession(initialTarget.sessionId);
     else await createSession();
   } catch (error) {
     showToast(`初始化失败:${messageFromUnknown(error)}`);

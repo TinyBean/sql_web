@@ -75,17 +75,16 @@ function lineRequest(id = "yield-7d"): DashboardWidgetRequest {
   };
 }
 
-test("initializes and restores a frozen six-widget dashboard per session", (t) => {
+test("initializes and restores a frozen five-widget weekly OEE dashboard per session", (t) => {
   const { dashboard, artifacts } = fixture(t);
   const first = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(first.revision, 0);
   assert.deepEqual(first.widgets.map((widget) => widget.id), [
-    "mt-test-oee",
-    "st-test-oee",
-    "oee-components",
-    "oee-trend-14d",
-    "availability-top10",
-    "data-coverage",
+    "overall-oee-overview",
+    "availability-trend-7d",
+    "dut-on-trend-7d",
+    "test-time-trend-7d",
+    "yield-trend-7d",
   ]);
   assert.equal(first.widgets.every((widget) => widget.warnings.length > 0), true);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_A), first);
@@ -94,7 +93,7 @@ test("initializes and restores a frozen six-widget dashboard per session", (t) =
     readFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), "utf8"),
   ) as { baseline: unknown; current: unknown };
   assert.deepEqual(document.baseline, document.current);
-  assert.equal(dashboard.loadOrInitialize(SESSION_B).widgets.length, 6);
+  assert.equal(dashboard.loadOrInitialize(SESSION_B).widgets.length, 5);
 });
 
 test("materializes one session snapshot atomically and rejects stale revisions", (t) => {
@@ -188,7 +187,7 @@ test("validates snapshot shape and emits only a transient full update plus compa
 test("accepts stringified model-server arguments and preserves an existing widget size", async (t) => {
   const { dashboard, artifacts } = fixture(t);
   const baseline = dashboard.loadOrInitialize(SESSION_A);
-  const original = baseline.widgets.find((widget) => widget.id === "mt-test-oee");
+  const original = baseline.widgets.find((widget) => widget.id === "overall-oee-overview");
   assert.ok(original);
   const snapshot = createSnapshot(artifacts, SESSION_A, "mt oee compatibility", [
     { oee_pct: 23.95 },
@@ -202,13 +201,13 @@ test("accepts stringified model-server arguments and preserves an existing widge
     snapshot,
     date_range: JSON.stringify({ start: "2026-08-31", end: "2026-09-06" }),
     widget: JSON.stringify({
-      id: "mt-test-oee",
+      id: "overall-oee-overview",
       kind: "kpi",
-      title: "MT Test OEE",
+      title: "Overall OEE",
       subtitle: "上周",
       encoding: { value: "oee_pct", comparison: null },
       format: { unit: "%", precision: 2 },
-      metric_definition: "Test OEE = Availability × DUT-On × 1 × Yield",
+      metric_definition: "Test OEE = Availability × DUT-On × Test Time × Yield",
       warnings: ["Availability 缺失三天"],
     }),
   };
@@ -225,44 +224,77 @@ test("accepts stringified model-server arguments and preserves an existing widge
   const current = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(current.revision, 1);
   assert.deepEqual(current.dateRange, { start: "2026-08-31", end: "2026-09-06" });
-  const updated = current.widgets.find((widget) => widget.id === "mt-test-oee");
+  const updated = current.widgets.find((widget) => widget.id === "overall-oee-overview");
   assert.equal(updated?.size, original.size);
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("builds the 14-day MT/ST OEE fixture with complete-day denominators", (t) => {
+test("builds the seven-day Overall OEE overview and four factor trends", (t) => {
   const { databasePath, dashboard } = fixture(t);
   const writer = new DatabaseSync(databasePath);
   const availability = writer.prepare(
     "INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)",
   );
   const dut = writer.prepare(
-    "INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date) VALUES(?,?,?,?,?,?,?,?)",
+    "INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,touchdown_index,start_time,end_time,date) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
   );
+  const addDut = (machine: string, lot: string, step: string, date: string): void => {
+    dut.run(
+      machine,
+      lot,
+      "10",
+      "8",
+      "1st",
+      "20",
+      step,
+      "1",
+      `${date}T00:00:00.000Z`,
+      `${date}T00:00:10.000Z`,
+      date,
+    );
+  };
   for (let day = 26; day <= 31; day += 1) {
     const date = `2026-08-${String(day).padStart(2, "0")}`;
     availability.run("MT-01", "P-MT", "Test(Normal)", "5000", date, 43_200);
     availability.run("ST-01", "P-ST", "Test(Normal)", "7000", date, 43_200);
-    dut.run("MT-01", "P-MT", "10", "8", "1st", "20", "5000", date);
-    dut.run("ST-01", "P-ST", "10", "8", "1st", "20", "7000", date);
+    addDut("MT-01", "P-MT", "5000", date);
+    addDut("ST-01", "P-ST", "7000", date);
   }
   for (let day = 1; day <= 8; day += 1) {
     const date = `2026-09-${String(day).padStart(2, "0")}`;
     availability.run("MT-01", "P-MT", "Test(Normal)", "5000", date, 43_200);
     availability.run("ST-01", "P-ST", "Test(Normal)", "7000", date, 43_200);
-    dut.run("MT-01", "P-MT", "10", "8", "1st", "20", "5000", date);
-    dut.run("ST-01", "P-ST", "10", "8", "1st", "20", "7000", date);
+    addDut("MT-01", "P-MT", "5000", date);
+    addDut("ST-01", "P-ST", "7000", date);
   }
   availability.run("MT-01", "P-MT", "Test(Normal)", "5000", "2026-09-09", 43_200);
   writer.close();
 
   const state = dashboard.loadOrInitialize("session-fixed-fixture");
-  assert.deepEqual(state.dateRange, { start: "2026-08-26", end: "2026-09-08" });
-  for (const id of ["mt-test-oee", "st-test-oee"]) {
+  assert.deepEqual(state.dateRange, { start: "2026-09-02", end: "2026-09-08" });
+  const overview = state.widgets.find((item) => item.id === "overall-oee-overview");
+  assert.equal(overview?.kind, "overview");
+  assert.deepEqual(overview?.data[0], {
+    overall_oee: 20,
+    availability: 50,
+    dut_on: 50,
+    test_time: 100,
+    yield: 80,
+  });
+  assert.equal(overview?.warnings.length, 0);
+  for (const id of [
+    "availability-trend-7d",
+    "dut-on-trend-7d",
+    "test-time-trend-7d",
+    "yield-trend-7d",
+  ]) {
     const widget = state.widgets.find((item) => item.id === id);
-    assert.equal(widget?.data[0]?.["value"], 20);
+    assert.equal(widget?.data.length, 7);
+    assert.equal(widget?.warnings.length, 0);
   }
-  assert.equal(state.widgets.find((item) => item.id === "oee-trend-14d")?.data.length, 14);
-  assert.equal(state.widgets.find((item) => item.id === "availability-top10")?.data[0]?.["availability"], 50);
-  assert.equal(state.widgets.find((item) => item.id === "data-coverage")?.warnings.length, 0);
+  assert.deepEqual(state.widgets.find((item) => item.id === "availability-trend-7d")?.data[0], {
+    date: "2026-09-02",
+    mt: 50,
+    st: 50,
+  });
 });

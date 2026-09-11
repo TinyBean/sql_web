@@ -56,7 +56,10 @@ const commonWidgetProperties = {
     }),
   ),
   format: Type.Object({
-    unit: Type.String({ maxLength: 24 }),
+    unit: Type.String({
+      maxLength: 24,
+      description: "Display suffix only; it never rescales snapshot values. For unit %, provide percentage points (56.65 means 56.65%), not a 0-1 ratio.",
+    }),
     precision: Type.Integer({ minimum: 0, maximum: 8 }),
   }),
   metric_definition: Type.String({ minLength: 1, maxLength: 1_000 }),
@@ -70,6 +73,11 @@ const widget = Type.Union([
       value: columnName,
       comparison: Type.Union([columnName, Type.Null()]),
     }),
+  }),
+  Type.Object({
+    ...commonWidgetProperties,
+    kind: Type.Literal("overview"),
+    encoding: Type.Object({ value: columnName, gauges: series }),
   }),
   Type.Object({
     ...commonWidgetProperties,
@@ -188,13 +196,14 @@ function baseRevision(value: string | number): number {
 
 function defaultWidgetSize(kind: WidgetInput["kind"]): "small" | "medium" | "wide" {
   if (kind === "kpi") return "small";
+  if (kind === "overview") return "wide";
   if (kind === "line") return "wide";
   return "medium";
 }
 
 function widgetRequest(value: {
   readonly id: string;
-  readonly kind: "kpi" | "line" | "bar" | "stacked-bar" | "donut" | "table";
+  readonly kind: "kpi" | "overview" | "line" | "bar" | "stacked-bar" | "donut" | "table";
   readonly title: string;
   readonly subtitle: string;
   readonly size?: "small" | "medium" | "wide";
@@ -256,7 +265,7 @@ export function createDashboardTools(dashboard: DashboardModule, sessionId: stri
     name: "update_dashboard",
     label: "更新指标看板",
     description:
-      "Atomically update the current session dashboard. For upsert, reference one complete session snapshot created by execute_sql.save_as and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. SQL must aggregate and sort the snapshot first. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
+      "Atomically update the current session dashboard. For upsert, reference one complete session snapshot created by execute_sql.save_as and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. SQL must aggregate and sort the snapshot first. format.unit is a suffix only and never rescales values: with %, the snapshot must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
     promptSnippet: "按快照名和列映射原子更新当前会话看板",
     executionMode: "sequential",
     parameters: updateParameters,

@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import {
   classifyAvailabilityStates,
   classifyTestOeeKinds,
+  getDefaultTestOeeDashboardSql,
   getDefaultTestOeeSql,
   getTestOeeSqlExpressions,
   MAX_RULE_BATCH_SIZE,
@@ -37,6 +38,37 @@ export function createTools(): ToolDefinition[] {
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
       const result = getDefaultTestOeeSql(params.start_date, params.end_date);
+      signal?.throwIfAborted();
+      return jsonResult(result);
+    },
+  });
+
+  const getDefaultDashboardSqlTool = defineTool({
+    name: "get_default_dashboard_sql",
+    label: "获取默认 Test OEE 看板 SQL",
+    description:
+      "生成默认 Test OEE 看板所需的确定性 SQLite 查询，直接复用标准逐日 SQL。overview 返回恰好一行的周期汇总和完整覆盖计数；trends 返回逐业务日的 MT/ST 宽表。所有以 _percent 结尾的列都是百分数值（percentage points，例如 56.65 表示 56.65%），可直接配合 Dashboard 的 % unit，禁止再次乘以 100。工具只返回 SQL，不连接数据库。",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      start_date: Type.String({
+        description: "业务日闭区间的开始日，格式 YYYY-MM-DD。",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      }),
+      end_date: Type.String({
+        description: "业务日闭区间的结束日，格式 YYYY-MM-DD。",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      }),
+      view: Type.Union([Type.Literal("overview"), Type.Literal("trends")], {
+        description: "overview 用于单行概览组件；trends 用于四项指标及 OEE 的 MT/ST 日趋势。",
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      const result = getDefaultTestOeeDashboardSql(
+        params.start_date,
+        params.end_date,
+        params.view,
+      );
       signal?.throwIfAborted();
       return jsonResult(result);
     },
@@ -159,6 +191,7 @@ export function createTools(): ToolDefinition[] {
 
   return [
     getDefaultSqlTool,
+    getDefaultDashboardSqlTool,
     getSqlExpressionsTool,
     validateLotIdsTool,
     classifyMtStTool,

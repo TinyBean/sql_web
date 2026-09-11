@@ -9,6 +9,7 @@ export const MAX_DASHBOARD_FILE_BYTES = 2 * 1024 * 1024;
 
 export type DashboardWidgetKind =
   | "kpi"
+  | "overview"
   | "line"
   | "bar"
   | "stacked-bar"
@@ -27,6 +28,11 @@ export interface DashboardSeriesEncoding {
 export interface DashboardKpiEncoding {
   readonly value: string;
   readonly comparison: string | null;
+}
+
+export interface DashboardOverviewEncoding {
+  readonly value: string;
+  readonly gauges: readonly DashboardSeriesEncoding[];
 }
 
 export interface DashboardLineEncoding {
@@ -54,6 +60,7 @@ export interface DashboardTableEncoding {
 
 export type DashboardEncoding =
   | DashboardKpiEncoding
+  | DashboardOverviewEncoding
   | DashboardLineEncoding
   | DashboardBarEncoding
   | DashboardDonutEncoding
@@ -73,6 +80,11 @@ interface DashboardWidgetBase {
 export interface DashboardKpiWidget extends DashboardWidgetBase {
   readonly kind: "kpi";
   readonly encoding: DashboardKpiEncoding;
+}
+
+export interface DashboardOverviewWidget extends DashboardWidgetBase {
+  readonly kind: "overview";
+  readonly encoding: DashboardOverviewEncoding;
 }
 
 export interface DashboardLineWidget extends DashboardWidgetBase {
@@ -97,6 +109,7 @@ export interface DashboardTableWidget extends DashboardWidgetBase {
 
 export type DashboardWidget =
   | DashboardKpiWidget
+  | DashboardOverviewWidget
   | DashboardLineWidget
   | DashboardBarWidget
   | DashboardDonutWidget
@@ -171,7 +184,7 @@ function array<Value>(
 }
 
 function widgetKind(value: unknown, path: string): DashboardWidgetKind {
-  return value === "kpi" || value === "line" || value === "bar" || value === "stacked-bar" ||
+  return value === "kpi" || value === "overview" || value === "line" || value === "bar" || value === "stacked-bar" ||
       value === "donut" || value === "table"
     ? value
     : invalid(path, "合法图表类型");
@@ -214,6 +227,12 @@ function encoding(kind: DashboardWidgetKind, value: unknown, path: string): Dash
       comparison: source["comparison"] === undefined
         ? null
         : nullableString(source["comparison"], `${path}.comparison`),
+    };
+  }
+  if (kind === "overview") {
+    return {
+      value: nonEmptyString(source["value"], `${path}.value`, 80),
+      gauges: series(source["gauges"], `${path}.gauges`),
     };
   }
   if (kind === "line") {

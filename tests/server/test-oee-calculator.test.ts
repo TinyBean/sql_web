@@ -9,6 +9,7 @@ import {
   classifyAvailabilityStates,
   classifyTestOeeKind,
   classifyTestOeeKinds,
+  getDefaultTestOeeDashboardSql,
   getDefaultTestOeeSql,
   getTestOeeSqlExpressions,
   isExcludedPciePlatformMachine,
@@ -396,6 +397,31 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.equal(day1St["daily_test_oee"], null);
   assert.equal(day1St["calculable_day_count"], 0);
   assert.equal(day1St["period_test_oee"], null);
+
+  const overview = database.prepare(
+    getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-02", "overview").sql,
+  ).get();
+  assert.ok(overview);
+  assert.ok(
+    Math.abs(Number(overview["overall_oee_percent"]) - expectedPeriodOee * 100) < 1e-10,
+  );
+  assert.ok(Math.abs(Number(overview["mt_oee_percent"]) - expectedPeriodOee * 100) < 1e-10);
+  assert.equal(overview["st_oee_percent"], null);
+  assert.equal(overview["calculable_day_type_count"], 2);
+  assert.equal(overview["selected_day_type_count"], 4);
+  assert.equal(overview["availability_day_type_count"], 2);
+  assert.equal(overview["dut_day_type_count"], 2);
+
+  const trends = database.prepare(
+    getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-02", "trends").sql,
+  ).all();
+  assert.equal(trends.length, 2);
+  assert.ok(Math.abs(Number(trends[0]?.["mt_availability_percent"]) - (5 / 6) * 100) < 1e-10);
+  assert.equal(trends[0]?.["st_availability_percent"], null);
+  assert.ok(
+    Math.abs(Number(trends[0]?.["mt_oee_percent"]) - Number(day1Mt["daily_test_oee"]) * 100) <
+      1e-10,
+  );
   database.close();
 });
 
@@ -511,6 +537,7 @@ test("publishes deterministic database-free Skill tools", async () => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
     "get_default_sql",
+    "get_default_dashboard_sql",
     "get_sql_expressions",
     "validate_lot_ids",
     "classify_mt_st",
@@ -537,6 +564,15 @@ test("publishes deterministic database-free Skill tools", async () => {
   assert.equal(defaultSql.trimPercent, 0.2);
   assert.equal(defaultSql.trimFraction, 0.002);
   assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");
+  const dashboardSql = await executeTool(byName.get("get_default_dashboard_sql")!, {
+    start_date: "2026-08-31",
+    end_date: "2026-09-06",
+    view: "overview",
+  }) as { sql: string; valueScale: string; view: string };
+  assert.equal(dashboardSql.view, "overview");
+  assert.equal(dashboardSql.valueScale, "percentage_points");
+  assert.match(dashboardSql.sql, /100\.0 \* AVG\(daily_test_oee\) AS overall_oee_percent/u);
+  assert.match(dashboardSql.sql, /COUNT\(\*\) AS selected_day_type_count/u);
   const sqlExpressions = await executeTool(byName.get("get_sql_expressions")!, {
     source: "dut",
     start_date: "2026-08-31",

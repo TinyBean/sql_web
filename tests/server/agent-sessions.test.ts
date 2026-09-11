@@ -102,6 +102,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     /标准流程固定为 get_dashboard → execute_sql\(save_as\) → update_dashboard/u,
   );
   assert.match(piSession.systemPrompt, /kpi 用于单值,line 用于有序趋势/u);
+  assert.match(piSession.systemPrompt, /format\.unit 只是显示后缀,不会缩放数值/u);
   assert.match(piSession.systemPrompt, /只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset/u);
   assert.doesNotMatch(piSession.systemPrompt, /code_interpreter\.input_json/u);
   assert.doesNotMatch(piSession.systemPrompt, /SimHei|matplotlib_chinese_font|chinese_font/u);
@@ -110,6 +111,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal(codeInterpreterDefinition, undefined);
   for (const name of [
     "get_default_sql",
+    "get_default_dashboard_sql",
     "get_sql_expressions",
     "validate_lot_ids",
     "classify_mt_st",
@@ -170,6 +172,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined as never,
   );
   assert.equal(piSession.getToolDefinition("test_oee_calculator__get_default_sql"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__get_default_dashboard_sql"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"), undefined);
 
   const beforeSkillEntryId = piSession.sessionManager.appendCustomEntry("test.before-skill");
@@ -181,6 +184,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined as never,
   );
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_sql"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_dashboard_sql"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__validate_lot_ids"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_mt_st"));
@@ -195,6 +199,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "get_dashboard",
     "update_dashboard",
     "test_oee_calculator__get_default_sql",
+    "test_oee_calculator__get_default_dashboard_sql",
     "test_oee_calculator__get_sql_expressions",
     "test_oee_calculator__validate_lot_ids",
     "test_oee_calculator__classify_mt_st",

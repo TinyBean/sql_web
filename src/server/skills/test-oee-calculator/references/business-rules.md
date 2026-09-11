@@ -99,6 +99,12 @@ Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 
 先在日类型粒度汇总各组成项的分子和分母，再计算比率并相乘。多日结果对可计算的业务日等权平均；不要把整个多日范围的原始分子分母一次汇总后相乘，也不要用机台数、产量或测试时间给日结果加权。
 
+### 数值与展示单位
+
+- 默认逐日 SQL 的 `availability`、`dut_on`、`test_time_performance`、`final_yield`、`daily_test_oee` 和 `period_test_oee` 均为 0–1 比率。
+- 默认看板 SQL 中以 `_percent` 结尾的列为百分数值（percentage points），已经乘以 100；例如 `56.65` 表示 `56.65%`。
+- Dashboard 的 `format.unit: "%"` 只追加单位，不会把 `0.5665` 自动换算为 `56.65`。不得把默认逐日 SQL 的比率列直接映射到 `%` 看板。
+
 ### 其他默认值
 
 - Yield 包含所有 `test_stage`，包括 `1st`、`Rescreen` 和 `2ndRescreen`。

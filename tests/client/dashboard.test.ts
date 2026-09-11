@@ -101,8 +101,37 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   renderer.render(dashboard(2));
   assert.equal(initialized, 2);
   assert.equal(disposed, 1);
-  renderer.render({ ...dashboard(2), widgets: [] });
+  renderer.render({
+    ...dashboard(2),
+    widgets: [{
+      id: "overall-oee-overview",
+      kind: "overview",
+      title: "Overall OEE",
+      subtitle: "最近 7 个业务日",
+      size: "wide",
+      data: [{ overall: 42.5, availability: 80, dut_on: 75, test_time: 95, yield: 90 }],
+      encoding: {
+        value: "overall",
+        gauges: [
+          { name: "Availability", column: "availability" },
+          { name: "DUT-On", column: "dut_on" },
+          { name: "Test Time", column: "test_time" },
+          { name: "Yield", column: "yield" },
+        ],
+      },
+      format: { unit: "%", precision: 2 },
+      metricDefinition: "四个乘数",
+      warnings: [],
+    }],
+  });
+  assert.equal(initialized, 3);
   assert.equal(disposed, 2);
+  assert.equal(grid.querySelector(".overview-oee strong")?.textContent, "42.50%");
+  const gaugeSeries = chartOption?.["series"] as Array<Record<string, unknown>>;
+  assert.equal(gaugeSeries.length, 4);
+  assert.equal(gaugeSeries.every((series) => series["type"] === "gauge"), true);
+  renderer.render({ ...dashboard(2), widgets: [] });
+  assert.equal(disposed, 3);
   renderer.dispose();
   assert.equal(grid.children.length, 0);
 });

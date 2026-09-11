@@ -2,6 +2,7 @@ import type {
   DashboardBarWidget,
   DashboardDonutWidget,
   DashboardLineWidget,
+  DashboardOverviewWidget,
   DashboardState,
   DashboardWidget,
 } from "../shared/dashboard.ts";
@@ -165,6 +166,68 @@ function donutOption(widget: DashboardDonutWidget): Record<string, unknown> {
   };
 }
 
+function overviewOption(widget: DashboardOverviewWidget): Record<string, unknown> {
+  const row = widget.data[0];
+  const gauges = widget.encoding.gauges;
+  return {
+    ...commonChartOption(widget),
+    tooltip: { show: false },
+    series: gauges.map((gauge, index) => {
+      const value = numeric(row?.[gauge.column]);
+      const maximum = value === null || value <= 100 ? 100 : Math.ceil(value / 10) * 10;
+      const minimum = value === null || value >= 0 ? 0 : Math.floor(value / 10) * 10;
+      return {
+        name: gauge.name,
+        type: "gauge",
+        center: [`${((index + 0.5) / gauges.length) * 100}%`, "51%"],
+        radius: "72%",
+        min: minimum,
+        max: maximum,
+        startAngle: 210,
+        endAngle: -30,
+        splitNumber: 5,
+        progress: {
+          show: value !== null,
+          roundCap: true,
+          width: 8,
+          itemStyle: { color: COLORS[index % COLORS.length] },
+        },
+        pointer: {
+          show: value !== null,
+          length: "52%",
+          width: 3,
+          itemStyle: { color: COLORS[index % COLORS.length] },
+        },
+        anchor: {
+          show: value !== null,
+          size: 7,
+          itemStyle: { color: COLORS[index % COLORS.length], borderColor: "#09120f", borderWidth: 2 },
+        },
+        axisLine: { lineStyle: { width: 8, color: [[1, "#263a33"]] } },
+        axisTick: { show: false },
+        splitLine: { distance: -11, length: 5, lineStyle: { color: "#61776d", width: 1 } },
+        axisLabel: { show: false },
+        title: {
+          offsetCenter: [0, "76%"],
+          color: "#a6b6af",
+          fontSize: 12,
+          fontWeight: 600,
+        },
+        detail: {
+          offsetCenter: [0, "38%"],
+          color: value === null ? "#71847b" : "#f2fbf6",
+          fontSize: 17,
+          fontWeight: 650,
+          formatter: value === null
+            ? "—"
+            : (displayValue: number) => `${displayValue.toFixed(1)}${widget.format.unit}`,
+        },
+        data: [{ value: value ?? 0, name: gauge.name }],
+      };
+    }),
+  };
+}
+
 function createHeader(widget: DashboardWidget): HTMLElement {
   const header = document.createElement("header");
   header.className = "metric-card-header";
@@ -176,7 +239,9 @@ function createHeader(widget: DashboardWidget): HTMLElement {
   copy.append(title, subtitle);
   const kind = document.createElement("span");
   kind.className = "metric-kind";
-  kind.textContent = widget.kind === "kpi" ? "KPI" : widget.kind.toUpperCase();
+  kind.textContent = widget.kind === "kpi"
+    ? "KPI"
+    : widget.kind === "overview" ? "OVERVIEW" : widget.kind.toUpperCase();
   header.append(copy, kind);
   return header;
 }
@@ -249,6 +314,31 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
       content.append(comparison);
     }
     card.append(content);
+  } else if (widget.kind === "overview") {
+    const content = document.createElement("div");
+    content.className = "overview-content";
+    const overall = document.createElement("div");
+    overall.className = "overview-oee";
+    const label = document.createElement("span");
+    label.textContent = "7 日 Overall OEE";
+    const number = document.createElement("strong");
+    const value = widget.data[0]?.[widget.encoding.value];
+    number.textContent = formatted(value, widget.format.unit, widget.format.precision);
+    number.classList.toggle("unavailable", numeric(value) === null);
+    const formula = document.createElement("small");
+    formula.textContent = "AVG(MT / ST DAILY OEE)";
+    overall.append(label, number, formula);
+
+    chartHost = document.createElement("div");
+    chartHost.className = "chart-host overview-gauges";
+    chartHost.setAttribute("role", "img");
+    chartHost.setAttribute("aria-label", `${widget.title} 四个乘数仪表盘`);
+    content.append(overall, chartHost);
+    card.append(content);
+    const api = window.echarts;
+    if (!api) throw new Error("ECharts 未加载");
+    chart = api.init(chartHost, null, { renderer: "canvas" });
+    chart.setOption(overviewOption(widget), { notMerge: true });
   } else if (widget.kind === "table") {
     card.append(createTable(widget));
   } else if (!widget.data.length) {

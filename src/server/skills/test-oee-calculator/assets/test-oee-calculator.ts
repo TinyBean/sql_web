@@ -46,6 +46,16 @@ export interface DefaultTestOeeSql {
   readonly sql: string;
 }
 
+export type TestOeeDashboardView = "overview" | "trends";
+
+export interface DefaultTestOeeDashboardSql {
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly view: TestOeeDashboardView;
+  readonly valueScale: "percentage_points";
+  readonly sql: string;
+}
+
 export interface LotEligibilityResult {
   readonly lotId: string;
   readonly eligibleLot: boolean;
@@ -642,6 +652,61 @@ ORDER BY c.day, k.kind`;
     trimPercentPerTail: TEST_TIME_TRIM_PERCENT_PER_TAIL,
     trimFractionPerTail: TEST_TIME_TRIM_FRACTION_PER_TAIL,
     periodAggregation: "average_of_daily_oee",
+    sql,
+  };
+}
+
+/**
+ * Project the canonical daily query into the exact row shapes used by Dashboard widgets.
+ * Percentage columns deliberately contain percentage points (for example 56.65), because
+ * Dashboard's `%` unit is a display suffix and does not scale ratios automatically.
+ */
+export function getDefaultTestOeeDashboardSql(
+  startDate: string,
+  endDate: string,
+  view: TestOeeDashboardView,
+): DefaultTestOeeDashboardSql {
+  const daily = getDefaultTestOeeSql(startDate, endDate);
+  const dailySubquery = `(\n${daily.sql}\n) AS daily`;
+  const sql = view === "overview"
+    ? `SELECT
+  100.0 * AVG(daily_test_oee) AS overall_oee_percent,
+  100.0 * AVG(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_oee_percent,
+  100.0 * AVG(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent,
+  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN availability END)
+    AS avg_availability_percent,
+  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN dut_on END)
+    AS avg_dut_on_percent,
+  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN test_time_performance END)
+    AS avg_test_time_percent,
+  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN final_yield END)
+    AS avg_yield_percent,
+  COUNT(daily_test_oee) AS calculable_day_type_count,
+  COUNT(*) AS selected_day_type_count,
+  SUM(CASE WHEN availability_rows>0 THEN 1 ELSE 0 END) AS availability_day_type_count,
+  COUNT(dut_rows) AS dut_day_type_count
+FROM ${dailySubquery}`
+    : `SELECT
+  day,
+  100.0 * MAX(CASE WHEN kind='MT' THEN availability END) AS mt_availability_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN availability END) AS st_availability_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN dut_on END) AS mt_dut_on_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN dut_on END) AS st_dut_on_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN test_time_performance END) AS mt_test_time_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN test_time_performance END) AS st_test_time_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN final_yield END) AS mt_yield_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN final_yield END) AS st_yield_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_oee_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent
+FROM ${dailySubquery}
+GROUP BY day
+ORDER BY day`;
+
+  return {
+    startDate,
+    endDate,
+    view,
+    valueScale: "percentage_points",
     sql,
   };
 }

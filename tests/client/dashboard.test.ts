@@ -112,6 +112,8 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
       data: [{ overall: 42.5, availability: 80, dut_on: 75, test_time: 95, yield: 90 }],
       encoding: {
         value: "overall",
+        label: "上月综合效率",
+        description: "按有效工作日等权平均",
         gauges: [
           { name: "Availability", column: "availability" },
           { name: "DUT-On", column: "dut_on" },
@@ -126,7 +128,9 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   });
   assert.equal(initialized, 3);
   assert.equal(disposed, 2);
+  assert.equal(grid.querySelector(".overview-oee span")?.textContent, "上月综合效率");
   assert.equal(grid.querySelector(".overview-oee strong")?.textContent, "42.50%");
+  assert.equal(grid.querySelector(".overview-oee small")?.textContent, "按有效工作日等权平均");
   const gaugeSeries = chartOption?.["series"] as Array<Record<string, unknown>>;
   assert.equal(gaugeSeries.length, 4);
   assert.equal(gaugeSeries.every((series) => series["type"] === "gauge"), true);

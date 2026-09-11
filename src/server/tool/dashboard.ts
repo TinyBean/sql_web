@@ -316,6 +316,8 @@ function emptyDefaultDashboard(): DashboardState {
         data: [{ overall_oee: null, availability: null, dut_on: null, test_time: null, yield: null }],
         encoding: {
           value: "overall_oee",
+          label: "Overall OEE",
+          description: "等待可用数据后计算",
           gauges: [
             { name: "Availability", column: "availability" },
             { name: "DUT-On", column: "dut_on" },
@@ -402,6 +404,8 @@ function buildDefaultDashboard(database: AppDatabase): DashboardState {
         data: [overviewData],
         encoding: {
           value: "overall_oee",
+          label: `${dates.length} 日 Overall OEE`,
+          description: "AVG(MT / ST DAILY OEE)",
           gauges: [
             { name: "Availability", column: "availability" },
             { name: "DUT-On", column: "dut_on" },

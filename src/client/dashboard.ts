@@ -320,19 +320,22 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
     const overall = document.createElement("div");
     overall.className = "overview-oee";
     const label = document.createElement("span");
-    label.textContent = "7 日 Overall OEE";
+    label.textContent = widget.encoding.label ?? widget.title;
     const number = document.createElement("strong");
     const value = widget.data[0]?.[widget.encoding.value];
     number.textContent = formatted(value, widget.format.unit, widget.format.precision);
     number.classList.toggle("unavailable", numeric(value) === null);
     const formula = document.createElement("small");
-    formula.textContent = "AVG(MT / ST DAILY OEE)";
+    formula.textContent = widget.encoding.description ?? widget.metricDefinition;
     overall.append(label, number, formula);
 
     chartHost = document.createElement("div");
     chartHost.className = "chart-host overview-gauges";
     chartHost.setAttribute("role", "img");
-    chartHost.setAttribute("aria-label", `${widget.title} 四个乘数仪表盘`);
+    chartHost.setAttribute(
+      "aria-label",
+      `${widget.title}：${widget.encoding.gauges.map((gauge) => gauge.name).join("、")} 仪表盘`,
+    );
     content.append(overall, chartHost);
     card.append(content);
     const api = window.echarts;

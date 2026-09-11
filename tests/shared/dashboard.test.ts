@@ -21,6 +21,7 @@ function allKinds(): unknown {
     dateRange: { start: "2026-09-01", end: "2026-09-08" },
     widgets: [
       { ...common, id: "kpi-one", kind: "kpi", title: "KPI", data: [{ value: 1 }], encoding: { value: "value", comparison: null } },
+      { ...common, id: "overview-one", kind: "overview", title: "Overview", data: [{ value: 1, factor: 2 }], encoding: { value: "value", label: "月度综合值", description: "按有效日平均", gauges: [{ name: "Factor", column: "factor" }] } },
       { ...common, id: "line-one", kind: "line", title: "Line", data: [{ day: "1", value: 1 }], encoding: { category: "day", series: [{ name: "A", column: "value" }] } },
       { ...common, id: "bar-one", kind: "bar", title: "Bar", data: [{ name: "A", value: 1 }], encoding: { category: "name", series: [{ name: "A", column: "value" }], orientation: "vertical" } },
       { ...common, id: "stacked-one", kind: "stacked-bar", title: "Stacked", data: [{ name: "A", value: 1 }], encoding: { category: "name", series: [{ name: "A", column: "value" }], orientation: "horizontal" } },
@@ -34,6 +35,7 @@ test("validates every controlled dashboard widget kind", () => {
   const dashboard = parseDashboardState(allKinds());
   assert.deepEqual(dashboard.widgets.map((widget) => widget.kind), [
     "kpi",
+    "overview",
     "line",
     "bar",
     "stacked-bar",
@@ -48,7 +50,7 @@ test("rejects duplicate widgets and dashboard data limits", () => {
     () => parseDashboardState({ ...base, widgets: [...base.widgets, base.widgets[0]] }),
     DashboardValidationError,
   );
-  const line = base.widgets[1] as Record<string, unknown>;
+  const line = base.widgets[2] as Record<string, unknown>;
   assert.throws(
     () => parseDashboardState({
       ...base,

@@ -32,6 +32,8 @@ export interface DashboardKpiEncoding {
 
 export interface DashboardOverviewEncoding {
   readonly value: string;
+  readonly label?: string;
+  readonly description?: string;
   readonly gauges: readonly DashboardSeriesEncoding[];
 }
 
@@ -232,6 +234,12 @@ function encoding(kind: DashboardWidgetKind, value: unknown, path: string): Dash
   if (kind === "overview") {
     return {
       value: nonEmptyString(source["value"], `${path}.value`, 80),
+      ...(source["label"] === undefined
+        ? {}
+        : { label: nonEmptyString(source["label"], `${path}.label`, 120) }),
+      ...(source["description"] === undefined
+        ? {}
+        : { description: nonEmptyString(source["description"], `${path}.description`, 240) }),
       gauges: series(source["gauges"], `${path}.gauges`),
     };
   }

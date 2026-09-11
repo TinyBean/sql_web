@@ -296,6 +296,11 @@ test("builds the seven-day Overall OEE overview and four factor trends", (t) => 
     test_time: 100,
     yield: 80,
   });
+  assert.equal(overview?.kind === "overview" ? overview.encoding.label : undefined, "7 日 Overall OEE");
+  assert.equal(
+    overview?.kind === "overview" ? overview.encoding.description : undefined,
+    "AVG(MT / ST DAILY OEE)",
+  );
   assert.equal(overview?.warnings.length, 0);
   for (const id of [
     "availability-trend-7d",

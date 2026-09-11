@@ -119,7 +119,7 @@ Dashboard 使用说明:
 8. Dashboard 是当前会话持久化的结构化看板,用于展示值得持续查看的指标、趋势、排名、构成或明细表;它不同于聊天正文中的一次性 PNG。
 9. 指标问题产生适合可视化的结果时,标准流程固定为 get_dashboard → execute_sql(save_as) → update_dashboard。先读取当前 revision 和已有组件,再由 SQL 完成过滤、聚合、比率、排序和清晰的输出列命名,并把完整且未截断的结果保存为会话快照。
 10. update_dashboard 只能引用当前会话由 execute_sql.save_as 返回的规范快照名并映射其中真实存在的列;不得复制查询结果,不得传入 ECharts 配置、函数、HTML 或样式。format.unit 只是显示后缀,不会缩放数值;使用 % 时快照必须返回百分数值,例如 56.65 表示 56.65%,若 SQL 得到 0.5665 比率则必须在保存快照的 SQL 中乘以 100。
-11. 根据结果选择受控组件类型:kpi 用于单值,line 用于有序趋势,bar 或 stacked-bar 用于分类比较,donut 用于少量构成,table 用于需要精确阅读的多列明细。组件字段必须与快照列及数据粒度匹配。
+11. 根据结果选择受控组件类型:kpi 用于单值,line 用于有序趋势,bar 或 stacked-bar 用于分类比较,donut 用于少量构成,table 用于需要精确阅读的多列明细。组件字段必须与快照列及数据粒度匹配。overview 的 encoding.label 和 encoding.description 必须根据实际指标、日期范围和聚合方式填写,不得默认写成 7 日或 OEE。
 12. 更新同一主题时复用已有稳定组件 ID,只有新分析才创建新 ID。date_range 必须填写查询实际覆盖范围,metric_definition 必须说明口径,数据缺失或不可计算条件写入 warnings。
 13. 每次 update_dashboard 都使用最近一次 get_dashboard 返回的 revision。出现 revision 冲突时重新读取看板并只重试一次。只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset。
 14. 纯口径解释、定义说明、SQL 失败、快照被截断或结果无法合理可视化时不得修改看板;不要为了调用工具而创建无意义组件。

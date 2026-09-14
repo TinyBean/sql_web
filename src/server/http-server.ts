@@ -10,6 +10,8 @@ import type {
   AgentStatus,
   AutomaticCompactionReason,
   CompactionOutcome,
+  DashboardEditRequest,
+  DashboardEditResponse,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -27,6 +29,12 @@ import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.t
 import { DatabaseInputError } from "./database/database.ts";
 import { extractCodeInterpreterImages } from "./tool/code-interpreter-images.ts";
 import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
+import { DashboardConflictError, DashboardInputError } from "./tool/dashboard.ts";
+import {
+  DASHBOARD_WIDGET_ID_PATTERN,
+  MAX_DASHBOARD_WIDGETS,
+  type DashboardState,
+} from "../shared/dashboard.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";
@@ -72,6 +80,7 @@ export interface WebSessionPort {
   create(): Promise<SerializedSession>;
   get(id: string): Promise<StreamableAgentSession>;
   getSerialized(id: string): Promise<SerializedSession>;
+  editDashboard(id: string, request: DashboardEditRequest): Promise<DashboardState>;
   delete(id: string): Promise<void>;
   prompt(id: string, text: string, requestId?: string): Promise<void>;
   abort(id: string): Promise<void>;
@@ -155,6 +164,44 @@ function requireMessageRequest(value: unknown): MessageRequest {
     throw new HttpError("请求体必须包含字符串类型的 message", 400);
   }
   return { message: value.message };
+}
+
+function requireDashboardEditRequest(value: unknown): DashboardEditRequest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError("看板编辑请求必须是对象", 400);
+  }
+  const body = value as Record<string, unknown>;
+  const baseRevision = body["baseRevision"];
+  if (!Number.isSafeInteger(baseRevision) || (baseRevision as number) < 0) {
+    throw new HttpError("baseRevision 必须是非负安全整数", 400);
+  }
+  if (body["action"] === "remove") {
+    const widgetId = body["widgetId"];
+    if (typeof widgetId !== "string" || !DASHBOARD_WIDGET_ID_PATTERN.test(widgetId)) {
+      throw new HttpError("widgetId 必须是合法的组件 ID", 400);
+    }
+    return { action: "remove", baseRevision: baseRevision as number, widgetId };
+  }
+  if (body["action"] === "reorder") {
+    const widgetIds = body["widgetIds"];
+    if (
+      !Array.isArray(widgetIds) || widgetIds.length < 1 ||
+      widgetIds.length > MAX_DASHBOARD_WIDGETS ||
+      widgetIds.some((id) => typeof id !== "string" || !DASHBOARD_WIDGET_ID_PATTERN.test(id)) ||
+      new Set(widgetIds).size !== widgetIds.length
+    ) {
+      throw new HttpError(
+        `widgetIds 必须是 1 到 ${MAX_DASHBOARD_WIDGETS} 个不重复组件 ID`,
+        400,
+      );
+    }
+    return {
+      action: "reorder",
+      baseRevision: baseRevision as number,
+      widgetIds: widgetIds as string[],
+    };
+  }
+  throw new HttpError("action 必须是 remove 或 reorder", 400);
 }
 
 function writeSse<EventName extends keyof SseEventMap>(
@@ -327,7 +374,11 @@ function errorStatus(error: unknown): number {
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof SessionNotFoundError) return 404;
   if (error instanceof SessionBusyError) return 409;
-  if (error instanceof TypeError || error instanceof DatabaseInputError) return 400;
+  if (error instanceof DashboardConflictError) return 409;
+  if (
+    error instanceof TypeError || error instanceof DatabaseInputError ||
+    error instanceof DashboardInputError
+  ) return 400;
   return 500;
 }
 
@@ -361,6 +412,7 @@ function decodeSessionId(match: RegExpExecArray): string {
 }
 
 function requestRoute(pathname: string): string {
+  if (/^\/api\/sessions\/[^/]+\/dashboard$/u.test(pathname)) return "/api/sessions/:id/dashboard";
   if (/^\/api\/sessions\/[^/]+\/messages$/u.test(pathname)) return "/api/sessions/:id/messages";
   if (/^\/api\/sessions\/[^/]+\/abort$/u.test(pathname)) return "/api/sessions/:id/abort";
   if (/^\/api\/sessions\/[^/]+$/u.test(pathname)) return "/api/sessions/:id";
@@ -440,6 +492,15 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       if (request.method === "DELETE" && sessionMatch) {
         await sessions.delete(decodeSessionId(sessionMatch));
         json(response, 200, { ok: true } satisfies DeleteSessionResponse);
+        return;
+      }
+
+      const dashboardMatch = /^\/api\/sessions\/([^/]+)\/dashboard$/u.exec(url.pathname);
+      if (request.method === "PATCH" && dashboardMatch) {
+        const id = decodeSessionId(dashboardMatch);
+        const body = requireDashboardEditRequest(await readJson(request));
+        const dashboard = await sessions.editDashboard(id, body);
+        json(response, 200, { dashboard } satisfies DashboardEditResponse);
         return;
       }
 

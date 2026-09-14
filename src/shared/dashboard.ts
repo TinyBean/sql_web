@@ -6,6 +6,7 @@ export const MAX_DASHBOARD_ROWS_PER_WIDGET = 2_000;
 export const MAX_DASHBOARD_SERIES = 6;
 export const MAX_DASHBOARD_TABLE_COLUMNS = 8;
 export const MAX_DASHBOARD_FILE_BYTES = 2 * 1024 * 1024;
+export const DASHBOARD_WIDGET_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
 export type DashboardWidgetKind =
   | "kpi"
@@ -316,7 +317,7 @@ export function parseDashboardState(value: unknown, path = "$dashboard"): Dashbo
   const widgets = array(source["widgets"], `${path}.widgets`, widget, MAX_DASHBOARD_WIDGETS);
   const ids = new Set<string>();
   for (const [index, item] of widgets.entries()) {
-    if (!/^[a-z][a-z0-9-]{0,63}$/u.test(item.id)) {
+    if (!DASHBOARD_WIDGET_ID_PATTERN.test(item.id)) {
       invalid(`${path}.widgets[${index}].id`, "小写语义组件 ID");
     }
     if (ids.has(item.id)) invalid(`${path}.widgets[${index}].id`, "唯一组件 ID");

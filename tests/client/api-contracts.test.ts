@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ContractValidationError,
+  decodeDashboardEditResponse,
   decodeDeleteSessionResponse,
   decodeErrorResponse,
   decodeHealthResponse,
@@ -43,6 +44,17 @@ test("decodes a complete session without type assertions", () => {
 test("decodes a successful session deletion", () => {
   assert.deepEqual(decodeDeleteSessionResponse({ ok: true }), { ok: true });
   assert.throws(() => decodeDeleteSessionResponse({ ok: false }), /ok/u);
+});
+
+test("decodes a persisted dashboard edit", () => {
+  assert.deepEqual(
+    decodeDashboardEditResponse({ dashboard: validSession.dashboard }),
+    { dashboard: validSession.dashboard },
+  );
+  assert.throws(
+    () => decodeDashboardEditResponse({ dashboard: { ...validSession.dashboard, revision: -1 } }),
+    /revision/u,
+  );
 });
 
 test("decodes request correlation IDs from JSON and SSE errors", () => {

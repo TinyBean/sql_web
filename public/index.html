@@ -22,6 +22,9 @@
           <p><span id="dashboardDateRange">读取数据范围…</span><span class="heading-separator">/</span><span id="dashboardUpdatedAt">准备快照…</span></p>
         </div>
         <div class="topbar-actions">
+          <button class="topbar-button" id="dashboardEditButton" type="button" aria-pressed="false" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.9-10.9a2.1 2.1 0 0 0-3-3L5.2 16 4 20ZM14.8 6.2l3 3"/></svg><span>编辑看板</span>
+          </button>
           <button class="topbar-button primary" id="newChatButton" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新建会话
           </button>
@@ -88,7 +91,7 @@
       <nav class="session-list" id="sessionList"><div class="session-placeholder">还没有会话</div></nav>
     </aside>
 
-    <div class="toast" id="toast" role="status"></div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="/vendor/marked.js"></script>
     <script src="/vendor/dompurify.js"></script>
     <script src="/vendor/echarts.js"></script>

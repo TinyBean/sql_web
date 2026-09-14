@@ -30,6 +30,11 @@ interface RenderedWidget {
   readonly chartHost: HTMLElement | null;
 }
 
+interface DashboardRenderState {
+  readonly pendingWidgetIds?: ReadonlySet<string>;
+  readonly hiddenWidgetIds?: ReadonlySet<string>;
+}
+
 interface ResizeObserverLike {
   observe(target: Element): void;
   unobserve(target: Element): void;
@@ -242,8 +247,52 @@ function createHeader(widget: DashboardWidget): HTMLElement {
   kind.textContent = widget.kind === "kpi"
     ? "KPI"
     : widget.kind === "overview" ? "OVERVIEW" : widget.kind.toUpperCase();
-  header.append(copy, kind);
+  const controls = document.createElement("div");
+  controls.className = "metric-card-controls";
+  controls.append(
+    createCardButton(
+      "metric-drag-handle",
+      `拖动“${widget.title}”调整顺序`,
+      "dragHandle",
+      widget.id,
+      "M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01",
+    ),
+    createCardButton(
+      "metric-close-button",
+      `关闭“${widget.title}”`,
+      "closeWidgetId",
+      widget.id,
+      "m7 7 10 10M17 7 7 17",
+    ),
+  );
+  const trailing = document.createElement("div");
+  trailing.className = "metric-card-trailing";
+  trailing.append(kind, controls);
+  header.append(copy, trailing);
   return header;
+}
+
+function createCardButton(
+  className: string,
+  label: string,
+  dataName: "dragHandle" | "closeWidgetId",
+  widgetId: string,
+  pathData: string,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.dataset[dataName] = widgetId;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", pathData);
+  svg.append(path);
+  button.append(svg);
+  return button;
 }
 
 function appendWarnings(card: HTMLElement, widget: DashboardWidget): void {
@@ -375,6 +424,9 @@ export class DashboardRenderer {
   readonly #container: HTMLElement;
   readonly #widgets = new Map<string, RenderedWidget>();
   readonly #resizeObserver: ResizeObserverLike;
+  readonly #positionAnimations = new Map<string, Animation>();
+  #editing = false;
+  #saving = false;
 
   constructor(container: HTMLElement) {
     this.#container = container;
@@ -388,7 +440,9 @@ export class DashboardRenderer {
       : { observe: () => {}, unobserve: () => {}, disconnect: () => {} };
   }
 
-  render(dashboard: DashboardState, pendingWidgetIds: ReadonlySet<string> = new Set()): void {
+  render(dashboard: DashboardState, state: DashboardRenderState = {}): void {
+    const pendingWidgetIds = state.pendingWidgetIds ?? new Set<string>();
+    const hiddenWidgetIds = state.hiddenWidgetIds ?? new Set<string>();
     for (const placeholder of this.#container.querySelectorAll(".dashboard-loading")) {
       placeholder.remove();
     }
@@ -417,12 +471,86 @@ export class DashboardRenderer {
       }
       rendered.element.classList.toggle("pending", pendingWidgetIds.has(widget.id));
       rendered.element.setAttribute("aria-busy", String(pendingWidgetIds.has(widget.id)));
+      rendered.element.hidden = hiddenWidgetIds.has(widget.id);
       this.#container.append(rendered.element);
       rendered.chart?.resize();
     }
+    this.#renderEmptyState(dashboard.widgets.every((widget) => hiddenWidgetIds.has(widget.id)));
+    this.#syncControls();
+  }
+
+  setEditing(editing: boolean, saving = false): void {
+    this.#editing = editing;
+    this.#saving = saving;
+    this.#container.classList.toggle("dashboard-editing", editing);
+    this.#container.classList.toggle("dashboard-saving", saving);
+    this.#syncControls();
+  }
+
+  previewOrder(widgetIds: readonly string[]): void {
+    const positions = new Map<string, DOMRect>();
+    for (const [id, rendered] of this.#widgets) {
+      if (!rendered.element.hidden && rendered.element.isConnected) {
+        positions.set(id, rendered.element.getBoundingClientRect());
+      }
+    }
+    for (const animation of this.#positionAnimations.values()) animation.cancel();
+    this.#positionAnimations.clear();
+    const requested = new Set(widgetIds);
+    for (const id of widgetIds) {
+      const rendered = this.#widgets.get(id);
+      if (rendered) this.#container.append(rendered.element);
+    }
+    for (const [id, rendered] of this.#widgets) {
+      if (!requested.has(id)) this.#container.append(rendered.element);
+    }
+    const empty = this.#container.querySelector(".dashboard-empty");
+    if (empty) this.#container.append(empty);
+    if (reducedMotion) return;
+    for (const [id, rendered] of this.#widgets) {
+      const previous = positions.get(id);
+      if (!previous || rendered.element.hidden) continue;
+      const next = rendered.element.getBoundingClientRect();
+      const x = previous.left - next.left;
+      const y = previous.top - next.top;
+      if (
+        (Math.abs(x) < 1 && Math.abs(y) < 1) ||
+        typeof rendered.element.animate !== "function"
+      ) continue;
+      const animation = rendered.element.animate([
+        { transform: `translate(${x}px, ${y}px)` },
+        { transform: "translate(0, 0)" },
+      ], {
+        duration: 220,
+        easing: "cubic-bezier(.2, .75, .25, 1)",
+      });
+      this.#positionAnimations.set(id, animation);
+      animation.addEventListener("finish", () => {
+        if (this.#positionAnimations.get(id) === animation) {
+          this.#positionAnimations.delete(id);
+        }
+      }, { once: true });
+    }
+  }
+
+  settleWidget(widgetId: string): void {
+    if (reducedMotion) return;
+    const rendered = this.#widgets.get(widgetId);
+    if (!rendered || typeof rendered.element.animate !== "function") return;
+    this.#positionAnimations.get(widgetId)?.cancel();
+    this.#positionAnimations.delete(widgetId);
+    rendered.element.animate([
+      { transform: "scale(.985)", filter: "brightness(1.1)" },
+      { transform: "scale(1)", filter: "brightness(1)" },
+    ], {
+      duration: 180,
+      easing: "cubic-bezier(.2, .75, .25, 1)",
+    });
   }
 
   dispose(): void {
+    for (const animation of this.#positionAnimations.values()) animation.cancel();
+    this.#positionAnimations.clear();
     for (const rendered of this.#widgets.values()) this.#disposeWidget(rendered);
     this.#widgets.clear();
     this.#resizeObserver.disconnect();
@@ -430,8 +558,43 @@ export class DashboardRenderer {
   }
 
   #disposeWidget(rendered: RenderedWidget): void {
+    const widgetId = rendered.element.dataset["widgetId"];
+    if (widgetId) {
+      this.#positionAnimations.get(widgetId)?.cancel();
+      this.#positionAnimations.delete(widgetId);
+    }
     if (rendered.chartHost) this.#resizeObserver.unobserve(rendered.chartHost);
     rendered.chart?.dispose();
     rendered.element.remove();
+  }
+
+  #renderEmptyState(empty: boolean): void {
+    const current = this.#container.querySelector(".dashboard-empty");
+    if (!empty) {
+      current?.remove();
+      return;
+    }
+    if (current) return;
+    const placeholder = document.createElement("div");
+    placeholder.className = "dashboard-empty";
+    const title = document.createElement("strong");
+    title.textContent = "当前看板为空";
+    const copy = document.createElement("p");
+    copy.textContent = "可以通过 Agent 对话重新添加指标图表。";
+    placeholder.append(title, copy);
+    this.#container.append(placeholder);
+  }
+
+  #syncControls(): void {
+    for (const control of this.#container.querySelectorAll(
+      ".metric-drag-handle, .metric-close-button",
+    )) {
+      if (!(control instanceof HTMLButtonElement)) continue;
+      control.disabled = !this.#editing || this.#saving;
+      control.tabIndex = this.#editing ? 0 : -1;
+      if (control.classList.contains("metric-drag-handle")) {
+        control.draggable = false;
+      }
+    }
   }
 }

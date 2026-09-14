@@ -40,6 +40,7 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   expose("window", browser);
   expose("document", browser.document);
   expose("HTMLElement", browser.HTMLElement);
+  expose("HTMLButtonElement", browser.HTMLButtonElement);
   const observed = new Set<Element>();
   let resizeCallback: ResizeObserverCallback | undefined;
   class FakeResizeObserver {
@@ -89,9 +90,84 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   assert.equal(formatTooltip([
     { axisValueLabel: "2026-09-08", seriesName: "OEE", value: 1 },
   ]), "2026-09-08\nOEE  1.0%");
-  renderer.render(dashboard(1), new Set(["trend"]));
+  const twoWidgets: DashboardState = {
+    ...dashboard(1),
+    widgets: [
+      ...dashboard(1).widgets,
+      {
+        id: "secondary",
+        kind: "kpi",
+        title: "辅助指标",
+        subtitle: "测试",
+        size: "small",
+        data: [{ value: 2 }],
+        encoding: { value: "value", comparison: null },
+        format: { unit: "%", precision: 1 },
+        metricDefinition: "辅助口径",
+        warnings: [],
+      },
+    ],
+  };
+  renderer.render(twoWidgets);
+  let animated = 0;
+  for (const card of grid.querySelectorAll<HTMLElement>("[data-widget-id]")) {
+    Object.defineProperty(card, "getBoundingClientRect", {
+      configurable: true,
+      value(): DOMRect {
+        const cards = [...grid.querySelectorAll("[data-widget-id]")];
+        const left = cards.indexOf(card) * 100;
+        return {
+          x: left,
+          y: 0,
+          left,
+          right: left + 90,
+          top: 0,
+          bottom: 90,
+          width: 90,
+          height: 90,
+          toJSON: () => ({}),
+        };
+      },
+    });
+    Object.defineProperty(card, "animate", {
+      configurable: true,
+      value(): Animation {
+        animated += 1;
+        return {
+          cancel() {},
+          addEventListener() {},
+        } as unknown as Animation;
+      },
+    });
+  }
+  renderer.previewOrder(["secondary", "trend"]);
+  assert.deepEqual(
+    [...grid.querySelectorAll("[data-widget-id]")].map((card) => (card as HTMLElement).dataset["widgetId"]),
+    ["secondary", "trend"],
+  );
+  assert.equal(animated, 2, "both displaced cards should receive FLIP animations");
+  renderer.settleWidget("trend");
+  assert.equal(animated, 3, "the dropped card should receive a settle animation");
+  renderer.render(dashboard(1));
+  renderer.render(dashboard(1), { pendingWidgetIds: new Set(["trend"]) });
   assert.equal(initialized, 1, "unchanged widget should reuse its chart");
   assert.equal(grid.querySelector("[data-widget-id='trend']")?.classList.contains("pending"), true);
+  const dragHandle = grid.querySelector("[data-drag-handle='trend']") as HTMLButtonElement;
+  const closeButton = grid.querySelector("[data-close-widget-id='trend']") as HTMLButtonElement;
+  assert.equal(dragHandle.disabled, true);
+  assert.equal(closeButton.getAttribute("aria-label"), "关闭“趋势”");
+  renderer.setEditing(true);
+  assert.equal(grid.classList.contains("dashboard-editing"), true);
+  assert.equal(dragHandle.disabled, false);
+  assert.equal(dragHandle.draggable, false, "pointer dragging must not start native HTML drag");
+  renderer.setEditing(true, true);
+  assert.equal(dragHandle.disabled, true);
+  assert.equal(dragHandle.draggable, false);
+  renderer.setEditing(false);
+  renderer.render(dashboard(1), { hiddenWidgetIds: new Set(["trend"]) });
+  assert.equal(grid.querySelector("[data-widget-id='trend']")?.hasAttribute("hidden"), true);
+  assert.match(grid.querySelector(".dashboard-empty")?.textContent ?? "", /当前看板为空/u);
+  assert.equal(initialized, 1, "hiding a widget must preserve its chart");
   resizeCallback?.(
     [...observed].map((target) => ({ target } as ResizeObserverEntry)),
     {} as ResizeObserver,

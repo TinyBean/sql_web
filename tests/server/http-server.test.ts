@@ -7,6 +7,7 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import {
   decodeSseEvent,
+  decodeDashboardEditResponse,
   decodeDeleteSessionResponse,
   decodeErrorResponse,
   decodeHealthResponse,
@@ -16,6 +17,7 @@ import {
   type Decoder,
 } from "../../src/client/api-contracts.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
+import { SessionBusyError } from "../../src/server/agent/agent-sessions.ts";
 import {
   createWebServer,
   type StreamableAgentSession,
@@ -24,6 +26,7 @@ import {
 } from "../../src/server/http-server.ts";
 import type { ChatImage, ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
+import { DashboardConflictError } from "../../src/server/tool/dashboard.ts";
 import { generatedImageMarkdown } from "../../src/shared/image-references.ts";
 
 const projectRoot = process.cwd();
@@ -72,6 +75,7 @@ async function createFixture(
     }),
     get: async () => { throw new Error("not used in this test"); },
     getSerialized: async () => { throw new Error("not used in this test"); },
+    editDashboard: async () => EMPTY_DASHBOARD,
     delete: async () => {},
     prompt: async () => {},
     abort: async () => {},
@@ -245,6 +249,79 @@ test("exposes health, schema, and session endpoints", async (t) => {
   assert.deepEqual(decodeDeleteSessionResponse(await deleted.json()), { ok: true });
 });
 
+test("validates and persists manual dashboard edits", async (t) => {
+  const edits: Array<{ id: string; request: unknown }> = [];
+  const updated: DashboardState = { ...EMPTY_DASHBOARD, revision: 3 };
+  const serialized: SerializedSession = {
+    id: "fake-session",
+    title: "测试会话",
+    model: null,
+    tools: [],
+    streaming: false,
+    dashboard: updated,
+    messages: [],
+  };
+  const sessions: WebSessionPort = {
+    status: () => ({
+      tools: [],
+      codeInterpreter: { available: false, reason: "unavailable" },
+      model: { provider: "test", model: "test" },
+      availableModelCount: 0,
+      activeSessionCount: 1,
+    }),
+    list: async () => [],
+    create: async () => serialized,
+    get: async () => ({ isStreaming: false, subscribe: () => () => {} }),
+    getSerialized: async () => serialized,
+    editDashboard: async (id, request) => {
+      if (id === "busy-session") throw new SessionBusyError();
+      if (request.baseRevision === 99) throw new DashboardConflictError(99, 2);
+      edits.push({ id, request });
+      return updated;
+    },
+    delete: async () => {},
+    prompt: async () => {},
+    abort: async () => {},
+  };
+  const baseUrl = await createFixture(t, sessions);
+  const edit = await fetch(`${baseUrl}/api/sessions/fake-session/dashboard`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "remove", baseRevision: 2, widgetId: "trend" }),
+  });
+  assert.equal(edit.status, 200);
+  assert.deepEqual(
+    decodeDashboardEditResponse(parseJson(await edit.text())),
+    { dashboard: updated },
+  );
+  assert.deepEqual(edits, [{
+    id: "fake-session",
+    request: { action: "remove", baseRevision: 2, widgetId: "trend" },
+  }]);
+
+  const malformed = await fetch(`${baseUrl}/api/sessions/fake-session/dashboard`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "reorder", baseRevision: 2, widgetIds: ["trend", "trend"] }),
+  });
+  assert.equal(malformed.status, 400);
+  assert.match(decodeErrorResponse(parseJson(await malformed.text())).error, /widgetIds/u);
+
+  const conflict = await fetch(`${baseUrl}/api/sessions/fake-session/dashboard`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "remove", baseRevision: 99, widgetId: "trend" }),
+  });
+  assert.equal(conflict.status, 409);
+
+  const busy = await fetch(`${baseUrl}/api/sessions/busy-session/dashboard`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "reorder", baseRevision: 2, widgetIds: ["trend"] }),
+  });
+  assert.equal(busy.status, 409);
+});
+
 test("rejects non-JSON session creation requests", async (t) => {
   const baseUrl = await createFixture(t);
   const response = await fetch(`${baseUrl}/api/sessions`, { method: "POST" });
@@ -369,6 +446,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
       } as unknown as AgentSessionEvent);
     },
     abort: async () => {},
+    editDashboard: async () => EMPTY_DASHBOARD,
   };
   const baseUrl = await createFixture(t, sessions);
   const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
@@ -468,6 +546,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
       } as AgentSessionEvent);
     },
     abort: async () => {},
+    editDashboard: async () => EMPTY_DASHBOARD,
   };
   const baseUrl = await createFixture(t, sessions);
   const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
@@ -603,6 +682,7 @@ test("streams validated generated images after tool completion and reconciles wi
       });
     },
     abort: async () => {},
+    editDashboard: async () => EMPTY_DASHBOARD,
   };
   const baseUrl = await createFixture(t, sessions);
   const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
@@ -714,6 +794,7 @@ test("does not stream images from failed, unrelated, or malformed tool results",
       });
     },
     abort: async () => {},
+    editDashboard: async () => EMPTY_DASHBOARD,
   };
   const baseUrl = await createFixture(t, sessions);
   const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
@@ -806,6 +887,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
       }
     },
     abort: async () => {},
+    editDashboard: async () => EMPTY_DASHBOARD,
   };
   const baseUrl = await createFixture(t, sessions);
   const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {

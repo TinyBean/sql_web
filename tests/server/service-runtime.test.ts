@@ -97,6 +97,9 @@ function fakeDependencies(events: string[]): ServiceRuntimeDependencies {
       getSerialized: async () => {
         throw new Error("not used");
       },
+      editDashboard: async () => {
+        throw new Error("not used");
+      },
       delete: async () => {},
       prompt: async () => {},
       abort: async () => {},

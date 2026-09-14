@@ -21,11 +21,13 @@ import {
   type ChatImage,
   type ChatMessage,
   type ChatTraceItem,
+  type DashboardEditRequest,
   type JsonObject,
   type ModelSelection,
   type SerializedSession,
   type SessionSummary,
 } from "../../shared/contracts.ts";
+import type { DashboardState } from "../../shared/dashboard.ts";
 import type { AppDatabase } from "../database/database.ts";
 import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
@@ -619,6 +621,28 @@ export class AgentSessionStore {
 
   async getSerialized(id: string): Promise<SerializedSession> {
     return this.serialize(await this.get(id));
+  }
+
+  async editDashboard(id: string, request: DashboardEditRequest): Promise<DashboardState> {
+    const session = await this.get(id);
+    if (session.isStreaming) throw new SessionBusyError();
+    const result = this.#dashboard.apply(id, request.action === "remove"
+      ? {
+          action: "remove",
+          baseRevision: request.baseRevision,
+          widgetId: request.widgetId,
+        }
+      : {
+          action: "reorder",
+          baseRevision: request.baseRevision,
+          widgetIds: request.widgetIds,
+        });
+    this.#logger.info("dashboard.edited", {
+      sessionId: id,
+      action: request.action,
+      revision: result.dashboard.revision,
+    });
+    return result.dashboard;
   }
 
   async delete(id: string): Promise<void> {

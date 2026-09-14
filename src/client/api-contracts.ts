@@ -7,6 +7,7 @@ import type {
   ChatTraceItem,
   CompactionOutcome,
   AgentToolName,
+  DashboardEditResponse,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -319,6 +320,14 @@ export const decodeAbortResponse: Decoder<AbortResponse> = (value, path = "$abor
   const item = record(value, path);
   if (item["ok"] !== true) invalid(`${path}.ok`, "true");
   return { ok: true };
+};
+
+export const decodeDashboardEditResponse: Decoder<DashboardEditResponse> = (
+  value,
+  path = "$dashboardEdit",
+) => {
+  const item = record(value, path);
+  return { dashboard: dashboardState(item["dashboard"], `${path}.dashboard`) };
 };
 
 export const decodeDeleteSessionResponse: Decoder<DeleteSessionResponse> = (

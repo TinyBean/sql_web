@@ -118,6 +118,22 @@ export interface MessageRequest {
   readonly message: string;
 }
 
+export type DashboardEditRequest =
+  | {
+      readonly action: "remove";
+      readonly baseRevision: number;
+      readonly widgetId: string;
+    }
+  | {
+      readonly action: "reorder";
+      readonly baseRevision: number;
+      readonly widgetIds: readonly string[];
+    };
+
+export interface DashboardEditResponse {
+  readonly dashboard: DashboardState;
+}
+
 export interface ErrorResponse {
   readonly error: string;
   readonly requestId: string;
@@ -159,6 +175,7 @@ export type ParsedSseEvent = {
 
 export type JsonResponseBody =
   | AbortResponse
+  | DashboardEditResponse
   | DeleteSessionResponse
   | ErrorResponse
   | HealthResponse

@@ -40,6 +40,11 @@ import {
   type MarkdownRenderOptions,
 } from "./markdown.ts";
 import { DashboardRenderer } from "./dashboard.ts";
+import {
+  dashboardDropTarget,
+  type DashboardDragPoint,
+  type DashboardOrderMove,
+} from "./dashboard-drag.ts";
 
 interface ElementConstructor<ElementType extends Element> {
   readonly prototype: ElementType;
@@ -1372,12 +1377,15 @@ interface DashboardPointerDrag {
   currentOrder: string[];
   lastClientX: number;
   lastClientY: number;
+  lastOrderPoint: DashboardDragPoint | null;
+  previousMove: DashboardOrderMove | null;
   active: boolean;
   ghost: HTMLElement | null;
 }
 
 let dashboardPointerDrag: DashboardPointerDrag | null = null;
-let dashboardDragScrollFrame: number | null = null;
+let cancelDashboardDragFrame: (() => void) | null = null;
+let finishDashboardDropAnimation: (() => void) | null = null;
 
 function clearDashboardDropMarkers(): void {
   for (const card of elements.dashboardGrid.querySelectorAll(".drop-before, .drop-after")) {
@@ -1386,13 +1394,14 @@ function clearDashboardDropMarkers(): void {
 }
 
 function releaseDashboardPointer(drag: DashboardPointerDrag): void {
-  if (typeof drag.handle.releasePointerCapture !== "function") return;
+  const owner = elements.dashboardGrid;
+  if (typeof owner.releasePointerCapture !== "function") return;
   try {
     if (
-      typeof drag.handle.hasPointerCapture !== "function" ||
-      drag.handle.hasPointerCapture(drag.pointerId)
+      typeof owner.hasPointerCapture !== "function" ||
+      owner.hasPointerCapture(drag.pointerId)
     ) {
-      drag.handle.releasePointerCapture(drag.pointerId);
+      owner.releasePointerCapture(drag.pointerId);
     }
   } catch {
     // Pointer capture may already have been released by the browser.
@@ -1449,46 +1458,31 @@ function moveDashboardDragGhost(drag: DashboardPointerDrag): void {
   drag.ghost.style.transform = `translate3d(${drag.lastClientX - drag.grabOffsetX}px, ${drag.lastClientY - drag.grabOffsetY}px, 0)`;
 }
 
-function distanceToRectSquared(x: number, y: number, rect: DOMRect): number {
-  const horizontal = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
-  const vertical = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
-  return horizontal * horizontal + vertical * vertical;
-}
-
 function updateDashboardPointerOrder(drag: DashboardPointerDrag): void {
   if (!drag.active || dashboardPointerDrag !== drag || state.sessionId !== drag.sessionId) return;
-  let target: HTMLElement | null = null;
-  let targetRect: DOMRect | null = null;
-  let closestDistance = Number.POSITIVE_INFINITY;
-  for (const candidate of elements.dashboardGrid.querySelectorAll<HTMLElement>("[data-widget-id]")) {
-    if (candidate === drag.card || candidate.hidden) continue;
-    const rect = candidate.getBoundingClientRect();
-    const distance = distanceToRectSquared(drag.lastClientX, drag.lastClientY, rect);
-    if (distance < closestDistance) {
-      closestDistance = distance;
-      target = candidate;
-      targetRect = rect;
-    }
-  }
+  const layout = dashboardRenderer.readLayout();
+  const point = {
+    x: drag.lastClientX - layout.bounds.left,
+    y: drag.lastClientY - layout.bounds.top,
+  };
+  // Grid-relative coordinates include real scrolling, but not card reflow or FLIP.
+  if (point.x === drag.lastOrderPoint?.x && point.y === drag.lastOrderPoint.y) return;
+  drag.lastOrderPoint = point;
+  const target = dashboardDropTarget(
+    layout, drag.currentOrder, drag.widgetId, point, drag.previousMove,
+  );
   clearDashboardDropMarkers();
-  const targetId = target?.dataset["widgetId"];
-  if (!target || !targetRect || !targetId) return;
-  const draggedRect = drag.card.getBoundingClientRect();
-  const sameRow = Math.abs(targetRect.top - draggedRect.top) <
-    Math.min(targetRect.height, draggedRect.height) / 2;
-  const after = sameRow
-    ? drag.lastClientX >= targetRect.left + targetRect.width / 2
-    : drag.lastClientY >= targetRect.top + targetRect.height / 2;
-  target.classList.add(after ? "drop-after" : "drop-before");
-  const nextOrder = reorderedWidgetIds(drag.currentOrder, drag.widgetId, targetId, after);
-  if (nextOrder.every((id, index) => id === drag.currentOrder[index])) return;
+  if (!target) return;
+  const nextOrder = reorderedWidgetIds(drag.currentOrder, drag.widgetId, target.widgetId, target.after);
+  drag.previousMove = target;
   drag.currentOrder = nextOrder;
+  elements.dashboardGrid.querySelector(`[data-widget-id="${target.widgetId}"]`)
+    ?.classList.add(target.after ? "drop-after" : "drop-before");
   renderOptimisticDashboardOrder(drag.sessionId, nextOrder);
 }
 
 function startDashboardPointerDrag(drag: DashboardPointerDrag): void {
-  if (drag.active) return;
-  drag.active = true;
+  if (drag.ghost) return;
   const rect = drag.card.getBoundingClientRect();
   drag.ghost = createDashboardDragGhost(
     drag.card,
@@ -1509,7 +1503,7 @@ function revealDashboardDragSource(drag: DashboardPointerDrag): void {
   drag.ghost = null;
   drag.card.classList.remove("dragging-source");
   drag.handle.removeAttribute("aria-grabbed");
-  if (state.sessionId === drag.sessionId) dashboardRenderer.settleWidget(drag.widgetId);
+  elements.dashboardGrid.classList.remove("dashboard-drag-active");
 }
 
 function settleDashboardDragGhost(drag: DashboardPointerDrag): void {
@@ -1519,12 +1513,21 @@ function settleDashboardDragGhost(drag: DashboardPointerDrag): void {
     revealDashboardDragSource(drag);
     return;
   }
-  const targetRect = drag.card.getBoundingClientRect();
-  const targetTransform = `translate3d(${targetRect.left}px, ${targetRect.top}px, 0)`;
+  const layout = dashboardRenderer.readLayout();
+  const targetRect = layout.widgets.get(drag.widgetId);
+  if (!targetRect) {
+    revealDashboardDragSource(drag);
+    return;
+  }
+  const targetTransform = `translate3d(${layout.bounds.left + targetRect.left}px, ${layout.bounds.top + targetRect.top}px, 0)`;
   let settled = false;
+  let timerId: number | null = null;
   const reveal = (): void => {
     if (settled) return;
     settled = true;
+    if (timerId !== null) window.clearTimeout(timerId);
+    if (finishDashboardDropAnimation === reveal) finishDashboardDropAnimation = null;
+    animation.cancel();
     revealDashboardDragSource(drag);
   };
   const animation = ghost.animate([
@@ -1536,25 +1539,25 @@ function settleDashboardDragGhost(drag: DashboardPointerDrag): void {
   });
   animation.addEventListener("finish", reveal, { once: true });
   animation.addEventListener("cancel", reveal, { once: true });
-  window.setTimeout(reveal, 200);
+  finishDashboardDropAnimation = reveal;
+  timerId = window.setTimeout(reveal, 200);
 }
 
 function finishDashboardPointerDrag(commit: boolean): void {
   const drag = dashboardPointerDrag;
   if (!drag) return;
+  cancelDashboardDragFrame?.();
+  cancelDashboardDragFrame = null;
+  if (commit && drag.active) refreshDashboardPointerDrag(drag);
   dashboardPointerDrag = null;
-  if (dashboardDragScrollFrame !== null && typeof window.cancelAnimationFrame === "function") {
-    window.cancelAnimationFrame(dashboardDragScrollFrame);
-  }
-  dashboardDragScrollFrame = null;
   releaseDashboardPointer(drag);
   clearDashboardDropMarkers();
-  elements.dashboardGrid.classList.remove("dashboard-drag-active");
   document.body.classList.remove("dashboard-pointer-dragging");
   if (!drag.active) return;
   if (!commit) {
     drag.currentOrder = [...drag.originalOrder];
     renderOptimisticDashboardOrder(drag.sessionId, drag.originalOrder);
+    dashboardRenderer.finishPositionAnimations();
     revealDashboardDragSource(drag);
     return;
   }
@@ -1563,19 +1566,30 @@ function finishDashboardPointerDrag(commit: boolean): void {
 
 function cancelDashboardPointerDrag(): void {
   finishDashboardPointerDrag(false);
+  finishDashboardDropAnimation?.();
+  dashboardRenderer.finishPositionAnimations();
 }
 
-function scheduleDashboardDragOrderRefresh(): void {
-  if (!dashboardPointerDrag?.active || dashboardDragScrollFrame !== null) return;
+function refreshDashboardPointerDrag(drag: DashboardPointerDrag): void {
+  startDashboardPointerDrag(drag);
+  updateDashboardPointerOrder(drag);
+  moveDashboardDragGhost(drag);
+}
+
+function scheduleDashboardDragRefresh(): void {
+  if (!dashboardPointerDrag?.active || cancelDashboardDragFrame) return;
   const refresh = (): void => {
-    dashboardDragScrollFrame = null;
+    cancelDashboardDragFrame = null;
     const drag = dashboardPointerDrag;
-    if (drag) updateDashboardPointerOrder(drag);
+    if (drag?.active) refreshDashboardPointerDrag(drag);
   };
-  if (typeof window.requestAnimationFrame === "function") {
-    dashboardDragScrollFrame = window.requestAnimationFrame(refresh);
+  if (typeof window.requestAnimationFrame === "function" &&
+    typeof window.cancelAnimationFrame === "function") {
+    const frame = window.requestAnimationFrame(refresh);
+    cancelDashboardDragFrame = () => window.cancelAnimationFrame(frame);
   } else {
-    dashboardDragScrollFrame = window.setTimeout(refresh, 0);
+    const timer = window.setTimeout(refresh, 0);
+    cancelDashboardDragFrame = () => window.clearTimeout(timer);
   }
 }
 
@@ -1649,7 +1663,7 @@ elements.dashboardGrid.addEventListener("click", (event) => {
 
 elements.dashboardGrid.addEventListener("keydown", (event) => {
   if (
-    !state.dashboardEditing || state.dashboardSaving ||
+    !state.dashboardEditing || state.dashboardSaving || dashboardPointerDrag ||
     !(event.target instanceof Element)
   ) return;
   const handle = event.target.closest("[data-drag-handle]");
@@ -1706,12 +1720,14 @@ elements.dashboardGrid.addEventListener("pointerdown", (event) => {
     currentOrder: visibleDashboardWidgetIds(dashboard),
     lastClientX: event.clientX,
     lastClientY: event.clientY,
+    lastOrderPoint: null,
+    previousMove: null,
     active: false,
     ghost: null,
   };
-  if (typeof handle.setPointerCapture === "function") {
+  if (typeof elements.dashboardGrid.setPointerCapture === "function") {
     try {
-      handle.setPointerCapture(event.pointerId);
+      elements.dashboardGrid.setPointerCapture(event.pointerId);
     } catch {
       // Window-level listeners still keep mouse dragging functional without capture.
     }
@@ -1729,16 +1745,17 @@ window.addEventListener("pointermove", (event) => {
       event.clientY - drag.startClientY,
     );
     if (distance < 5) return;
-    startDashboardPointerDrag(drag);
+    drag.active = true;
   }
   event.preventDefault();
-  moveDashboardDragGhost(drag);
-  updateDashboardPointerOrder(drag);
+  scheduleDashboardDragRefresh();
 });
 
 window.addEventListener("pointerup", (event) => {
   const drag = dashboardPointerDrag;
   if (!drag || event.pointerId !== drag.pointerId) return;
+  drag.lastClientX = event.clientX;
+  drag.lastClientY = event.clientY;
   if (drag.active) event.preventDefault();
   finishDashboardPointerDrag(true);
 });
@@ -1749,11 +1766,20 @@ window.addEventListener("pointercancel", (event) => {
   }
 });
 
-window.addEventListener("wheel", scheduleDashboardDragOrderRefresh, { passive: true });
-window.addEventListener("scroll", scheduleDashboardDragOrderRefresh, { passive: true });
+elements.dashboardGrid.addEventListener("lostpointercapture", (event) => {
+  if (dashboardPointerDrag?.pointerId === event.pointerId) cancelDashboardPointerDrag();
+});
+window.addEventListener("scroll", () => {
+  finishDashboardDropAnimation?.();
+  scheduleDashboardDragRefresh();
+}, { passive: true });
+window.addEventListener("resize", () => {
+  finishDashboardDropAnimation?.();
+  scheduleDashboardDragRefresh();
+}, { passive: true });
 window.addEventListener("blur", cancelDashboardPointerDrag);
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && dashboardPointerDrag) {
+  if (event.key === "Escape" && (dashboardPointerDrag || finishDashboardDropAnimation)) {
     event.preventDefault();
     cancelDashboardPointerDrag();
   }

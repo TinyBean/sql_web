@@ -226,6 +226,9 @@ test("serves the app with restrictive security headers", async (t) => {
   const dashboardModule = await fetch(`${baseUrl}/dashboard.js`);
   assert.equal(dashboardModule.status, 200);
   assert.match(dashboardModule.headers.get("content-type") ?? "", /javascript/u);
+  const dashboardDragModule = await fetch(`${baseUrl}/dashboard-drag.js`);
+  assert.equal(dashboardDragModule.status, 200);
+  assert.match(await dashboardDragModule.text(), /export function dashboardDropTarget/u);
 });
 
 test("exposes health, schema, and session endpoints", async (t) => {

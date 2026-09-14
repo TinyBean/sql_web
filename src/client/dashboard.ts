@@ -6,6 +6,7 @@ import type {
   DashboardState,
   DashboardWidget,
 } from "../shared/dashboard.ts";
+import type { DashboardLayout, DashboardRect } from "./dashboard-drag.ts";
 
 interface EChartsInstance {
   setOption(option: Record<string, unknown>, options?: { readonly notMerge?: boolean }): void;
@@ -441,6 +442,7 @@ export class DashboardRenderer {
   }
 
   render(dashboard: DashboardState, state: DashboardRenderState = {}): void {
+    this.finishPositionAnimations();
     const pendingWidgetIds = state.pendingWidgetIds ?? new Set<string>();
     const hiddenWidgetIds = state.hiddenWidgetIds ?? new Set<string>();
     for (const placeholder of this.#container.querySelectorAll(".dashboard-loading")) {
@@ -487,32 +489,62 @@ export class DashboardRenderer {
     this.#syncControls();
   }
 
+  readLayout(): DashboardLayout {
+    const bounds = this.#container.getBoundingClientRect();
+    const widgets = new Map<string, DashboardRect>();
+    for (const [id, { element }] of this.#widgets) {
+      if (element.hidden || !element.isConnected) continue;
+      widgets.set(id, {
+        left: element.offsetLeft,
+        top: element.offsetTop,
+        width: element.offsetWidth,
+        height: element.offsetHeight,
+      });
+    }
+    return { bounds, widgets };
+  }
+
+  finishPositionAnimations(): void {
+    for (const animation of this.#positionAnimations.values()) animation.cancel();
+    this.#positionAnimations.clear();
+  }
+
   previewOrder(widgetIds: readonly string[]): void {
+    const requested = new Set(widgetIds);
+    const orderedIds = [
+      ...widgetIds.filter((id) => this.#widgets.has(id)),
+      ...[...this.#widgets.keys()].filter((id) => !requested.has(id)),
+    ];
+    const currentIds = [...this.#container.querySelectorAll<HTMLElement>("[data-widget-id]")]
+      .map((element) => element.dataset["widgetId"]);
+    if (orderedIds.every((id, index) => currentIds[index] === id)) return;
     const positions = new Map<string, DOMRect>();
     for (const [id, rendered] of this.#widgets) {
-      if (!rendered.element.hidden && rendered.element.isConnected) {
+      if (!rendered.element.hidden && rendered.element.isConnected &&
+        !rendered.element.classList.contains("dragging-source")) {
         positions.set(id, rendered.element.getBoundingClientRect());
       }
     }
-    for (const animation of this.#positionAnimations.values()) animation.cancel();
-    this.#positionAnimations.clear();
-    const requested = new Set(widgetIds);
-    for (const id of widgetIds) {
+    this.finishPositionAnimations();
+    for (const [index, id] of orderedIds.entries()) {
       const rendered = this.#widgets.get(id);
-      if (rendered) this.#container.append(rendered.element);
-    }
-    for (const [id, rendered] of this.#widgets) {
-      if (!requested.has(id)) this.#container.append(rendered.element);
+      const current = this.#container.children.item(index);
+      if (rendered && current !== rendered.element) {
+        this.#container.insertBefore(rendered.element, current);
+      }
     }
     const empty = this.#container.querySelector(".dashboard-empty");
     if (empty) this.#container.append(empty);
     if (reducedMotion) return;
+    // Read every destination before starting any animation; visual boxes are only
+    // used above to continue smoothly from an interrupted animation.
+    const layout = this.readLayout();
     for (const [id, rendered] of this.#widgets) {
       const previous = positions.get(id);
-      if (!previous || rendered.element.hidden) continue;
-      const next = rendered.element.getBoundingClientRect();
-      const x = previous.left - next.left;
-      const y = previous.top - next.top;
+      const next = layout.widgets.get(id);
+      if (!previous || !next) continue;
+      const x = previous.left - layout.bounds.left - next.left;
+      const y = previous.top - layout.bounds.top - next.top;
       if (
         (Math.abs(x) < 1 && Math.abs(y) < 1) ||
         typeof rendered.element.animate !== "function"
@@ -533,24 +565,8 @@ export class DashboardRenderer {
     }
   }
 
-  settleWidget(widgetId: string): void {
-    if (reducedMotion) return;
-    const rendered = this.#widgets.get(widgetId);
-    if (!rendered || typeof rendered.element.animate !== "function") return;
-    this.#positionAnimations.get(widgetId)?.cancel();
-    this.#positionAnimations.delete(widgetId);
-    rendered.element.animate([
-      { transform: "scale(.985)", filter: "brightness(1.1)" },
-      { transform: "scale(1)", filter: "brightness(1)" },
-    ], {
-      duration: 180,
-      easing: "cubic-bezier(.2, .75, .25, 1)",
-    });
-  }
-
   dispose(): void {
-    for (const animation of this.#positionAnimations.values()) animation.cancel();
-    this.#positionAnimations.clear();
+    this.finishPositionAnimations();
     for (const rendered of this.#widgets.values()) this.#disposeWidget(rendered);
     this.#widgets.clear();
     this.#resizeObserver.disconnect();

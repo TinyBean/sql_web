@@ -67,6 +67,18 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
   const browser = parseHTML(html);
   const { document } = browser;
   browser.matchMedia = () => ({ matches: false }) as MediaQueryList;
+  let frameId = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  browser.requestAnimationFrame = (callback) => {
+    frames.set(++frameId, callback);
+    return frameId;
+  };
+  browser.cancelAnimationFrame = (id) => { frames.delete(id); };
+  const flushFrame = (): void => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(0);
+  };
   const locationState = { hash: "#session=session-edit", pathname: "/", search: "" };
   const globalNames = [
     "document",
@@ -116,6 +128,12 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
     if (url === "/api/sessions/session-edit" && method === "GET") {
       reloads += 1;
       return jsonResponse(sessionWithDashboard(dashboard));
+    }
+    if (url === "/api/sessions/session-other" && method === "GET") {
+      return jsonResponse({
+        ...sessionWithDashboard({ ...dashboard, widgets: [] }),
+        id: "session-other", title: "其他会话",
+      });
     }
     if (url === "/api/sessions/session-edit/dashboard" && method === "PATCH") {
       const request = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -186,12 +204,26 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
   assert.equal(edits.length, 0, "editing must remain local until the user clicks complete");
 
   const grid = document.querySelector("#dashboardGrid") as HTMLElement;
+  let gridTop = 0;
+  Object.defineProperty(grid, "getBoundingClientRect", {
+    value: () => ({ left: 0, top: gridTop, width: 200, height: 90 }),
+  });
+  let capturedPointer: number | null = null;
+  grid.setPointerCapture = (id) => { capturedPointer = id; };
+  grid.hasPointerCapture = (id) => capturedPointer === id;
+  grid.releasePointerCapture = () => { capturedPointer = null; };
   for (const card of grid.querySelectorAll<HTMLElement>("[data-widget-id]")) {
+    Object.defineProperties(card, {
+      offsetLeft: { get: () => [...grid.children].indexOf(card) * 100 },
+      offsetTop: { get: () => 0 },
+      offsetWidth: { get: () => 90 },
+      offsetHeight: { get: () => 90 },
+    });
     Object.defineProperty(card, "getBoundingClientRect", {
       configurable: true,
       value(): DOMRect {
         const cards = [...grid.querySelectorAll<HTMLElement>("[data-widget-id]")];
-        const left = cards.indexOf(card) * 100;
+        const left = cards.indexOf(card) * 100 + (card.classList.contains("dragging-source") ? 500 : 0);
         return {
           x: left,
           y: 0,
@@ -218,7 +250,10 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
     return event;
   };
   firstHandle.dispatchEvent(pointerEvent("pointerdown", 150, 20));
+  assert.equal(capturedPointer, 7, "the grid must hold pointer capture during DOM moves");
   browser.dispatchEvent(pointerEvent("pointermove", 10, 20));
+  assert.equal(frames.size, 1);
+  flushFrame();
   const targetCard = document.querySelector("[data-widget-id='kpi-b']") as HTMLElement;
   assert.deepEqual(
     [...document.querySelectorAll("[data-widget-id]")].map((card) => (card as HTMLElement).dataset["widgetId"]),
@@ -237,6 +272,7 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
   browser.dispatchEvent(wheel);
   assert.equal(wheel.defaultPrevented, false, "wheel scrolling must remain enabled while dragging");
   browser.dispatchEvent(pointerEvent("pointermove", 180, 20));
+  flushFrame();
   assert.deepEqual(
     [...document.querySelectorAll("[data-widget-id]")].map((card) => (card as HTMLElement).dataset["widgetId"]),
     ["kpi-b", "kpi-a"],
@@ -244,6 +280,7 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
   );
   const draggedCard = document.querySelector("[data-widget-id='kpi-a']");
   browser.dispatchEvent(pointerEvent("pointerup", 180, 20));
+  assert.equal(capturedPointer, null);
   assert.equal(edits.length, 0, "dropping must not persist or redraw the dashboard");
   assert.equal(document.querySelector("[data-widget-id='kpi-a']"), draggedCard);
   assert.deepEqual(
@@ -251,6 +288,112 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
     ["kpi-b", "kpi-a"],
     "cards should remain at the local dropped position",
   );
+
+  const order = (): Array<string | undefined> => [...grid.children]
+    .map((card) => (card as HTMLElement).dataset["widgetId"]);
+  const escape = (): void => {
+    const event = new browser.Event("keydown", { cancelable: true });
+    Object.defineProperty(event, "key", { value: "Escape" });
+    browser.dispatchEvent(event);
+  };
+  firstHandle.dispatchEvent(pointerEvent("pointerdown", 150, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 10, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 170, 20));
+  assert.equal(frames.size, 1, "multiple pointer events must share one frame");
+  flushFrame();
+  assert.deepEqual(order(), ["kpi-b", "kpi-a"], "only the latest point should be processed");
+  assert.match((document.querySelector(".dashboard-drag-ghost") as HTMLElement).style.transform,
+    /translate3d\(120px, 0px, 0\)/u);
+  // No frame between the last move and release: pointerup must flush its own position.
+  browser.dispatchEvent(pointerEvent("pointermove", 170, 20));
+  browser.dispatchEvent(pointerEvent("pointerup", 10, 20));
+  assert.deepEqual(order(), ["kpi-a", "kpi-b"]);
+  assert.equal(frames.size, 0, "drop must cancel the pending frame");
+  assert.equal(document.querySelector(".dashboard-drag-ghost"), null);
+  firstHandle.dispatchEvent(pointerEvent("pointerdown", 50, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 180, 20));
+  browser.dispatchEvent(pointerEvent("pointerup", 180, 20));
+  assert.deepEqual(order(), ["kpi-b", "kpi-a"]);
+
+  for (const cancel of [escape,
+    () => browser.dispatchEvent(new browser.Event("blur")),
+    () => browser.dispatchEvent(pointerEvent("pointercancel", 10, 20)),
+    () => grid.dispatchEvent(pointerEvent("lostpointercapture", 10, 20)),
+  ]) {
+    firstHandle.dispatchEvent(pointerEvent("pointerdown", 150, 20));
+    browser.dispatchEvent(pointerEvent("pointermove", 10, 20));
+    flushFrame();
+    assert.deepEqual(order(), ["kpi-a", "kpi-b"]);
+    browser.dispatchEvent(pointerEvent("pointermove", 15, 20));
+    cancel();
+    flushFrame();
+    assert.deepEqual(order(), ["kpi-b", "kpi-a"], "cancel must restore the pre-drag order");
+    assert.equal(document.querySelector(".dashboard-drag-ghost"), null);
+    assert.equal(document.querySelector(".dragging-source"), null);
+    assert.equal(capturedPointer, null);
+  }
+
+  firstHandle.dispatchEvent(pointerEvent("pointerdown", 150, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 10, -20));
+  flushFrame();
+  assert.deepEqual(order(), ["kpi-b", "kpi-a"], "outside the grid retains the last order");
+  gridTop = -40;
+  browser.dispatchEvent(new browser.Event("scroll"));
+  flushFrame();
+  assert.deepEqual(order(), ["kpi-a", "kpi-b"], "scroll must refresh layout with a stationary pointer");
+  for (let index = 0; index < 5; index += 1) {
+    browser.dispatchEvent(pointerEvent("pointermove", 10, -20));
+    flushFrame();
+    assert.deepEqual(order(), ["kpi-a", "kpi-b"], "stationary input must not reorder again");
+  }
+  escape();
+  gridTop = 0;
+  assert.equal(edits.length, 0, "all pointer edits remain local until completion");
+
+  const originalAnimate = Object.getOwnPropertyDescriptor(browser.HTMLElement.prototype, "animate");
+  const animations: Array<{ element: HTMLElement; keyframes: Keyframe[]; finish: () => void }> = [];
+  Object.defineProperty(browser.HTMLElement.prototype, "animate", {
+    configurable: true,
+    value(this: HTMLElement, keyframes: Keyframe[]): Animation {
+      const listeners = new Map<string, () => void>();
+      animations.push({ element: this, keyframes, finish: () => listeners.get("finish")?.() });
+      return {
+        cancel() { listeners.get("cancel")?.(); },
+        addEventListener(type: string, listener: () => void) { listeners.set(type, listener); },
+      } as unknown as Animation;
+    },
+  });
+  t.after(() => {
+    if (originalAnimate) Object.defineProperty(browser.HTMLElement.prototype, "animate", originalAnimate);
+    else Reflect.deleteProperty(browser.HTMLElement.prototype, "animate");
+  });
+  firstHandle.dispatchEvent(pointerEvent("pointerdown", 150, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 10, 20));
+  browser.dispatchEvent(pointerEvent("pointerup", 10, 20));
+  const drop = animations.at(-1);
+  assert.equal(drop?.element.classList.contains("dashboard-drag-ghost"), true);
+  assert.equal(drop?.keyframes[1]?.["transform"], "translate3d(0px, 0px, 0)",
+    "the drop destination must ignore the source card's animated bounding rect");
+  const animationCount = animations.length;
+  drop?.finish();
+  assert.equal(document.querySelector(".dashboard-drag-ghost"), null);
+  assert.equal(animations.length, animationCount, "landing must not add a scale animation");
+  firstHandle.dispatchEvent(pointerEvent("pointerdown", 50, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 180, 20));
+  browser.dispatchEvent(pointerEvent("pointerup", 180, 20));
+  const interruptedDrop = animations.at(-1);
+  assert.ok(document.querySelector(".dashboard-drag-ghost"));
+  firstHandle.dispatchEvent(pointerEvent("pointerdown", 150, 20));
+  assert.equal(document.querySelector(".dashboard-drag-ghost"), null,
+    "a new drag must finish the previous landing and clear its timer");
+  browser.dispatchEvent(pointerEvent("pointermove", 160, 20));
+  flushFrame();
+  interruptedDrop?.finish();
+  assert.ok(document.querySelector(".dashboard-drag-ghost"), "old callbacks must not clear the new drag");
+  escape();
+  // Preserve the original non-animated path for the remaining edit/save checks.
+  Reflect.deleteProperty(browser.HTMLElement.prototype, "animate");
+  assert.deepEqual(order(), ["kpi-b", "kpi-a"]);
 
   editButton.click();
   await waitFor(
@@ -327,4 +470,28 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
   ));
   streamController?.close();
   await waitFor(() => !editButton.disabled, "edit button did not unlock after the answer");
+
+  // Reload real cards, then switch sessions while a pointer frame is pending.
+  dashboard = { ...dashboard, widgets: [kpi("kpi-a", "指标 A", 1), kpi("kpi-b", "指标 B", 2)] };
+  const selectSession = (id: string): void => {
+    const button = document.createElement("button");
+    button.dataset["sessionId"] = id;
+    document.querySelector("#sessionList")?.append(button);
+    button.click();
+  };
+  selectSession("session-edit");
+  await waitFor(() => Boolean(document.querySelector("[data-drag-handle='kpi-a']")), "cards did not reload");
+  editButton.click();
+  const reloadedHandle = document.querySelector("[data-drag-handle='kpi-a']") as HTMLButtonElement;
+  reloadedHandle.dispatchEvent(pointerEvent("pointerdown", 10, 20));
+  browser.dispatchEvent(pointerEvent("pointermove", 180, 20));
+  assert.equal(frames.size, 1);
+  const editCount = edits.length;
+  selectSession("session-other");
+  await waitFor(() => Boolean(document.querySelector(".dashboard-empty")), "session did not switch");
+  flushFrame();
+  assert.equal(document.querySelector(".dashboard-drag-ghost"), null);
+  assert.equal(document.querySelector(".dragging-source"), null);
+  assert.equal(capturedPointer, null);
+  assert.equal(edits.length, editCount, "switching must cancel the uncommitted pointer move");
 });

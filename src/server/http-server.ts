@@ -50,6 +50,7 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/app.js", { root: "public", filename: "generated/client/app.js", contentType: "text/javascript; charset=utf-8" }],
   ["/api-contracts.js", { root: "public", filename: "generated/client/api-contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/dashboard.js", { root: "public", filename: "generated/client/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/dashboard-drag.js", { root: "public", filename: "generated/client/dashboard-drag.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/contracts.js", { root: "public", filename: "generated/shared/contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/dashboard.js", { root: "public", filename: "generated/shared/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/image-references.js", { root: "public", filename: "generated/shared/image-references.js", contentType: "text/javascript; charset=utf-8" }],

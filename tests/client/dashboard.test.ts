@@ -110,12 +110,20 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   };
   renderer.render(twoWidgets);
   let animated = 0;
+  const visualOffsets = new Map<HTMLElement, number>();
+  const animationFrames: Keyframe[][] = [];
   for (const card of grid.querySelectorAll<HTMLElement>("[data-widget-id]")) {
+    Object.defineProperties(card, {
+      offsetLeft: { get: () => [...grid.children].indexOf(card) * 100 },
+      offsetTop: { get: () => 0 },
+      offsetWidth: { get: () => 90 },
+      offsetHeight: { get: () => 90 },
+    });
     Object.defineProperty(card, "getBoundingClientRect", {
       configurable: true,
       value(): DOMRect {
         const cards = [...grid.querySelectorAll("[data-widget-id]")];
-        const left = cards.indexOf(card) * 100;
+        const left = cards.indexOf(card) * 100 + (visualOffsets.get(card) ?? 0);
         return {
           x: left,
           y: 0,
@@ -131,10 +139,11 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
     });
     Object.defineProperty(card, "animate", {
       configurable: true,
-      value(): Animation {
+      value(frames: Keyframe[]): Animation {
         animated += 1;
+        animationFrames.push(frames);
         return {
-          cancel() {},
+          cancel() { visualOffsets.delete(card); },
           addEventListener() {},
         } as unknown as Animation;
       },
@@ -146,8 +155,21 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
     ["secondary", "trend"],
   );
   assert.equal(animated, 2, "both displaced cards should receive FLIP animations");
-  renderer.settleWidget("trend");
-  assert.equal(animated, 3, "the dropped card should receive a settle animation");
+  renderer.previewOrder(["secondary", "trend"]);
+  assert.equal(animated, 2, "the same order must not restart animations");
+  const trend = grid.querySelector<HTMLElement>("[data-widget-id='trend']") as HTMLElement;
+  const secondary = grid.querySelector<HTMLElement>("[data-widget-id='secondary']") as HTMLElement;
+  visualOffsets.set(secondary, 40);
+  assert.equal(renderer.readLayout().widgets.get("secondary")?.left, 0,
+    "hit testing must ignore the in-flight visual transform");
+  assert.equal(secondary.getBoundingClientRect().left, 40);
+  trend.classList.add("dragging-source");
+  renderer.previewOrder(["trend", "secondary"]);
+  assert.equal(animated, 3, "the invisible source must not animate");
+  assert.equal(animationFrames.at(-1)?.[0]?.["transform"], "translate(-60px, 0px)",
+    "a retargeted animation must start at the current visual position");
+  trend.classList.remove("dragging-source");
+  assert.equal(initialized, 1, "reordering must retain the original chart");
   renderer.render(dashboard(1));
   renderer.render(dashboard(1), { pendingWidgetIds: new Set(["trend"]) });
   assert.equal(initialized, 1, "unchanged widget should reuse its chart");

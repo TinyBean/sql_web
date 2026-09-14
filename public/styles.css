@@ -101,7 +101,7 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .icon-button svg { width: 17px; }
 
 .dashboard-main { min-height: calc(100vh - 76px); padding: 24px 28px 112px; }
-.dashboard-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 15px; max-width: 1880px; margin: 0 auto; }
+.dashboard-grid { position: relative; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 15px; max-width: 1880px; margin: 0 auto; }
 
 .metric-card {
   position: relative;
@@ -120,8 +120,10 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 }
 .metric-card:hover { border-color: var(--line-bright); transform: translateY(-1px); }
 .metric-card[hidden] { display: none !important; }
+.dashboard-editing .metric-card { transition: border-color .2s ease, opacity .2s ease, box-shadow .2s ease; }
+.dashboard-editing .metric-card:hover { transform: none; }
+.dashboard-drag-active { overflow-anchor: none; }
 .dashboard-drag-active .metric-card { will-change: transform; }
-.dashboard-drag-active .metric-card:hover { transform: none; }
 .metric-card.dragging-source { pointer-events: none; opacity: 0 !important; transition: none; }
 .dashboard-drag-ghost {
   position: fixed !important;

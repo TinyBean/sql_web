@@ -1,9 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   serializeMessages,
+  serializeSessionTranscript,
   type TranscriptSourceMessage,
 } from "../../src/server/agent/agent-sessions.ts";
+
+test("renders the full active branch after model context compaction", () => {
+  const manager = SessionManager.inMemory();
+  const append = (message: TranscriptSourceMessage): string => (
+    manager.appendMessage(message as never)
+  );
+
+  append({ role: "user", content: "第一轮问题", timestamp: 1 });
+  append({
+    role: "assistant",
+    content: [{ type: "text", text: "第一轮回答" }],
+    stopReason: "stop",
+    timestamp: 2,
+  });
+  const firstKeptEntryId = append({ role: "user", content: "第二轮问题", timestamp: 3 });
+  append({
+    role: "assistant",
+    content: [{ type: "text", text: "第二轮回答" }],
+    stopReason: "stop",
+    timestamp: 4,
+  });
+  manager.appendCompaction("第一轮的压缩摘要", firstKeptEntryId, 40_000);
+
+  assert.deepEqual(serializeMessages(manager.buildSessionContext().messages), [
+    { id: "user-1", role: "user", text: "第二轮问题", timestamp: 3 },
+    { id: "assistant-2", role: "assistant", text: "第二轮回答", timestamp: 4 },
+  ]);
+  assert.deepEqual(serializeSessionTranscript({ sessionManager: manager }), [
+    { id: "user-1", role: "user", text: "第一轮问题", timestamp: 1 },
+    { id: "assistant-2", role: "assistant", text: "第一轮回答", timestamp: 2 },
+    { id: "user-3", role: "user", text: "第二轮问题", timestamp: 3 },
+    { id: "assistant-4", role: "assistant", text: "第二轮回答", timestamp: 4 },
+  ]);
+});
 
 test("groups agent turns into one answer with an ordered persisted trace", () => {
   const messages: TranscriptSourceMessage[] = [

@@ -7,6 +7,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentSession,
@@ -376,6 +377,14 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
   return transcript;
 }
 
+export function serializeSessionTranscript(
+  session: Pick<AgentSession, "sessionManager">,
+): ChatMessage[] {
+  const branchMessages = session.sessionManager.getBranch()
+    .flatMap(sessionEntryToContextMessages);
+  return serializeMessages(branchMessages);
+}
+
 function sessionTitle(session: AgentSession): string {
   const firstUserMessage = session.messages.find((message) => message.role === "user");
   return session.sessionName || messageText(firstUserMessage).trim() || "新会话";
@@ -592,7 +601,7 @@ export class AgentSessionStore {
         title: sessionTitle(session),
         createdAt: times.created.toISOString(),
         updatedAt: times.modified.toISOString(),
-        messageCount: serializeMessages(session.messages).length,
+        messageCount: serializeSessionTranscript(session).length,
         active: true,
       });
     }
@@ -735,7 +744,10 @@ export class AgentSessionStore {
   }
 
   serialize(session: AgentSession): SerializedSession {
-    const messages = serializeMessages(session.messages);
+    // AgentSession.messages is the compaction-aware LLM context. Rebuild the
+    // transcript from the raw active branch so loading history never hides
+    // messages that were summarized out of the model context.
+    const messages = serializeSessionTranscript(session);
     return {
       id: session.sessionId,
       title: sessionTitle(session),

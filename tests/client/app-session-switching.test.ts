@@ -56,7 +56,7 @@ test("switches between independent live session answers without stealing the cur
   const html = readFileSync(path.join(projectRoot, "public", "index.html"), "utf8");
   const browser = parseHTML(html);
   const { document } = browser;
-  const locationState = { hash: "", pathname: "/", search: "" };
+  const locationState = { hash: "#session=expired-empty-session", pathname: "/", search: "" };
   const globalNames = [
     "document",
     "window",
@@ -216,10 +216,10 @@ test("switches between independent live session answers without stealing the cur
   await import(pathToFileURL(path.join(projectRoot, "public", "generated", "client", "app.js")).href);
   await waitFor(
     () => locationState.hash === "#session=session-c",
-    "a fresh session was not created for a URL without a session ID",
+    "a fresh session was not created for an expired empty-session ID",
   );
   assert.equal(document.querySelector('[data-session-id="session-c"]'), null);
-  assert.equal(sessionLoads.size, 0, "startup must not load the most recent persisted session");
+  assert.equal(sessionLoads.size, 0, "startup must not request an expired or fallback session");
   assert.equal(chatDock.classList.contains("open"), false, "chat should start collapsed");
   assert.equal(document.querySelector("#modelBadge"), null);
   assert.equal(document.querySelector("#guardTitle"), null);

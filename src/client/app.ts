@@ -1613,7 +1613,8 @@ async function initialize(): Promise<void> {
     state.sessions = sessionPayload.sessions;
     renderSessions();
 
-    const initialTarget = initialSessionTarget(location.hash);
+    const availableSessionIds = new Set(state.sessions.map((session) => session.id));
+    const initialTarget = initialSessionTarget(location.hash, availableSessionIds);
     if (initialTarget.kind === "load") await loadSession(initialTarget.sessionId);
     else await createSession();
   } catch (error) {

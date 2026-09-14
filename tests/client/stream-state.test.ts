@@ -11,10 +11,14 @@ import {
   settleStreamPresentation,
 } from "../../src/client/stream-state.ts";
 
-test("selects startup behavior only from an explicit session hash", () => {
-  assert.deepEqual(initialSessionTarget(""), { kind: "create" });
-  assert.deepEqual(initialSessionTarget("#view=dashboard"), { kind: "create" });
-  assert.deepEqual(initialSessionTarget("#session=session-a"), {
+test("loads only an explicit session that is still available", () => {
+  const availableSessionIds = new Set(["session-a"]);
+  assert.deepEqual(initialSessionTarget("", availableSessionIds), { kind: "create" });
+  assert.deepEqual(initialSessionTarget("#view=dashboard", availableSessionIds), { kind: "create" });
+  assert.deepEqual(initialSessionTarget("#session=expired-session", availableSessionIds), {
+    kind: "create",
+  });
+  assert.deepEqual(initialSessionTarget("#session=session-a", availableSessionIds), {
     kind: "load",
     sessionId: "session-a",
   });

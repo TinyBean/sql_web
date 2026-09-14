@@ -6,7 +6,6 @@ import type {
   JsonObject,
   MessageRequest,
   ParsedSseEvent,
-  SchemaObject,
   SerializedSession,
   SessionSummary,
 } from "../shared/contracts.ts";
@@ -14,8 +13,6 @@ import type { DashboardState } from "../shared/dashboard.ts";
 import {
   decodeAbortResponse,
   decodeDeleteSessionResponse,
-  decodeHealthResponse,
-  decodeSchemaResponse,
   decodeSerializedSession,
   decodeSessionsResponse,
   decodeSseEvent,
@@ -59,7 +56,6 @@ function requiredElement<ElementType extends Element>(
 }
 
 const elements = {
-  dashboardMain: requiredElement("#dashboardMain", HTMLElement),
   dashboardGrid: requiredElement("#dashboardGrid", HTMLElement),
   dashboardDateRange: requiredElement("#dashboardDateRange", HTMLElement),
   dashboardUpdatedAt: requiredElement("#dashboardUpdatedAt", HTMLElement),
@@ -67,8 +63,8 @@ const elements = {
   chatTitle: requiredElement("#chatTitle", HTMLElement),
   chatCollapseButton: requiredElement("#chatCollapseButton", HTMLButtonElement),
   historyButton: requiredElement("#historyButton", HTMLButtonElement),
-  chatHistoryButton: requiredElement("#chatHistoryButton", HTMLButtonElement),
-  historyPopover: requiredElement("#historyPopover", HTMLElement),
+  historyPanel: requiredElement("#historyPanel", HTMLElement),
+  historyCloseButton: requiredElement("#historyCloseButton", HTMLButtonElement),
   newChatButton: requiredElement("#newChatButton", HTMLButtonElement),
   sessionList: requiredElement("#sessionList", HTMLElement),
   messages: requiredElement("#messages", HTMLElement),
@@ -77,13 +73,7 @@ const elements = {
   composerStatus: requiredElement("#composerStatus", HTMLElement),
   input: requiredElement("#questionInput", HTMLTextAreaElement),
   sendButton: requiredElement("#sendButton", HTMLButtonElement),
-  modelBadge: requiredElement("#modelBadge", HTMLElement),
-  schemaButton: requiredElement("#schemaButton", HTMLButtonElement),
-  schemaCloseButton: requiredElement("#schemaCloseButton", HTMLButtonElement),
-  schemaPanel: requiredElement("#schemaPanel", HTMLElement),
-  schemaList: requiredElement("#schemaList", HTMLElement),
   toast: requiredElement("#toast", HTMLElement),
-  guardTitle: requiredElement("#guardTitle", HTMLElement),
 };
 
 interface StreamNode {
@@ -178,18 +168,13 @@ async function api<ResponseBody>(
 
 function setChatOpen(open: boolean, focus = false): void {
   elements.chatDock.classList.toggle("open", open);
-  if (!open) {
-    elements.historyPopover.classList.remove("open");
-    elements.chatHistoryButton.setAttribute("aria-expanded", "false");
-  }
   if (open && focus) window.setTimeout(() => elements.input.focus(), 0);
 }
 
 function toggleHistory(force?: boolean): void {
-  setChatOpen(true);
-  const open = force ?? !elements.historyPopover.classList.contains("open");
-  elements.historyPopover.classList.toggle("open", open);
-  elements.chatHistoryButton.setAttribute("aria-expanded", String(open));
+  const open = force ?? !elements.historyPanel.classList.contains("open");
+  elements.historyPanel.classList.toggle("open", open);
+  elements.historyButton.setAttribute("aria-expanded", String(open));
 }
 
 function formatDashboardDateRange(dashboard: DashboardState): string {
@@ -227,12 +212,6 @@ function renderCurrentDashboard(): void {
   if (dashboard) renderDashboard(dashboard, pendingWidgetIdsForCurrentSession());
 }
 
-function toggleSchema(force?: boolean): void {
-  const open = force ?? !elements.schemaPanel.classList.contains("open");
-  elements.schemaPanel.classList.toggle("open", open);
-  elements.schemaButton.setAttribute("aria-expanded", String(open));
-}
-
 function renderSessions(): void {
   elements.sessionList.replaceChildren();
   const visibleSessions = state.sessions.filter((session) => (
@@ -260,9 +239,12 @@ function renderSessions(): void {
     button.dataset["sessionId"] = session.id;
     const title = session.title || "新会话";
     button.setAttribute("aria-label", streaming ? `${title}，正在回答` : title);
+    const titleElement = document.createElement("span");
+    titleElement.className = "session-title";
+    titleElement.textContent = title;
     button.append(
       createSvg([{ d: "M7 17.5 4 20v-4.5a8 8 0 1 1 3 2Z" }]),
-      Object.assign(document.createElement("span"), { textContent: title }),
+      titleElement,
     );
     if (streaming) {
       const status = document.createElement("span");
@@ -284,34 +266,6 @@ function renderSessions(): void {
     ]));
     row.append(button, deleteButton);
     elements.sessionList.append(row);
-  }
-}
-
-function renderSchema(objects: readonly Omit<SchemaObject, "sql">[]): void {
-  elements.schemaList.replaceChildren();
-  for (const object of objects) {
-    const details = document.createElement("details");
-    details.className = "schema-object";
-    if (object.type === "table") details.open = true;
-    const summary = document.createElement("summary");
-    summary.append(
-      document.createTextNode(object.name),
-      Object.assign(document.createElement("span"), { textContent: object.type }),
-    );
-    const columns = document.createElement("div");
-    columns.className = "schema-columns";
-    for (const column of object.columns) {
-      const row = document.createElement("div");
-      row.className = "schema-column";
-      const suffix = column.primaryKey ? " · PK" : column.nullable ? "" : " · NOT NULL";
-      row.append(
-        Object.assign(document.createElement("span"), { textContent: column.name }),
-        Object.assign(document.createElement("em"), { textContent: `${column.type || "ANY"}${suffix}` }),
-      );
-      columns.append(row);
-    }
-    details.append(summary, columns);
-    elements.schemaList.append(details);
   }
 }
 
@@ -1108,19 +1062,7 @@ async function abortAnswer(): Promise<void> {
 
 async function initialize(): Promise<void> {
   try {
-    const [health, schema, sessionPayload] = await Promise.all([
-      api("/api/health", decodeHealthResponse),
-      api("/api/schema", decodeSchemaResponse),
-      api("/api/sessions", decodeSessionsResponse),
-    ]);
-    const model = health.agent.model;
-    elements.modelBadge.textContent = `${model.provider}/${model.model}`;
-    if (health.agent.codeInterpreter.available) {
-      elements.guardTitle.textContent = "严格工具隔离已开启";
-    } else {
-      elements.guardTitle.textContent = "代码解释器不可用";
-    }
-    renderSchema(schema.objects);
+    const sessionPayload = await api("/api/sessions", decodeSessionsResponse);
     state.sessions = sessionPayload.sessions;
     renderSessions();
 
@@ -1129,8 +1071,6 @@ async function initialize(): Promise<void> {
     else await createSession();
   } catch (error) {
     showToast(`初始化失败:${messageFromUnknown(error)}`);
-    elements.modelBadge.textContent = "服务不可用";
-    elements.modelBadge.classList.add("warning");
   }
 }
 
@@ -1166,7 +1106,9 @@ elements.sessionList.addEventListener("click", (event) => {
   const sessionId = button?.dataset["sessionId"];
   if (sessionId) {
     toggleHistory(false);
-    void loadSession(sessionId).catch((error) => showToast(messageFromUnknown(error)));
+    void loadSession(sessionId)
+      .then(() => setChatOpen(true))
+      .catch((error) => showToast(messageFromUnknown(error)));
   }
 });
 elements.messages.addEventListener("click", (event) => {
@@ -1178,20 +1120,23 @@ elements.messages.addEventListener("click", (event) => {
     void submitQuestion(question).catch((error) => showToast(messageFromUnknown(error)));
   }
 });
-elements.schemaButton.addEventListener("click", () => toggleSchema());
-elements.schemaCloseButton.addEventListener("click", () => toggleSchema(false));
 elements.historyButton.addEventListener("click", () => toggleHistory());
-elements.chatHistoryButton.addEventListener("click", () => toggleHistory());
+elements.historyCloseButton.addEventListener("click", () => toggleHistory(false));
 elements.chatCollapseButton.addEventListener("click", () => setChatOpen(false));
-elements.dashboardMain.addEventListener("click", (event) => {
-  if (event.target === elements.dashboardMain || event.target === elements.dashboardGrid) {
-    setChatOpen(false);
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  if (!elements.chatDock.contains(event.target)) setChatOpen(false);
+  if (
+    !elements.historyPanel.contains(event.target) &&
+    !elements.historyButton.contains(event.target)
+  ) {
+    toggleHistory(false);
   }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   setChatOpen(false);
-  toggleSchema(false);
+  toggleHistory(false);
 });
 
 void initialize();

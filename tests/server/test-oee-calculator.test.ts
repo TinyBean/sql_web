@@ -223,8 +223,6 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   assert.equal(dut.dayExpression, "substr(d.date,1,10)");
   assert.equal(dut.machineExpression, "d.machine_id");
   assert.match(dut.platformPredicate, /d\.machine_id NOT IN/u);
-  assert.match(dut.touchdownLabelExpression ?? "", /d\.touchdown_index/u);
-  assert.match(dut.testTimeSecondsExpression ?? "", /unixepoch\(d\.end_time,'subsec'\)/u);
   const dutRows = database.prepare(`SELECT
     ${dut.lotPredicate} AS eligible_lot,
     ${dut.kindExpression} AS kind
@@ -276,36 +274,6 @@ test("generated date predicate includes the complete end date", () => {
     { date: "2026-08-31T00:00:00.000Z" },
     { date: "2026-09-06T00:00:00.000Z" },
     { date: "2026-09-06T23:59:59.999Z" },
-  ]);
-  database.close();
-});
-
-test("generates DUT expressions for valid touchdown labels and timestamp durations", () => {
-  const database = new DatabaseSync(":memory:");
-  database.exec(`CREATE TABLE dut_rows (
-    id INTEGER PRIMARY KEY,
-    touchdown_index TEXT,
-    start_time TEXT,
-    end_time TEXT
-  );
-  INSERT INTO dut_rows(touchdown_index,start_time,end_time) VALUES
-    ('12','2026-01-01T00:00:00.000Z','2026-01-01T00:00:05.500Z'),
-    ('0','2026-01-01T00:00:00.000Z','2026-01-01T00:00:07.000Z'),
-    ('12x','invalid','2026-01-01T00:00:07.000Z'),
-    (NULL,NULL,NULL);`);
-  const expressions = getTestOeeSqlExpressions("dut", "2026-01-01", "2026-01-01", "d");
-  const rows = database.prepare(`SELECT
-    ${expressions.touchdownLabelExpression} AS touchdown_label,
-    ${expressions.testTimeSecondsExpression} AS test_time_seconds
-    FROM dut_rows AS d ORDER BY d.id`).all();
-  assert.deepEqual(rows.map((row) => ({
-    touchdownLabel: row["touchdown_label"],
-    testTimeSeconds: row["test_time_seconds"],
-  })), [
-    { touchdownLabel: 1, testTimeSeconds: 5.5 },
-    { touchdownLabel: null, testTimeSeconds: 7 },
-    { touchdownLabel: null, testTimeSeconds: null },
-    { touchdownLabel: null, testTimeSeconds: null },
   ]);
   database.close();
 });
@@ -363,10 +331,6 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
 
   const generated = getDefaultTestOeeSql("2026-01-01", "2026-01-02");
   assert.deepEqual(generated.dailyGrain, ["day", "kind"]);
-  assert.equal(generated.trimPercent, 0.2);
-  assert.equal(generated.trimFraction, 0.002);
-  assert.equal(generated.trimPercentPerTail, 0.1);
-  assert.equal(generated.trimFractionPerTail, 0.001);
   assert.equal(generated.periodAggregation, "average_of_daily_oee");
   const rows = database.prepare(generated.sql).all();
   assert.equal(rows.length, 4);
@@ -382,15 +346,14 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.equal(day1Mt["available_seconds"], 259_200);
   assert.ok(Math.abs(Number(day1Mt["availability"]) - 5 / 6) < 1e-12);
   assert.equal(day1Mt["dut_rows"], 1_000);
-  assert.equal(day1Mt["valid_duration_rows"], 1_000);
-  assert.equal(day1Mt["trimmed_rows_each_tail"], 1);
-  assert.equal(day1Mt["trimmed_mean_test_seconds"], 10);
-  assert.ok(Math.abs(Number(day1Mt["test_time_performance"]) - 10_000 / 10_081) < 1e-12);
-  assert.ok(Math.abs(Number(day1Mt["daily_test_oee"]) - 10_000 / 30_243) < 1e-12);
+  assert.equal(day1Mt["performance"], 0.5);
+  assert.equal(Object.hasOwn(day1Mt, "dut_on"), false);
+  assert.equal(Object.hasOwn(day1Mt, "test_time_performance"), false);
+  assert.ok(Math.abs(Number(day1Mt["daily_test_oee"]) - 1 / 3) < 1e-12);
   assert.ok(Math.abs(Number(day2Mt["daily_test_oee"]) - 0.4) < 1e-12);
   assert.equal(day1Mt["calculable_day_count"], 2);
   assert.equal(day1Mt["selected_day_count"], 2);
-  const expectedPeriodOee = (10_000 / 30_243 + 0.4) / 2;
+  const expectedPeriodOee = (1 / 3 + 0.4) / 2;
   assert.ok(Math.abs(Number(day1Mt["period_test_oee"]) - expectedPeriodOee) < 1e-12);
   assert.equal(day1St["availability_rows"], 0);
   assert.equal(day1St["machine_count"], 0);
@@ -411,6 +374,8 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.equal(overview["selected_day_type_count"], 4);
   assert.equal(overview["availability_day_type_count"], 2);
   assert.equal(overview["dut_day_type_count"], 2);
+  assert.equal(overview["avg_performance_percent"], 50);
+  assert.equal(Object.hasOwn(overview, "avg_test_time_percent"), false);
 
   const trends = database.prepare(
     getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-02", "trends").sql,
@@ -418,6 +383,7 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.equal(trends.length, 2);
   assert.ok(Math.abs(Number(trends[0]?.["mt_availability_percent"]) - (5 / 6) * 100) < 1e-10);
   assert.equal(trends[0]?.["st_availability_percent"], null);
+  assert.equal(trends[0]?.["mt_performance_percent"], 50);
   assert.ok(
     Math.abs(Number(trends[0]?.["mt_oee_percent"]) - Number(day1Mt["daily_test_oee"]) * 100) <
       1e-10,
@@ -429,11 +395,11 @@ test("calculates configurable ratios and products without rounding or repair", (
   const result = calculateRatioProduct({
     ratios: [
       { name: "Availability", numerator: 50, denominator: 100 },
-      { name: "DUT-On", numerator: 80, denominator: 100 },
+      { name: "Performance", numerator: 80, denominator: 100 },
       { name: "Yield", numerator: 90, denominator: 100 },
       { name: "Diagnostic", numerator: 1, denominator: 0, includeInProduct: false },
     ],
-    factors: [{ name: "Performance", value: 1 }],
+    factors: [{ name: "Calibration", value: 1 }],
   });
   assert.equal(result.ratios[0]?.value, 0.5);
   assert.equal(result.ratios[0]?.percent, 50);
@@ -474,8 +440,8 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
   const source = {
     availabilityNumerator: 50,
     availabilityDenominator: 100,
-    dutOnNumerator: 80,
-    dutOnDenominator: 100,
+    performanceNumerator: 80,
+    performanceDenominator: 100,
     yieldNumerator: 90,
     yieldDenominator: 100,
   };
@@ -487,9 +453,9 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
         denominator: source.availabilityDenominator,
       },
       {
-        name: "DUT-On",
-        numerator: source.dutOnNumerator,
-        denominator: source.dutOnDenominator,
+        name: "Performance",
+        numerator: source.performanceNumerator,
+        denominator: source.performanceDenominator,
       },
       {
         name: "Yield",
@@ -501,7 +467,7 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
   const database = new DatabaseSync(":memory:");
   const actual = database.prepare(`SELECT
     CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS availability,
-    CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS dut_on,
+    CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS performance,
     CASE WHEN ? = 0 THEN NULL ELSE CAST(? AS REAL) / ? END AS yield,
     CASE WHEN ? = 0 OR ? = 0 OR ? = 0 THEN NULL ELSE
       (CAST(? AS REAL) / ?) * (CAST(? AS REAL) / ?) * (CAST(? AS REAL) / ?)
@@ -509,26 +475,26 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
     source.availabilityDenominator,
     source.availabilityNumerator,
     source.availabilityDenominator,
-    source.dutOnDenominator,
-    source.dutOnNumerator,
-    source.dutOnDenominator,
+    source.performanceDenominator,
+    source.performanceNumerator,
+    source.performanceDenominator,
     source.yieldDenominator,
     source.yieldNumerator,
     source.yieldDenominator,
     source.availabilityDenominator,
-    source.dutOnDenominator,
+    source.performanceDenominator,
     source.yieldDenominator,
     source.availabilityNumerator,
     source.availabilityDenominator,
-    source.dutOnNumerator,
-    source.dutOnDenominator,
+    source.performanceNumerator,
+    source.performanceDenominator,
     source.yieldNumerator,
     source.yieldDenominator,
   );
   database.close();
   assert.ok(actual);
   assert.equal(actual["availability"], expected.ratios[0]?.value);
-  assert.equal(actual["dut_on"], expected.ratios[1]?.value);
+  assert.equal(actual["performance"], expected.ratios[1]?.value);
   assert.equal(actual["yield"], expected.ratios[2]?.value);
   assert.equal(actual["product"], expected.product);
 });
@@ -553,16 +519,13 @@ test("publishes deterministic database-free Skill tools", async () => {
   }) as {
     sql: string;
     dailyGrain: readonly string[];
-    trimPercent: number;
-    trimFraction: number;
     periodAggregation: string;
   };
   assert.match(defaultSql.sql, /LEFT JOIN dut_daily AS d ON d\.day=a\.day AND d\.kind=a\.kind/u);
-  assert.match(defaultSql.sql, /duration_count \/ 1000/u);
+  assert.match(defaultSql.sql, /END AS performance/u);
+  assert.doesNotMatch(defaultSql.sql, /dut_on|test_time|duration_trimmed/u);
   assert.match(defaultSql.sql, /AVG\(r\.daily_test_oee\) OVER/u);
   assert.deepEqual(defaultSql.dailyGrain, ["day", "kind"]);
-  assert.equal(defaultSql.trimPercent, 0.2);
-  assert.equal(defaultSql.trimFraction, 0.002);
   assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");
   const dashboardSql = await executeTool(byName.get("get_default_dashboard_sql")!, {
     start_date: "2026-08-31",

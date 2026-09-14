@@ -23,7 +23,7 @@ export function createTools(): ToolDefinition[] {
     name: "get_default_sql",
     label: "获取默认 Test OEE SQL",
     description:
-      "生成完整的默认 Test OEE SQLite 查询。查询排除平台名称包含 PCIe 的机台，在业务日+MT/ST 粒度分别汇总 Availability、DUT-On、0.2% 截尾 Test Time 和 Yield，以 Availability 为主左连接 DUT，四项相乘得到日 OEE，再等权平均日 OEE 得到多日结果。工具只返回 SQL，不连接数据库。",
+      "生成完整的默认 Test OEE SQLite 查询。查询排除平台名称包含 PCIe 的机台，在业务日+MT/ST 粒度分别汇总 Availability、Performance 和 Yield，以 Availability 为主左连接 DUT，三项相乘得到日 OEE，再等权平均日 OEE 得到多日结果。工具只返回 SQL，不连接数据库。",
     executionMode: "sequential",
     parameters: Type.Object({
       start_date: Type.String({
@@ -59,7 +59,7 @@ export function createTools(): ToolDefinition[] {
         pattern: "^\\d{4}-\\d{2}-\\d{2}$",
       }),
       view: Type.Union([Type.Literal("overview"), Type.Literal("trends")], {
-        description: "overview 用于单行概览组件；trends 用于四项指标及 OEE 的 MT/ST 日趋势。",
+        description: "overview 用于单行概览组件；trends 用于三个组成项及 OEE 的 MT/ST 日趋势。",
       }),
     }),
     async execute(_toolCallId, params, signal) {
@@ -78,7 +78,7 @@ export function createTools(): ToolDefinition[] {
     name: "get_sql_expressions",
     label: "获取 Test OEE SQL 规则",
     description:
-      "返回 Test OEE 固定关键规则和闭区间业务日范围对应的 SQLite 表达式，供自定义 execute_sql 原样复用，包括 LOT、PCIe 平台排除、MT/ST、Availability 状态以及 DUT 的 TD_Label 和测试秒数。date 是 08:30 至次日 08:30 的业务日标签；工具不连接数据库，也不固定聚合方式或最终公式。",
+      "返回 Test OEE 固定关键规则和闭区间业务日范围对应的 SQLite 表达式，供自定义 execute_sql 原样复用，包括 LOT、PCIe 平台排除、MT/ST 和 Availability 状态。date 是 08:30 至次日 08:30 的业务日标签；工具不连接数据库，也不固定聚合方式或最终公式。",
     executionMode: "sequential",
     parameters: Type.Object({
       source: Type.Union([Type.Literal("availability"), Type.Literal("dut")], {

@@ -228,18 +228,11 @@ const FACTOR_DEFINITIONS = [
     metricDefinition: "Machine_Running 秒数 / (当日机台数 × 86400)",
   },
   {
-    id: "dut-on",
-    title: "DUT-On",
-    sourceColumn: "dut_on",
-    overviewColumn: "dut_on",
+    id: "performance",
+    title: "Performance",
+    sourceColumn: "performance",
+    overviewColumn: "performance",
     metricDefinition: "SUM(IN_QTY) / SUM(DUT_NUM)",
-  },
-  {
-    id: "test-time",
-    title: "Test Time",
-    sourceColumn: "test_time_performance",
-    overviewColumn: "test_time",
-    metricDefinition: "0.2% 截尾平均测试秒数 × SUM(TD_Label) / SUM(测试秒数)",
   },
   {
     id: "yield",
@@ -313,20 +306,19 @@ function emptyDefaultDashboard(): DashboardState {
         title: "Overall OEE",
         subtitle: "等待可用数据",
         size: "wide",
-        data: [{ overall_oee: null, availability: null, dut_on: null, test_time: null, yield: null }],
+        data: [{ overall_oee: null, availability: null, performance: null, yield: null }],
         encoding: {
           value: "overall_oee",
           label: "Overall OEE",
           description: "等待可用数据后计算",
           gauges: [
             { name: "Availability", column: "availability" },
-            { name: "DUT-On", column: "dut_on" },
-            { name: "Test Time", column: "test_time" },
+            { name: "Performance", column: "performance" },
             { name: "Yield", column: "yield" },
           ],
         },
         format: { unit: "%", precision: 2 },
-        metricDefinition: "Overall OEE = Availability × DUT-On × Test Time × Yield",
+        metricDefinition: "Overall OEE = Availability × Performance × Yield",
         warnings: warning,
       },
       ...FACTOR_DEFINITIONS.map((factor) => emptyLineWidget(
@@ -364,8 +356,7 @@ function buildDefaultDashboard(database: AppDatabase): DashboardState {
   const overviewData: DashboardRow = {
     overall_oee: percent(average(calculableRows.map((row) => numeric(row["daily_test_oee"])))),
     availability: percent(average(calculableRows.map((row) => numeric(row["availability"])))),
-    dut_on: percent(average(calculableRows.map((row) => numeric(row["dut_on"])))),
-    test_time: percent(average(calculableRows.map((row) => numeric(row["test_time_performance"])))),
+    performance: percent(average(calculableRows.map((row) => numeric(row["performance"])))),
     yield: percent(average(calculableRows.map((row) => numeric(row["final_yield"])))),
   };
 
@@ -408,13 +399,12 @@ function buildDefaultDashboard(database: AppDatabase): DashboardState {
           description: "AVG(MT / ST DAILY OEE)",
           gauges: [
             { name: "Availability", column: "availability" },
-            { name: "DUT-On", column: "dut_on" },
-            { name: "Test Time", column: "test_time" },
+            { name: "Performance", column: "performance" },
             { name: "Yield", column: "yield" },
           ],
         },
         format: { unit: "%", precision: 2 },
-        metricDefinition: "Overall OEE 为可计算 MT/ST 日 OEE 的等权平均；四个乘数为同一组日类型结果的等权平均",
+        metricDefinition: "Overall OEE = Availability × Performance × Yield；周期值为可计算 MT/ST 日 OEE 的等权平均",
         warnings,
       },
       ...FACTOR_DEFINITIONS.map(factorWidget),

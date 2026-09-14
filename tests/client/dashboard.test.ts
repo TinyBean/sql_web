@@ -109,20 +109,19 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
       title: "Overall OEE",
       subtitle: "最近 7 个业务日",
       size: "wide",
-      data: [{ overall: 42.5, availability: 80, dut_on: 75, test_time: 95, yield: 90 }],
+      data: [{ overall: 42.5, availability: 80, performance: 75, yield: 90 }],
       encoding: {
         value: "overall",
         label: "上月综合效率",
         description: "按有效工作日等权平均",
         gauges: [
           { name: "Availability", column: "availability" },
-          { name: "DUT-On", column: "dut_on" },
-          { name: "Test Time", column: "test_time" },
+          { name: "Performance", column: "performance" },
           { name: "Yield", column: "yield" },
         ],
       },
       format: { unit: "%", precision: 2 },
-      metricDefinition: "四个乘数",
+      metricDefinition: "三个乘数",
       warnings: [],
     }],
   });
@@ -132,7 +131,7 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   assert.equal(grid.querySelector(".overview-oee strong")?.textContent, "42.50%");
   assert.equal(grid.querySelector(".overview-oee small")?.textContent, "按有效工作日等权平均");
   const gaugeSeries = chartOption?.["series"] as Array<Record<string, unknown>>;
-  assert.equal(gaugeSeries.length, 4);
+  assert.equal(gaugeSeries.length, 3);
   assert.equal(gaugeSeries.every((series) => series["type"] === "gauge"), true);
   renderer.render({ ...dashboard(2), widgets: [] });
   assert.equal(disposed, 3);

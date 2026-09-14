@@ -18,7 +18,7 @@
 
 ### MT/ST
 
-Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；DUT-On、Test Time 和 Yield 使用 `oee_dut_utilization.step_id` 和 `oee_dut_utilization.machine_id`。先应用 PCIe 排除，再按以下顺序判定：
+Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；Performance 和 Yield 使用 `oee_dut_utilization.step_id` 和 `oee_dut_utilization.machine_id`。先应用 PCIe 排除，再按以下顺序判定：
 
 1. STEP 首字符为 `5` → MT。
 2. STEP 前两个字符为 `95` → MT。
@@ -55,7 +55,7 @@ Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；D
 ### 日期和粒度
 
 - `date` 是业务日标签：标签日当天 08:30 至次日 08:30 算作一个业务日。不要再根据 `start_time` 或 `end_time` 将记录二次移日。
-- 用户选择的日期是业务日闭区间；四个组成项必须使用同一范围。
+- 用户选择的日期是业务日闭区间；三个组成项必须使用同一范围。
 - 两张事实表先分别计算到 `业务日 + MT/ST` 粒度，再以 Availability 日结果为主表，按这两个键左连接 DUT 日结果。
 - DUT 中没有对应 Availability 日类型的结果不进入默认 OEE；Availability 没有匹配 DUT 或任一组成项无法计算时，该日该类型 OEE 为 `NULL`。
 
@@ -69,39 +69,32 @@ Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；D
 Availability = SUM(所有机台 Machine_Running 的 time_span)
                / (机台数 × 86400)
 
-DUT-On = SUM(IN_QTY) / SUM(DUT_NUM)
-
-Test Time = 0.2% 截尾平均测试秒数 × SUM(TD_Label)
-            / SUM(测试秒数)
+Performance = SUM(IN_QTY) / SUM(DUT_NUM)
 
 Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 
-日 Test OEE = Availability × DUT-On × Test Time × Yield
+日 Test OEE = Availability × Performance × Yield
 ```
 
 其中：
 
 - 机台数从经过日期、LOT、PCIe 和 MT/ST 规则过滤后的全部 Availability 记录计算，不要求机台出现 `Machine_Running`。某台机即使当天全是 loss，也必须计入分母。
-- `测试秒数 = END_TIME - START_TIME`，单位为秒。时间戳为空或 SQLite 无法解析时为 `NULL`，不进入截尾样本和秒数合计。
-- `TD_Label = Integer(TOUCHDOWN_INDEX) / Integer(TOUCHDOWN_INDEX)` 的可计算结果。标准 SQL 将去除首尾空白后仅包含十进制数字且整数值非 0 的 `TOUCHDOWN_INDEX` 记为 `1`；空值、非整数文本和 `0` 记为 `NULL`。
-- Spotfire 表达式 `TrimmedMean([Time_Span], 0.2)` 中的 `0.2` 是百分比参数，即 0.2%，实际比例为 `0.002`。最低端和最高端各去除 0.1%，每端比例为 `0.001`。若当天该类型有效测试秒数样本数为 `n`，每端去除 `floor(n × 0.001)` 行；标准 SQL 用整数除法 `n / 1000` 实现。
-- 按测试秒数排序，相同秒数用事实表 `id` 稳定排序，只去除规定行数，不把边界处全部同值一并删除。
-- 截尾只影响“截尾平均测试秒数”；分母 `SUM(测试秒数)` 和 `SUM(TD_Label)` 仍分别基于当天该类型的全部可计算值。
 - 任一分母为 0 或必要输入为 `NULL` 时，对应比率及日 OEE 为 `NULL`，不是 0%。
 
 ### 日结果和多日结果
 
 ```text
-日 Test OEE = 当天该 MT/ST 类型的四个汇总组成项相乘
+日 Test OEE = 当天该 MT/ST 类型的三个汇总组成项相乘
 
 多日 Test OEE = AVG(范围内可计算的日 Test OEE)
 ```
 
-先在日类型粒度汇总各组成项的分子和分母，再计算比率并相乘。多日结果对可计算的业务日等权平均；不要把整个多日范围的原始分子分母一次汇总后相乘，也不要用机台数、产量或测试时间给日结果加权。
+先在日类型粒度汇总各组成项的分子和分母，再计算比率并相乘。多日结果对可计算的业务日等权平均；不要把整个多日范围的原始分子分母一次汇总后相乘，也不要用机台数或产量给日结果加权。
 
 ### 数值与展示单位
 
-- 默认逐日 SQL 的 `availability`、`dut_on`、`test_time_performance`、`final_yield`、`daily_test_oee` 和 `period_test_oee` 均为 0–1 比率。
+- 默认逐日 SQL 的 `availability`、`performance`、`final_yield`、`daily_test_oee` 和 `period_test_oee` 均为 0–1 比率。
+- 指标解释和界面显示必须使用 `Performance`。
 - 默认看板 SQL 中以 `_percent` 结尾的列为百分数值（percentage points），已经乘以 100；例如 `56.65` 表示 `56.65%`。
 - Dashboard 的 `format.unit: "%"` 只追加单位，不会把 `0.5665` 自动换算为 `56.65`。不得把默认逐日 SQL 的比率列直接映射到 `%` 看板。
 
@@ -121,8 +114,6 @@ Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 - `availability_rows`：当天该类型的有效 Availability 记录数。
 - `machine_count`：Availability 分母采用的不重复机台数。
 - `dut_rows`：当天该类型的有效 DUT 记录数；为 `NULL` 表示 Availability 日类型没有匹配 DUT 日类型。
-- `valid_duration_rows`：进入测试时长统计的有效记录数。
-- `trimmed_rows_each_tail`：当天该类型每端截尾的行数；实际从两端删除的总行数是其两倍。
 - `calculable_day_count` / `selected_day_count`：多日平均实际使用的业务日数与所选业务日数。
 
 任何计数不足都必须在回答中说明。无数据的业务日结果保持 `NULL`，多日 `AVG` 不把它当作 0；同时必须明确警告平均值只覆盖了哪些可计算业务日。不得把“查询范围正确”和“数据覆盖完整”混为一谈。

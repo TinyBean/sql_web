@@ -22,16 +22,11 @@
           <p><span id="dashboardDateRange">读取数据范围…</span><span class="heading-separator">/</span><span id="dashboardUpdatedAt">准备快照…</span></p>
         </div>
         <div class="topbar-actions">
-          <span class="model-badge" id="modelBadge">检查模型…</span>
-          <span class="guard-status" id="guardTitle">检查工具隔离…</span>
-          <button class="topbar-button" id="historyButton" type="button" aria-label="查看历史会话">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v4l3 2"/></svg>历史
-          </button>
           <button class="topbar-button primary" id="newChatButton" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新建会话
           </button>
-          <button class="icon-button" id="schemaButton" type="button" aria-label="查看数据库结构" aria-expanded="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg>
+          <button class="topbar-button" id="historyButton" type="button" aria-label="查看历史会话" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v4l3 2"/></svg>历史
           </button>
         </div>
       </header>
@@ -51,19 +46,11 @@
             <h2 id="chatTitle">新会话</h2>
           </div>
           <div class="chat-header-actions">
-            <button class="icon-button" id="chatHistoryButton" type="button" aria-label="历史会话" aria-expanded="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v4l3 2"/></svg>
-            </button>
             <button class="icon-button" id="chatCollapseButton" type="button" aria-label="收起会话">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </button>
           </div>
         </header>
-
-        <aside class="history-popover" id="historyPopover" aria-label="历史会话">
-          <div class="history-title"><strong>历史会话</strong><span>看板快照相互独立</span></div>
-          <nav class="session-list" id="sessionList"><div class="session-placeholder">还没有会话</div></nav>
-        </aside>
 
         <div class="messages" id="messages" aria-live="polite">
           <section class="welcome" id="welcome">
@@ -73,7 +60,7 @@
             <div class="suggestions">
               <button type="button" data-question="比较过去 7 天 MT 和 ST 的 Yield，并更新看板。">比较 7 天 Yield</button>
               <button type="button" data-question="分析最近 14 天 Test OEE 的异常日期，并更新相关图表。">定位 OEE 异常</button>
-              <button type="button" data-question="检查当前数据库的数据覆盖范围和缺失日期。">检查数据覆盖</button>
+              <button type="button" data-question="检查当前数据的覆盖范围和缺失日期。">检查数据覆盖</button>
             </div>
           </section>
         </div>
@@ -92,13 +79,13 @@
       </form>
     </section>
 
-    <aside class="schema-panel" id="schemaPanel" aria-label="数据库结构">
-      <div class="schema-header">
-        <div><span>SCHEMA</span><h2>数据库结构</h2></div>
-        <button class="icon-button" id="schemaCloseButton" type="button" aria-label="关闭数据库结构"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    <aside class="history-panel" id="historyPanel" aria-label="历史会话">
+      <div class="history-panel-header">
+        <div><span>HISTORY</span><h2>历史会话</h2></div>
+        <button class="icon-button" id="historyCloseButton" type="button" aria-label="关闭历史会话"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
-      <p class="schema-copy">Agent 可依据以下只读结构查询；Python 沙箱无法直接访问数据库。</p>
-      <div class="schema-list" id="schemaList"><div class="schema-loading">正在读取结构…</div></div>
+      <p class="history-panel-copy">每个会话保留独立的对话和看板快照。</p>
+      <nav class="session-list" id="sessionList"><div class="session-placeholder">还没有会话</div></nav>
     </aside>
 
     <div class="toast" id="toast" role="status"></div>

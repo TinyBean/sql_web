@@ -114,20 +114,6 @@ test("switches between independent live session answers without stealing the cur
   expose("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const method = init.method ?? "GET";
-    if (url === "/api/health") {
-      return jsonResponse({
-        ok: true,
-        database: { engine: "SQLite", path: "/tmp/test.sqlite" },
-        agent: {
-          tools: [],
-          codeInterpreter: { available: false, reason: "test" },
-          model: { provider: "test", model: "test-model" },
-          availableModelCount: 1,
-          activeSessionCount: 2,
-        },
-      });
-    }
-    if (url === "/api/schema") return jsonResponse({ objects: [] });
     if (url === "/api/sessions" && method === "GET") return jsonResponse({ sessions });
     if (url === "/api/sessions" && method === "POST") {
       const createdId = createdSessionIds.shift();
@@ -207,6 +193,9 @@ test("switches between independent live session answers without stealing the cur
   const newChatButton = document.querySelector("#newChatButton") as unknown as HTMLButtonElement;
   const chatDock = document.querySelector("#chatDock") as HTMLElement;
   const chatCollapseButton = document.querySelector("#chatCollapseButton") as HTMLButtonElement;
+  const historyButton = document.querySelector("#historyButton") as HTMLButtonElement;
+  const historyCloseButton = document.querySelector("#historyCloseButton") as HTMLButtonElement;
+  const historyPanel = document.querySelector("#historyPanel") as HTMLElement;
   const dashboardMain = document.querySelector("#dashboardMain") as HTMLElement;
   const dashboardUpdatedAt = document.querySelector("#dashboardUpdatedAt") as HTMLElement;
   Object.defineProperty(messages, "clientHeight", { configurable: true, value: 300 });
@@ -232,6 +221,25 @@ test("switches between independent live session answers without stealing the cur
   assert.equal(document.querySelector('[data-session-id="session-c"]'), null);
   assert.equal(sessionLoads.size, 0, "startup must not load the most recent persisted session");
   assert.equal(chatDock.classList.contains("open"), false, "chat should start collapsed");
+  assert.equal(document.querySelector("#modelBadge"), null);
+  assert.equal(document.querySelector("#guardTitle"), null);
+  assert.equal(document.querySelector("#schemaPanel"), null);
+  assert.equal(document.querySelector("#chatHistoryButton"), null);
+  assert.equal(
+    document.querySelector("#newChatButton")?.nextElementSibling?.getAttribute("id"),
+    "historyButton",
+  );
+  historyButton.click();
+  assert.equal(historyPanel.classList.contains("open"), true);
+  assert.equal(historyButton.getAttribute("aria-expanded"), "true");
+  assert.equal(sessionButton("session-a").querySelector(".session-title")?.textContent, "会话 A");
+  assert.ok(deleteButton("session-a").parentElement?.classList.contains("session-row"));
+  historyCloseButton.click();
+  assert.equal(historyPanel.classList.contains("open"), false);
+  historyButton.click();
+  assert.equal(historyPanel.classList.contains("open"), true);
+  dashboardMain.click();
+  assert.equal(historyPanel.classList.contains("open"), false, "outside click should close history");
   input.value = "问题 C";
   submit();
   await waitFor(() => controllers.has("session-c"), "fresh session stream did not start");
@@ -249,11 +257,14 @@ test("switches between independent live session answers without stealing the cur
     () => !sessionButton("session-c").classList.contains("streaming"),
     "fresh session did not remain in history after completion",
   );
+  historyButton.click();
   sessionButton("session-a").click();
   await waitFor(
     () => sessionButton("session-a").classList.contains("active"),
     "session A did not load",
   );
+  assert.equal(historyPanel.classList.contains("open"), false);
+  assert.equal(chatDock.classList.contains("open"), true);
   assert.equal(messages.scrollTop, 900, "a session without a saved position should open at the bottom");
   input.value = "保留的草稿";
   input.dispatchEvent(new browser.Event("focus"));
@@ -263,7 +274,13 @@ test("switches between independent live session answers without stealing the cur
   assert.equal(input.value, "保留的草稿");
   input.dispatchEvent(new browser.Event("focus"));
   dashboardMain.click();
-  assert.equal(chatDock.classList.contains("open"), false, "dashboard blank area should collapse chat");
+  assert.equal(chatDock.classList.contains("open"), false, "an outside click should collapse chat");
+  input.dispatchEvent(new browser.Event("focus"));
+  historyButton.click();
+  assert.equal(chatDock.classList.contains("open"), false, "opening history should collapse chat");
+  assert.equal(historyPanel.classList.contains("open"), true);
+  chatDock.click();
+  assert.equal(historyPanel.classList.contains("open"), false, "clicking chat should close history");
   input.value = "";
 
   messages.scrollTop = 125;

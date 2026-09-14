@@ -81,24 +81,23 @@ test("previews a default dashboard without creating session artifacts", (t) => {
 
   const first = dashboard.loadOrPreview(SESSION_A);
   assert.equal(first.revision, 0);
-  assert.equal(first.widgets.length, 5);
+  assert.equal(first.widgets.length, 4);
   assert.equal(existsSync(sessionDirectory), false);
 
   const second = dashboard.loadOrPreview(SESSION_A);
   assert.equal(second.revision, 0);
-  assert.equal(second.widgets.length, 5);
+  assert.equal(second.widgets.length, 4);
   assert.equal(existsSync(sessionDirectory), false);
 });
 
-test("initializes and restores a frozen five-widget weekly OEE dashboard per session", (t) => {
+test("initializes and restores a frozen four-widget weekly OEE dashboard per session", (t) => {
   const { dashboard, artifacts } = fixture(t);
   const first = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(first.revision, 0);
   assert.deepEqual(first.widgets.map((widget) => widget.id), [
     "overall-oee-overview",
     "availability-trend-7d",
-    "dut-on-trend-7d",
-    "test-time-trend-7d",
+    "performance-trend-7d",
     "yield-trend-7d",
   ]);
   assert.equal(first.widgets.every((widget) => widget.warnings.length > 0), true);
@@ -108,7 +107,7 @@ test("initializes and restores a frozen five-widget weekly OEE dashboard per ses
     readFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), "utf8"),
   ) as { baseline: unknown; current: unknown };
   assert.deepEqual(document.baseline, document.current);
-  assert.equal(dashboard.loadOrInitialize(SESSION_B).widgets.length, 5);
+  assert.equal(dashboard.loadOrInitialize(SESSION_B).widgets.length, 4);
 });
 
 test("materializes one session snapshot atomically and rejects stale revisions", (t) => {
@@ -222,7 +221,7 @@ test("accepts stringified model-server arguments and preserves an existing widge
       subtitle: "上周",
       encoding: { value: "oee_pct", comparison: null },
       format: { unit: "%", precision: 2 },
-      metric_definition: "Test OEE = Availability × DUT-On × Test Time × Yield",
+      metric_definition: "Test OEE = Availability × Performance × Yield",
       warnings: ["Availability 缺失三天"],
     }),
   };
@@ -244,7 +243,7 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("builds the seven-day Overall OEE overview and four factor trends", (t) => {
+test("builds the seven-day Overall OEE overview and three factor trends", (t) => {
   const { databasePath, dashboard } = fixture(t);
   const writer = new DatabaseSync(databasePath);
   const availability = writer.prepare(
@@ -292,8 +291,7 @@ test("builds the seven-day Overall OEE overview and four factor trends", (t) => 
   assert.deepEqual(overview?.data[0], {
     overall_oee: 20,
     availability: 50,
-    dut_on: 50,
-    test_time: 100,
+    performance: 50,
     yield: 80,
   });
   assert.equal(overview?.kind === "overview" ? overview.encoding.label : undefined, "7 日 Overall OEE");
@@ -301,11 +299,19 @@ test("builds the seven-day Overall OEE overview and four factor trends", (t) => 
     overview?.kind === "overview" ? overview.encoding.description : undefined,
     "AVG(MT / ST DAILY OEE)",
   );
+  assert.deepEqual(overview?.kind === "overview" ? overview.encoding.gauges : undefined, [
+    { name: "Availability", column: "availability" },
+    { name: "Performance", column: "performance" },
+    { name: "Yield", column: "yield" },
+  ]);
+  assert.equal(
+    overview?.metricDefinition,
+    "Overall OEE = Availability × Performance × Yield；周期值为可计算 MT/ST 日 OEE 的等权平均",
+  );
   assert.equal(overview?.warnings.length, 0);
   for (const id of [
     "availability-trend-7d",
-    "dut-on-trend-7d",
-    "test-time-trend-7d",
+    "performance-trend-7d",
     "yield-trend-7d",
   ]) {
     const widget = state.widgets.find((item) => item.id === id);

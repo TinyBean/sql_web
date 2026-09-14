@@ -327,7 +327,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   await assert.rejects(() => store.get(created.id), SessionNotFoundError);
 
   const sessionDir = path.join(directory, "sessions");
-  const persistedManager = SessionManager.create(directory, sessionDir);
+  const previousProjectDirectory = path.join(directory, "previous-project-location");
+  const persistedManager = SessionManager.create(previousProjectDirectory, sessionDir);
   const persistedId = persistedManager.getSessionId();
   const persistedPath = persistedManager.getSessionFile();
   assert.ok(persistedPath);
@@ -336,10 +337,12 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     version: 3,
     id: persistedId,
     timestamp: new Date().toISOString(),
-    cwd: directory,
+    cwd: previousProjectDirectory,
   })}\n`);
   assert.equal(existsSync(persistedPath), true);
   assert.equal((await store.list()).some((item) => item.id === persistedId), true);
+  const restoredPersistedSession = await store.get(persistedId);
+  assert.equal(restoredPersistedSession.sessionManager.getCwd(), directory);
 
   await store.delete(persistedId);
   assert.equal(existsSync(persistedPath), false);

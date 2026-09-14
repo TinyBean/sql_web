@@ -12,6 +12,7 @@ import type {
   AgentSession,
   AgentSessionEvent,
   ResourceLoader,
+  SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import {
   isAgentToolName,
@@ -567,7 +568,7 @@ export class AgentSessionStore {
   }
 
   async list(): Promise<SessionSummary[]> {
-    const infos = await SessionManager.list(this.#cwd, this.#sessionDir);
+    const infos = await this.#listPersistedSessions();
     const listed = new Map<string, SessionSummary>(
       infos.map((info) => [info.id, {
         id: info.id,
@@ -604,7 +605,7 @@ export class AgentSessionStore {
     const cached = this.#sessions.get(id);
     if (cached) return cached;
 
-    const infos = await SessionManager.list(this.#cwd, this.#sessionDir);
+    const infos = await this.#listPersistedSessions();
     const info = infos.find((candidate) => candidate.id === id);
     if (!info) throw new SessionNotFoundError(id);
     const session = await this.#createPiSession(
@@ -622,7 +623,7 @@ export class AgentSessionStore {
 
   async delete(id: string): Promise<void> {
     this.#assertValidId(id);
-    const infos = await SessionManager.list(this.#cwd, this.#sessionDir);
+    const infos = await this.#listPersistedSessions();
     const info = infos.find((candidate) => candidate.id === id);
     const session = this.#sessions.get(id);
     if (!info && !session) throw new SessionNotFoundError(id);
@@ -890,6 +891,13 @@ export class AgentSessionStore {
 
   #assertValidId(id: string): void {
     if (!SESSION_ID_PATTERN.test(id)) throw new SessionNotFoundError(id);
+  }
+
+  async #listPersistedSessions(): Promise<SessionInfo[]> {
+    // The configured session directory belongs to this application instance. A copied
+    // project keeps its JSONL files but gets a new absolute cwd, so filtering by the
+    // cwd stored in each session header would make otherwise valid history disappear.
+    return SessionManager.listAll(this.#sessionDir);
   }
 
   #openInitializedManager(filePath: string): SessionManager {

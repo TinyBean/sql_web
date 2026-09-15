@@ -29,6 +29,14 @@ interface RenderedWidget {
   readonly fingerprint: string;
   readonly chart: EChartsInstance | null;
   readonly chartHost: HTMLElement | null;
+  readonly table: RenderedTable | null;
+}
+
+interface RenderedTable {
+  readonly wrapper: HTMLElement;
+  readonly element: HTMLTableElement;
+  readonly widget: Extract<DashboardWidget, { readonly kind: "table" }>;
+  columnWidths: readonly number[] | null;
 }
 
 interface DashboardRenderState {
@@ -43,6 +51,9 @@ interface ResizeObserverLike {
 }
 
 const COLORS = ["#47e5b1", "#68a7ff", "#ffbf69", "#a986ff", "#f27c8d", "#6bd5e8"];
+const TABLE_COLUMN_MIN_WIDTH = 80;
+const TABLE_COLUMN_MAX_WIDTH = 360;
+const WIDGET_COLUMN_SPANS = { small: 3, medium: 6, wide: 12 } as const;
 const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
 function scalarText(value: string | number | null | undefined): string {
@@ -312,13 +323,15 @@ function appendWarnings(card: HTMLElement, widget: DashboardWidget): void {
   card.append(details);
 }
 
-function createTable(widget: Extract<DashboardWidget, { readonly kind: "table" }>): HTMLElement {
+function createTable(widget: RenderedTable["widget"]): RenderedTable {
   const wrapper = document.createElement("div");
   wrapper.className = "metric-table-wrap";
   const table = document.createElement("table");
+  const columns = document.createElement("colgroup");
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
   for (const column of widget.encoding.columns) {
+    columns.append(document.createElement("col"));
     const cell = document.createElement("th");
     cell.scope = "col";
     cell.textContent = column.label;
@@ -335,9 +348,52 @@ function createTable(widget: Extract<DashboardWidget, { readonly kind: "table" }
     }
     body.append(bodyRow);
   }
-  table.append(head, body);
+  table.append(columns, head, body);
   wrapper.append(table);
-  return wrapper;
+  return { wrapper, element: table, widget, columnWidths: null };
+}
+
+function cssPixels(value: string): number {
+  return Number.parseFloat(value) || 0;
+}
+
+function horizontalInsets(style: CSSStyleDeclaration): number {
+  return cssPixels(style.paddingLeft) + cssPixels(style.paddingRight) +
+    cssPixels(style.borderLeftWidth) + cssPixels(style.borderRightWidth);
+}
+
+function measureTableColumns(table: RenderedTable): readonly number[] {
+  const context = document.createElement("canvas").getContext("2d");
+  const headers = [...table.element.querySelectorAll("th")];
+  const bodyStyle = window.getComputedStyle(table.element.querySelector("td") ?? table.element);
+  const cache = new Map<string, number>();
+  const measure = (text: string, style: CSSStyleDeclaration): number => {
+    const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const key = `${font}\n${text}`;
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+    if (context) context.font = font;
+    let width = 0;
+    for (const line of text.split(/\r\n?|\n/u)) {
+      width = Math.max(width, context?.measureText(line).width ??
+        [...line].length * cssPixels(style.fontSize));
+      if (width >= TABLE_COLUMN_MAX_WIDTH) break;
+    }
+    cache.set(key, width);
+    return width;
+  };
+  return table.widget.encoding.columns.map((column, index) => {
+    const header = headers[index];
+    if (!header) return TABLE_COLUMN_MIN_WIDTH;
+    const headerStyle = window.getComputedStyle(header);
+    const padding = horizontalInsets(headerStyle);
+    let width = Math.max(TABLE_COLUMN_MIN_WIDTH, measure(column.label, headerStyle) + padding);
+    for (const row of table.widget.data) {
+      if (width >= TABLE_COLUMN_MAX_WIDTH) break;
+      width = Math.max(width, measure(scalarText(row[column.key]), bodyStyle) + padding);
+    }
+    return Math.min(TABLE_COLUMN_MAX_WIDTH, Math.ceil(width));
+  });
 }
 
 function createWidget(widget: DashboardWidget): RenderedWidget {
@@ -350,6 +406,7 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
 
   let chart: EChartsInstance | null = null;
   let chartHost: HTMLElement | null = null;
+  let table: RenderedTable | null = null;
   if (widget.kind === "kpi") {
     const content = document.createElement("div");
     content.className = "kpi-content";
@@ -393,7 +450,8 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
     chart = api.init(chartHost, null, { renderer: "canvas" });
     chart.setOption(overviewOption(widget), { notMerge: true });
   } else if (widget.kind === "table") {
-    card.append(createTable(widget));
+    table = createTable(widget);
+    card.append(table.wrapper);
   } else if (!widget.data.length) {
     const empty = document.createElement("div");
     empty.className = "metric-empty";
@@ -418,7 +476,7 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
   definition.className = "metric-definition";
   definition.textContent = widget.metricDefinition;
   card.append(definition);
-  return { element: card, fingerprint: JSON.stringify(widget), chart, chartHost };
+  return { element: card, fingerprint: JSON.stringify(widget), chart, chartHost, table };
 }
 
 export class DashboardRenderer {
@@ -426,6 +484,8 @@ export class DashboardRenderer {
   readonly #widgets = new Map<string, RenderedWidget>();
   readonly #resizeObserver: ResizeObserverLike;
   readonly #positionAnimations = new Map<string, Animation>();
+  #tableContainerWidth = 0;
+  #tableLayoutFrame: number | null = null;
   #editing = false;
   #saving = false;
 
@@ -434,11 +494,16 @@ export class DashboardRenderer {
     this.#resizeObserver = typeof ResizeObserver === "function"
       ? new ResizeObserver((entries) => {
           for (const entry of entries) {
+            if (entry.target === this.#container) {
+              this.#scheduleTableLayout(entry.contentRect.width);
+              continue;
+            }
             const widgetId = (entry.target as HTMLElement).dataset["chartFor"];
             if (widgetId) this.#widgets.get(widgetId)?.chart?.resize();
           }
         })
       : { observe: () => {}, unobserve: () => {}, disconnect: () => {} };
+    this.#resizeObserver.observe(container);
   }
 
   render(dashboard: DashboardState, state: DashboardRenderState = {}): void {
@@ -478,6 +543,7 @@ export class DashboardRenderer {
       rendered.chart?.resize();
     }
     this.#renderEmptyState(dashboard.widgets.every((widget) => hiddenWidgetIds.has(widget.id)));
+    this.#layoutTables(true);
     this.#syncControls();
   }
 
@@ -567,6 +633,8 @@ export class DashboardRenderer {
 
   dispose(): void {
     this.finishPositionAnimations();
+    if (this.#tableLayoutFrame !== null) window.cancelAnimationFrame(this.#tableLayoutFrame);
+    this.#tableLayoutFrame = null;
     for (const rendered of this.#widgets.values()) this.#disposeWidget(rendered);
     this.#widgets.clear();
     this.#resizeObserver.disconnect();
@@ -582,6 +650,53 @@ export class DashboardRenderer {
     if (rendered.chartHost) this.#resizeObserver.unobserve(rendered.chartHost);
     rendered.chart?.dispose();
     rendered.element.remove();
+  }
+
+  #scheduleTableLayout(width: number): void {
+    if (width === this.#tableContainerWidth || this.#tableLayoutFrame !== null ||
+      ![...this.#widgets.values()].some((rendered) => rendered.table !== null)) return;
+    // Defer writes out of ResizeObserver delivery: widening a card also changes
+    // its container's height, which would otherwise produce a loop notification.
+    this.#tableLayoutFrame = window.requestAnimationFrame(() => {
+      this.#tableLayoutFrame = null;
+      this.#layoutTables();
+    });
+  }
+
+  #layoutTables(force = false): void {
+    const tables = [...this.#widgets.values()].filter((rendered): rendered is RenderedWidget & { table: RenderedTable } => (
+      rendered.table !== null && !rendered.element.hidden && rendered.element.isConnected
+    ));
+    if (!tables.length) return;
+    const style = window.getComputedStyle(this.#container);
+    const width = this.#container.getBoundingClientRect().width - horizontalInsets(style);
+    if (width <= 0 || (!force && width === this.#tableContainerWidth)) return;
+    this.#tableContainerWidth = width;
+    const gap = cssPixels(style.columnGap);
+    const columnWidth = (width - gap * 11) / 12;
+
+    // Measure before writing any layout changes. Heights never influence the
+    // choice of span, so expanding a table cannot cause an observer feedback loop.
+    const layouts = tables.map(({ element, table }) => {
+      const widths = table.columnWidths ?? measureTableColumns(table);
+      const total = widths.reduce((sum, value) => sum + value, 0);
+      const required = total + horizontalInsets(window.getComputedStyle(element));
+      const minimumSpan = WIDGET_COLUMN_SPANS[table.widget.size];
+      const span = [3, 6, 12].find((candidate) => (
+        candidate >= minimumSpan && columnWidth * candidate + gap * (candidate - 1) >= required
+      )) ?? 12;
+      return { element, table, widths, total, span };
+    });
+    for (const { element, table, widths, total, span } of layouts) {
+      if (!table.columnWidths) {
+        table.columnWidths = widths;
+        for (const [index, column] of [...table.element.querySelectorAll("col")].entries()) {
+          column.style.width = `${(widths[index] ?? 0) / total * 100}%`;
+        }
+      }
+      const gridColumn = `span ${span}`;
+      if (element.style.gridColumn !== gridColumn) element.style.gridColumn = gridColumn;
+    }
   }
 
   #renderEmptyState(empty: boolean): void {

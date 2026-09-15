@@ -210,10 +210,12 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .metric-warning summary { width: max-content; cursor: pointer; }
 .metric-warning ul { margin: 7px 0 0; padding: 8px 10px 8px 24px; border: 1px solid rgb(255 191 105 / 22%); border-radius: 7px; background: #17150e; color: #d6b786; line-height: 1.55; }
 
-.metric-table-wrap { max-height: 210px; overflow: auto; margin-top: 10px; }
-.metric-table-wrap table { width: 100%; border-collapse: collapse; font-size: 11px; }
-.metric-table-wrap th, .metric-table-wrap td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
-.metric-table-wrap th { position: sticky; top: 0; color: var(--muted); background: var(--surface-raised); }
+.metric-table .metric-card-header > :first-child { min-width: 0; overflow-wrap: anywhere; }
+.metric-table .metric-definition { overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+.metric-table-wrap { margin-top: 10px; }
+.metric-table-wrap table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 11px; }
+.metric-table-wrap th, .metric-table-wrap td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.metric-table-wrap th { color: var(--muted); background: var(--surface-raised); }
 
 .dashboard-loading { grid-column: span 12; display: grid; place-items: center; height: 300px; color: var(--muted); }
 .dashboard-loading span { width: 26px; height: 26px; border: 2px solid var(--line); border-top-color: var(--mint); border-radius: 50%; animation: spin .9s linear infinite; }

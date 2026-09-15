@@ -191,7 +191,7 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   assert.match(grid.querySelector(".dashboard-empty")?.textContent ?? "", /当前看板为空/u);
   assert.equal(initialized, 1, "hiding a widget must preserve its chart");
   resizeCallback?.(
-    [...observed].map((target) => ({ target } as ResizeObserverEntry)),
+    [...observed].map((target) => ({ target, contentRect: target.getBoundingClientRect() } as ResizeObserverEntry)),
     {} as ResizeObserver,
   );
   assert.ok(resized > 0);

@@ -7,14 +7,18 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
-import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext } from "../../scripts/analysis/evidence.ts";
-import { applyAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../scripts/analysis/report.ts";
-import { generateAnalyzedDashboard } from "../../scripts/analysis/run.ts";
-import { buildDefaultDashboardInTransaction } from "../../scripts/database/build-default-dashboard.ts";
+import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
+import { applyAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
+import { generateAnalyzedDashboard } from "../../src/server/dashboard/default/analysis/run.ts";
+import { buildDefaultDashboardInTransaction } from "../../src/server/dashboard/default/build.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { dailyUpdatePlan, runDailyUpdate } from "../../scripts/database/daily-update.ts";
-import { createDefaultDashboard } from "../../src/server/tool/default-dashboard.ts";
+import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
+import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
+import { defaultDashboardOutput } from "../../scripts/scheduling/daily-output.ts";
+import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
+import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
@@ -125,10 +129,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
 
 test("unavailable models publish new metrics and empty analysis, without creating website sessions", { timeout: 30_000 }, async (t) => {
   const { config } = fixture(t);
-  const outcome = await runDailyUpdate(config, dailyUpdatePlan(["--through-date", "2026-01-12"], new Date("2026-01-13T01:00:00Z")), logger, {
-    openStore: () => ({
-      async sync() { return { runId: "test", status: "completed", datasets: [] }; }, close() {},
-    }),
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
     generate: generateAnalyzedDashboard,
     publish(_file, state) {
       assert.equal(state.dateRange?.end, "2026-01-12");
@@ -138,8 +139,14 @@ test("unavailable models publish new metrics and empty analysis, without creatin
         assert.ok(widget.warnings.some((warning) => warning.includes("本次分析暂不可用")));
       }
     },
+  })]);
+  const result = await runDailyUpdate(config, dailyUpdatePlan(["--through-date", "2026-01-12"], new Date("2026-01-13T01:00:00Z")), registry, logger, {
+    openStore: () => ({
+      async sync() { return { runId: "test", status: "completed", datasets: [] }; }, close() {},
+    }),
   });
-  assert.equal(outcome.status, "completed_with_warnings");
+  const outcome = { ...result, ...defaultDashboardOutput(result.dashboards) };
+  assert.equal(outcome.status, "completed_with_warnings", JSON.stringify(outcome));
   assert.equal(outcome.analysisStatus, "failed");
   assert.equal(outcome.published, true);
   assert.match(outcome.analysisReason ?? "", /模型列表/u);

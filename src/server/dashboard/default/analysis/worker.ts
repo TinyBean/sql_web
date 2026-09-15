@@ -1,8 +1,8 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { DataCommandConfig } from "../database/data-command-config.ts";
-import { buildDefaultDashboardInTransaction } from "../database/build-default-dashboard.ts";
+import type { DefaultDashboardAnalysisConfig } from "../config.ts";
+import { buildDefaultDashboardInTransaction } from "../build.ts";
 import { AnalysisEvidence } from "./evidence.ts";
 import { applyAnalysisReport } from "./report.ts";
 
@@ -11,7 +11,7 @@ export interface AnalysisWorkerRequest {
   readonly throughDate: string;
   readonly now: string;
   readonly warnings: readonly string[];
-  readonly config: DataCommandConfig["analysis"];
+  readonly config: DefaultDashboardAnalysisConfig;
   readonly runDir: string;
 }
 

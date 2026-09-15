@@ -1,3 +1,4 @@
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,9 +8,9 @@ import { Value } from "typebox/value";
 import {
   DashboardConflictError,
   DashboardInputError,
-  DashboardModule,
+  SessionDashboardStore,
   type DashboardWidgetRequest,
-} from "../../src/server/tool/dashboard.ts";
+} from "../../src/server/dashboard/session-store.ts";
 import { createDashboardTools } from "../../src/server/tool/dashboard-tools.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 
@@ -17,9 +18,9 @@ const SESSION_A = "session-dashboard-a";
 const SESSION_B = "session-dashboard-b";
 const DEFAULT_WIDGET_IDS = [
   "overall-oee-overview",
-  "oee-trend-quarterly-2026",
-  "oee-trend-monthly-2026",
   "oee-trend-weekly-2026",
+  "oee-trend-monthly-2026",
+  "oee-trend-quarterly-2026",
   "oee-extremes-table-2026",
   "mt-st-components-2026",
   "improvement-actions-week-2026",
@@ -30,7 +31,7 @@ const DEFAULT_WIDGET_IDS = [
 function fixture(t: TestContext): {
   readonly directory: string;
   readonly artifacts: ArtifactStore;
-  readonly dashboard: DashboardModule;
+  readonly dashboard: SessionDashboardStore;
 } {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-dashboard-"));
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
@@ -40,7 +41,7 @@ function fixture(t: TestContext): {
   return {
     directory,
     artifacts,
-    dashboard: new DashboardModule(artifacts),
+    dashboard: new SessionDashboardStore(artifacts, createDefaultDashboard),
   };
 }
 
@@ -98,7 +99,7 @@ test("initializes and restores the pinned nine-card dashboard per session", (t) 
   assert.deepEqual(first.widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
   assert.equal(first.widgets.every((widget) => widget.warnings.length > 0), true);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_A), first);
-  assert.deepEqual(new DashboardModule(artifacts).loadOrInitialize(SESSION_A), first);
+  assert.deepEqual(new SessionDashboardStore(artifacts, createDefaultDashboard).loadOrInitialize(SESSION_A), first);
 
   const document = JSON.parse(
     readFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), "utf8"),
@@ -255,7 +256,7 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
   assert.equal(overview.encoding.gauges.length, 5);
 
   const trends = state.widgets.slice(1, 4);
-  assert.deepEqual(trends.map((widget) => widget.data.length), [3, 9, 37]);
+  assert.deepEqual(trends.map((widget) => widget.data.length), [37, 9, 3]);
   for (const trend of trends) {
     assert.ok(trend.kind === "line");
     assert.deepEqual(trend.encoding.series.map((series) => series.column), [
@@ -264,7 +265,7 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
     assert.equal(trend.data.filter((row) => row["max_point"] !== null).length, 1);
     assert.equal(trend.data.filter((row) => row["min_point"] !== null).length, 1);
   }
-  assert.equal(trends[2]?.data[0]?.["period_label"], "2026-W00");
+  assert.equal(trends[0]?.data[0]?.["period_label"], "2026-W00");
   assert.equal(state.widgets[4]?.data.length, 6);
   assert.equal(state.widgets[5]?.kind, "bar");
   const actions = state.widgets.slice(6);
@@ -290,7 +291,7 @@ test("an edit before initialization uses the pinned baseline and reset restores 
     widgetId: "oee-trend-weekly-2026",
   }).dashboard;
   assert.equal(edited.widgets.length, 8);
-  const restarted = new DashboardModule(artifacts);
+  const restarted = new SessionDashboardStore(artifacts, createDefaultDashboard);
   assert.deepEqual(restarted.loadOrPreview(SESSION_A), edited);
   assert.deepEqual(restarted.loadOrInitialize(SESSION_B), preview);
   const reset = restarted.apply(SESSION_A, { action: "reset", baseRevision: 1 }).dashboard;
@@ -307,7 +308,7 @@ test("keeps existing saved dashboards and their reset baseline", (t) => {
     baseline,
     current,
   }));
-  const restarted = new DashboardModule(artifacts);
+  const restarted = new SessionDashboardStore(artifacts, createDefaultDashboard);
   assert.deepEqual(restarted.loadOrPreview(SESSION_A), current);
   assert.deepEqual(restarted.loadOrInitialize(SESSION_A), current);
   assert.deepEqual(

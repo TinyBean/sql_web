@@ -1,8 +1,9 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
-import { assertReadOnlyQuery } from "../../src/server/database/database.ts";
-import { getDefaultTestOeeSql, getTestOeeSqlExpressions } from "../../src/server/skills/test-oee-calculator/assets/test-oee-calculator.ts";
-import { addDays, dashboardPeriods, weekLabel, type DatePeriod } from "../../src/server/tool/dashboard-periods.ts";
-import type { DashboardRow, DashboardState } from "../../src/shared/dashboard.ts";
+import { assertReadOnlyQuery } from "../../../database/database.ts";
+import { getDefaultTestOeeSql, getTestOeeSqlExpressions } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { dashboardPeriods, weekLabel } from "../periods.ts";
+import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
+import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
 
 export const PERIOD_KEYS = ["week", "month", "quarter"] as const;
 export type PeriodKey = typeof PERIOD_KEYS[number];

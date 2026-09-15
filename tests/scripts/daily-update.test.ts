@@ -5,11 +5,15 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { buildDefaultDashboard } from "../../scripts/database/build-default-dashboard.ts";
+import { buildDefaultDashboard } from "../../src/server/dashboard/default/build.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
-import { dailyUpdatePlan, runDailyUpdate } from "../../scripts/database/daily-update.ts";
-import { addDays, dashboardPeriods, latestClosedBusinessDate, weekLabel } from "../../src/server/tool/dashboard-periods.ts";
-import { createDefaultDashboard } from "../../src/server/tool/default-dashboard.ts";
+import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
+import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
+import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
+import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
+import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/periods.ts";
+import { addDays, latestClosedBusinessDate } from "../../src/server/database/business-dates.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import type { SyncOptions, SyncResult } from "../../scripts/database/oee-data-store.ts";
 
@@ -53,8 +57,9 @@ test("resolves closed business dates at 08:30 and across month, year, and leap d
 test("aligns the two API ranges and includes the previous year's complete week", () => {
   const plan = dailyUpdatePlan(["--dry-run"], new Date("2027-01-02T01:00:00Z"));
   assert.equal(plan.dryRun, true);
-  assert.deepEqual(plan.periods.trend, { start: "2027-01-01", end: "2027-01-01" });
-  assert.deepEqual(plan.periods.week, { start: "2026-12-21", end: "2026-12-27" });
+  assert.equal(plan.syncStart, "2026-12-21");
+  assert.deepEqual(dashboardPeriods(plan.throughDate).trend, { start: "2027-01-01", end: "2027-01-01" });
+  assert.deepEqual(dashboardPeriods(plan.throughDate).week, { start: "2026-12-21", end: "2026-12-27" });
   assert.deepEqual(plan.requests, [
     { dataset: "availability", initialStartDate: "2026-12-21", throughDate: "2027-01-01", overlapDays: 2 },
     { dataset: "dut_utilization", initialStartDate: "2026-12-22", throughDate: "2027-01-02", overlapDays: 2 },
@@ -98,7 +103,7 @@ test("generates nine live cards using canonical calculations, stable extrema, an
   assert.equal(overview.data[0]?.["overall_oee_percent"], 20);
   assert.match(overview.encoding.description ?? "", /4\/16/u);
   assert.ok(overview.warnings.some((warning) => warning.includes("NULL")));
-  const weekly = state.widgets[3]!;
+  const weekly = state.widgets[1]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
     ["2026-W00", 20, 20, 20], ["2026-W01", 20, null, null],
   ]);
@@ -118,7 +123,7 @@ test("empty and cross-year dashboards contain null metrics and accurate period w
   assert.equal(empty.widgets[4]?.data.length, 0);
   assert.equal(empty.widgets[6]?.data.length, 0);
   assert.ok(empty.widgets[0]?.warnings.some((warning) => warning.includes("2027-01-01")));
-  assert.equal(empty.widgets[3]?.data[0]?.["period_label"], "2027-W00");
+  assert.equal(empty.widgets[1]?.data[0]?.["period_label"], "2027-W00");
   assert.match(empty.widgets[6]!.subtitle, /2026-12-21 至 2026-12-27/u);
   assert.match(empty.widgets[1]!.title, /2027/u);
   assert.match(empty.widgets[7]!.warnings.join(" "), /部分月/u);
@@ -133,7 +138,11 @@ test("hard sync failures preserve the published default and still attempt the ot
   writeFileSync(config.defaultDashboardPath, "old snapshot");
   const requests: SyncOptions[] = [];
   let closed = false;
-  const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), logger, {
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
+    async generate() { assert.fail("must not build"); },
+    publish() { assert.fail("must not publish"); },
+  })]);
+  const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), registry, logger, {
     openStore: () => ({
       async sync(options) {
         requests.push(options);
@@ -142,24 +151,19 @@ test("hard sync failures preserve the published default and still attempt the ot
       },
       close() { closed = true; },
     }),
-    async generate() { throw new Error("must not build"); },
-    publish() { throw new Error("must not publish"); },
   });
   assert.equal(closed, true);
   assert.equal(requests.length, 2);
   assert.equal(outcome.status, "failed");
-  assert.equal(outcome.published, false);
+  assert.equal(outcome.dashboards[0]?.published, false);
+  assert.equal(outcome.dashboards[0]?.status, "skipped");
   assert.equal(readFileSync(config.defaultDashboardPath, "utf8"), "old snapshot");
 });
 
 test("sync warnings publish all nine cards with data coverage warnings", async (t) => {
   const { config } = fixture(t);
   let published = false;
-  const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), logger, {
-    openStore: () => ({
-      async sync(options) { return result("completed_with_warnings", options.dataset as "availability" | "dut_utilization"); },
-      close() {},
-    }),
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
     async generate(config, date, now, warnings) {
       return { state: buildDefaultDashboard(config.databasePath, date, now, warnings),
         analysisStatus: "completed", analysisReason: null, analysisRunId: "test", analysisArtifactDir: "test" };
@@ -170,6 +174,12 @@ test("sync warnings publish all nine cards with data coverage warnings", async (
       assert.ok(state.widgets[0]?.warnings.some((warning) => warning.includes("同步存在")));
       published = true;
     },
+  })]);
+  const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), registry, logger, {
+    openStore: () => ({
+      async sync(options) { return result("completed_with_warnings", options.dataset as "availability" | "dut_utilization"); },
+      close() {},
+    }),
   });
   assert.equal(outcome.status, "completed_with_warnings");
   assert.equal(published, true);
@@ -177,14 +187,19 @@ test("sync warnings publish all nine cards with data coverage warnings", async (
 
 test("calculation failures never publish a partial dashboard", async (t) => {
   const { config } = fixture(t);
-  await assert.rejects(runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), logger, {
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
+    async generate() { throw new Error("calculation failed"); },
+    publish() { assert.fail("must not publish"); },
+  })]);
+  const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), registry, logger, {
     openStore: () => ({
       async sync(options) { return result("completed", options.dataset as "availability" | "dut_utilization"); },
       close() {},
     }),
-    async generate() { throw new Error("calculation failed"); },
-    publish() { assert.fail("must not publish"); },
-  }), /calculation failed/u);
+  });
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.dashboards[0]?.published, false);
+  assert.equal(outcome.dashboards[0]?.reason, "calculation failed");
 });
 
 test("data commands share storage overrides and environment precedence", (t) => {

@@ -3,17 +3,12 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 import type { OeeDataStoreOptions } from "./oee-data-store.ts";
 
+import type { DefaultDashboardAnalysisConfig } from "../../src/server/dashboard/default/config.ts";
+
 export interface DataCommandConfig extends OeeDataStoreOptions {
   readonly defaultDashboardPath: string;
   readonly logDir: string;
-  readonly analysis: {
-    readonly cwd: string;
-    readonly agentDir: string;
-    readonly artifactDir: string;
-    readonly provider: string;
-    readonly model: string;
-    readonly timeoutMs: number;
-  };
+  readonly analysis: DefaultDashboardAnalysisConfig;
 }
 
 export function loadDataCommandConfig(

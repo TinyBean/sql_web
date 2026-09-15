@@ -3,9 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { readDefaultDashboard, writeDefaultDashboard } from "../../src/server/tool/default-dashboard-store.ts";
-import { createDefaultDashboard } from "../../src/server/tool/default-dashboard.ts";
-import { DashboardModule } from "../../src/server/tool/dashboard.ts";
+import { readDefaultDashboard, writeDefaultDashboard } from "../../src/server/dashboard/default/store.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
+import { SessionDashboardStore } from "../../src/server/dashboard/session-store.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 
 test("new defaults affect only new sessions, including when an empty session is already open", (t) => {
@@ -13,7 +13,7 @@ test("new defaults affect only new sessions, including when an empty session is 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, "default.json");
   const artifacts = new ArtifactStore(path.join(root, "artifacts"));
-  const dashboard = new DashboardModule(artifacts, file);
+  const dashboard = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
   const first = createDefaultDashboard();
   writeDefaultDashboard(file, first);
   const preview = dashboard.loadOrPreview("empty-session-a");
@@ -23,7 +23,7 @@ test("new defaults affect only new sessions, including when an empty session is 
   assert.deepEqual(dashboard.loadOrPreview("empty-session-a"), preview);
   assert.deepEqual(dashboard.loadOrPreview("empty-session-b"), second);
   const edited = dashboard.apply("empty-session-a", { action: "remove", baseRevision: 0, widgetId: first.widgets[0]!.id });
-  const restarted = new DashboardModule(artifacts, file);
+  const restarted = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
   assert.deepEqual(restarted.loadOrPreview("empty-session-a"), edited.dashboard);
   assert.deepEqual(restarted.apply("empty-session-a", { action: "reset", baseRevision: 1 }).dashboard, { ...first, revision: 2 });
   assert.deepEqual(restarted.loadOrInitialize("empty-session-c"), second);

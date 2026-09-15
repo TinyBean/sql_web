@@ -16,7 +16,7 @@ import {
 } from "./code-interpreter.ts";
 import type { AppDatabase } from "../database/database.ts";
 import type { QueryResult } from "../database/database.ts";
-import type { DashboardModule } from "./dashboard.ts";
+import type { SessionDashboardStore } from "../dashboard/session-store.ts";
 import {
   createDashboardTools,
   DASHBOARD_AGENT_TOOL_NAMES,
@@ -105,7 +105,7 @@ export function activeAgentToolNames(
 }
 
 export interface DashboardToolContext {
-  readonly dashboard: DashboardModule;
+  readonly dashboard: SessionDashboardStore;
   readonly sessionId: string;
 }
 

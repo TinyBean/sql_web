@@ -1,8 +1,8 @@
-import { parseDashboardState, type DashboardState } from "../../shared/dashboard.ts";
+import { parseDashboardState, type DashboardState } from "../../../shared/dashboard.ts";
 
 // Frozen from session 01a0a299-72d4-7826-95ea-f521e796e3fc, revision 19:
 // .data/sessions/2026-09-15T01-06-00-532Z_01a0a299-72d4-7826-95ea-f521e796e3fc.jsonl
-// Preserve its card order, sizes, data, labels, warnings, and original timestamps.
+// Trend cards use week/month/quarter order; snapshot metrics and timestamps are preserved.
 // Only the revision starts over for a new session. No source-session files are
 // needed at runtime, and opening the dashboard never refreshes these snapshots.
 const DEFAULT_DASHBOARD: DashboardState = {
@@ -65,148 +65,6 @@ const DEFAULT_DASHBOARD: DashboardState = {
       "warnings": [
         "514 个日类型中 484 个可计算，30 个因缺 Availability 或 DUT 数据未计入平均",
         "2026-09 为截至 09-14 的部分月数据"
-      ]
-    },
-    {
-      "id": "oee-trend-quarterly-2026",
-      "kind": "line",
-      "title": "OEE 季趋势（2026 年至今）",
-      "subtitle": "日 OEE 等权平均，Q3 为截至 09-14 的部分季度",
-      "size": "wide",
-      "data": [
-        {
-          "period_label": "2026-Q1",
-          "oee_percent": 54.06,
-          "max_point": null,
-          "min_point": 54.06
-        },
-        {
-          "period_label": "2026-Q2",
-          "oee_percent": 58.44,
-          "max_point": 58.44,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-Q3",
-          "oee_percent": 57.95,
-          "max_point": null,
-          "min_point": null
-        }
-      ],
-      "encoding": {
-        "category": "period_label",
-        "series": [
-          {
-            "name": "季 OEE",
-            "column": "oee_percent"
-          },
-          {
-            "name": "最高点",
-            "column": "max_point"
-          },
-          {
-            "name": "最低点",
-            "column": "min_point"
-          }
-        ]
-      },
-      "format": {
-        "unit": "%",
-        "precision": 2
-      },
-      "metricDefinition": "季 OEE = 该季度内可计算的 MT/ST 日 OEE 等权平均×100；最高/最低点仅在可计算季度中取值。最高 2026-Q2（58.44%），最低 2026-Q1（54.06%）",
-      "warnings": [
-        "Q2、Q3 存在缺数据日类型（Q2 172/182、Q3 132/152 可计算），平均仅覆盖可计算日",
-        "Q3 仅含 07-01 至 09-14，为部分季度数据"
-      ]
-    },
-    {
-      "id": "oee-trend-monthly-2026",
-      "kind": "line",
-      "title": "OEE 月趋势（2026 年至今）",
-      "subtitle": "日 OEE 等权平均，2026-01 至 2026-09（9 月为部分月）",
-      "size": "wide",
-      "data": [
-        {
-          "period_label": "2026-01",
-          "oee_percent": 52.4,
-          "max_point": null,
-          "min_point": 52.4
-        },
-        {
-          "period_label": "2026-02",
-          "oee_percent": 53.9,
-          "max_point": null,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-03",
-          "oee_percent": 55.86,
-          "max_point": null,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-04",
-          "oee_percent": 58.85,
-          "max_point": null,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-05",
-          "oee_percent": 57.57,
-          "max_point": null,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-06",
-          "oee_percent": 58.97,
-          "max_point": null,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-07",
-          "oee_percent": 57.58,
-          "max_point": null,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-08",
-          "oee_percent": 59.04,
-          "max_point": 59.04,
-          "min_point": null
-        },
-        {
-          "period_label": "2026-09",
-          "oee_percent": 56.04,
-          "max_point": null,
-          "min_point": null
-        }
-      ],
-      "encoding": {
-        "category": "period_label",
-        "series": [
-          {
-            "name": "月 OEE",
-            "column": "oee_percent"
-          },
-          {
-            "name": "最高点",
-            "column": "max_point"
-          },
-          {
-            "name": "最低点",
-            "column": "min_point"
-          }
-        ]
-      },
-      "format": {
-        "unit": "%",
-        "precision": 2
-      },
-      "metricDefinition": "月 OEE = 该月内可计算的 MT/ST 日 OEE 等权平均×100；最高/最低点仅在可计算月份中取值。最高 2026-08（59.04%），最低 2026-01（52.40%）",
-      "warnings": [
-        "部分月份存在缺数据日类型（如 4/5/6/7/8/9 月），平均仅覆盖可计算日",
-        "2026-09 仅含 09-01 至 09-14，为部分月数据"
       ]
     },
     {
@@ -466,6 +324,148 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "残周 2026-W37（仅 09-14 一天）无可计算 OEE，未纳入趋势与极值",
         "W00 为仅 4 天的元旦残周，与其他完整周对比时需注意天数差异",
         "周标签采用周一为起始的 %W 编号"
+      ]
+    },
+    {
+      "id": "oee-trend-monthly-2026",
+      "kind": "line",
+      "title": "OEE 月趋势（2026 年至今）",
+      "subtitle": "日 OEE 等权平均，2026-01 至 2026-09（9 月为部分月）",
+      "size": "wide",
+      "data": [
+        {
+          "period_label": "2026-01",
+          "oee_percent": 52.4,
+          "max_point": null,
+          "min_point": 52.4
+        },
+        {
+          "period_label": "2026-02",
+          "oee_percent": 53.9,
+          "max_point": null,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-03",
+          "oee_percent": 55.86,
+          "max_point": null,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-04",
+          "oee_percent": 58.85,
+          "max_point": null,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-05",
+          "oee_percent": 57.57,
+          "max_point": null,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-06",
+          "oee_percent": 58.97,
+          "max_point": null,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-07",
+          "oee_percent": 57.58,
+          "max_point": null,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-08",
+          "oee_percent": 59.04,
+          "max_point": 59.04,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-09",
+          "oee_percent": 56.04,
+          "max_point": null,
+          "min_point": null
+        }
+      ],
+      "encoding": {
+        "category": "period_label",
+        "series": [
+          {
+            "name": "月 OEE",
+            "column": "oee_percent"
+          },
+          {
+            "name": "最高点",
+            "column": "max_point"
+          },
+          {
+            "name": "最低点",
+            "column": "min_point"
+          }
+        ]
+      },
+      "format": {
+        "unit": "%",
+        "precision": 2
+      },
+      "metricDefinition": "月 OEE = 该月内可计算的 MT/ST 日 OEE 等权平均×100；最高/最低点仅在可计算月份中取值。最高 2026-08（59.04%），最低 2026-01（52.40%）",
+      "warnings": [
+        "部分月份存在缺数据日类型（如 4/5/6/7/8/9 月），平均仅覆盖可计算日",
+        "2026-09 仅含 09-01 至 09-14，为部分月数据"
+      ]
+    },
+    {
+      "id": "oee-trend-quarterly-2026",
+      "kind": "line",
+      "title": "OEE 季趋势（2026 年至今）",
+      "subtitle": "日 OEE 等权平均，Q3 为截至 09-14 的部分季度",
+      "size": "wide",
+      "data": [
+        {
+          "period_label": "2026-Q1",
+          "oee_percent": 54.06,
+          "max_point": null,
+          "min_point": 54.06
+        },
+        {
+          "period_label": "2026-Q2",
+          "oee_percent": 58.44,
+          "max_point": 58.44,
+          "min_point": null
+        },
+        {
+          "period_label": "2026-Q3",
+          "oee_percent": 57.95,
+          "max_point": null,
+          "min_point": null
+        }
+      ],
+      "encoding": {
+        "category": "period_label",
+        "series": [
+          {
+            "name": "季 OEE",
+            "column": "oee_percent"
+          },
+          {
+            "name": "最高点",
+            "column": "max_point"
+          },
+          {
+            "name": "最低点",
+            "column": "min_point"
+          }
+        ]
+      },
+      "format": {
+        "unit": "%",
+        "precision": 2
+      },
+      "metricDefinition": "季 OEE = 该季度内可计算的 MT/ST 日 OEE 等权平均×100；最高/最低点仅在可计算季度中取值。最高 2026-Q2（58.44%），最低 2026-Q1（54.06%）",
+      "warnings": [
+        "Q2、Q3 存在缺数据日类型（Q2 172/182、Q3 132/152 可计算），平均仅覆盖可计算日",
+        "Q3 仅含 07-01 至 09-14，为部分季度数据"
       ]
     },
     {

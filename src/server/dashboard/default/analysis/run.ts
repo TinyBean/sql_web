@@ -2,9 +2,9 @@ import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { AppLogger } from "../../src/server/logger.ts";
-import { parseDashboardState, type DashboardState } from "../../src/shared/dashboard.ts";
-import type { DataCommandConfig } from "../database/data-command-config.ts";
+import type { AppLogger } from "../../../logger.ts";
+import { parseDashboardState, type DashboardState } from "../../../../shared/dashboard.ts";
+import type { DefaultDashboardGenerationConfig } from "../config.ts";
 import type { AnalysisWorkerRequest } from "./worker.ts";
 import { analysisUnavailable } from "./report.ts";
 
@@ -17,7 +17,7 @@ export interface DailyAnalysisResult {
 }
 
 export async function generateAnalyzedDashboard(
-  config: DataCommandConfig, throughDate: string, now: Date, warnings: readonly string[], logger: AppLogger,
+  config: DefaultDashboardGenerationConfig, throughDate: string, now: Date, warnings: readonly string[], logger: AppLogger,
   runId: string = randomUUID(), workerUrl = new URL("./worker.ts", import.meta.url),
 ): Promise<DailyAnalysisResult> {
   if (!/^[a-zA-Z0-9_-]+$/u.test(runId)) throw new Error("无效的分析运行 ID");
@@ -47,7 +47,8 @@ export async function generateAnalyzedDashboard(
     let killTimer: NodeJS.Timeout | undefined;
     const child = fork(workerUrl, [], {
       cwd: config.analysis.cwd, execPath: process.execPath,
-      execArgv: workerUrl.pathname.endsWith(".ts") ? ["--import", "tsx"] : [],
+      // Resolve from this module: analysis may run with a different working directory.
+      execArgv: workerUrl.pathname.endsWith(".ts") ? ["--import", import.meta.resolve("tsx")] : [],
       stdio: ["ignore", "ignore", "pipe", "ipc"],
     });
     const stop = (): void => {

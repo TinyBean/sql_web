@@ -9,10 +9,10 @@ import {
 } from "../../shared/dashboard.ts";
 import {
   DashboardInputError,
-  DashboardModule,
+  SessionDashboardStore,
   type DashboardCommand,
   type DashboardWidgetRequest,
-} from "./dashboard.ts";
+} from "../dashboard/session-store.ts";
 
 export const DASHBOARD_AGENT_TOOL_NAMES = ["get_dashboard", "update_dashboard"] as const;
 
@@ -238,7 +238,7 @@ function widgetRequest(value: {
   } as DashboardWidgetRequest;
 }
 
-export function createDashboardTools(dashboard: DashboardModule, sessionId: string) {
+export function createDashboardTools(dashboard: SessionDashboardStore, sessionId: string) {
   const getDashboard = defineTool({
     name: "get_dashboard",
     label: "读取当前看板",

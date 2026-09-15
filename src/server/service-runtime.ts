@@ -8,6 +8,7 @@ import type { WebDatabasePort, WebSessionPort } from "./http-server.ts";
 import type { AppLogger } from "./logger.ts";
 import { ArtifactStore } from "./tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "./tool/code-interpreter.ts";
+import { createDashboardRegistry } from "./dashboard/registered.ts";
 
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -63,18 +64,20 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
     ...config.codeInterpreter,
     projectRoot: config.projectRoot,
   }),
-  openSessions: ({ database, artifacts, codeInterpreter, config, logger }) =>
-    AgentSessionStore.open({
+  openSessions: ({ database, artifacts, codeInterpreter, config, logger }) => {
+    const dashboards = createDashboardRegistry({ defaultDashboardPath: config.defaultDashboardPath, logger });
+    return AgentSessionStore.open({
       database: database as AppDatabase,
       artifacts: artifacts as ArtifactStore,
       codeInterpreter: codeInterpreter as CodeInterpreterRuntime,
       cwd: config.projectRoot,
       sessionDir: config.sessionDir,
       agentDir: config.agentDir,
-      defaultDashboardPath: config.defaultDashboardPath,
+      loadInitialDashboard: () => dashboards.loadInitial(),
       model: config.model,
       logger,
-    }),
+    });
+  },
   createServer: ({ database, sessions, config, logger }) => createWebServer({
     database,
     sessions,

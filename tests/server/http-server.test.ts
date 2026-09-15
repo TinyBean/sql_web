@@ -26,7 +26,7 @@ import {
 } from "../../src/server/http-server.ts";
 import type { ChatImage, ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
-import { DashboardConflictError } from "../../src/server/tool/dashboard.ts";
+import { DashboardConflictError } from "../../src/server/dashboard/session-store.ts";
 import { generatedImageMarkdown } from "../../src/shared/image-references.ts";
 
 const projectRoot = process.cwd();

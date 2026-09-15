@@ -31,9 +31,8 @@ import {
   type DashboardWidgetSize,
 } from "../../shared/dashboard.ts";
 import type { QueryResult } from "../database/database.ts";
-import type { ArtifactStore, SessionArtifactStore } from "./artifact-store.ts";
-import type { AppLogger } from "../logger.ts";
-import { readDefaultDashboard } from "./default-dashboard-store.ts";
+import type { ArtifactStore, SessionArtifactStore } from "../tool/artifact-store.ts";
+import type { InitialDashboardProvider } from "./definition.ts";
 
 const DASHBOARD_FILENAME = "dashboard.json";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
@@ -281,16 +280,14 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
     left.every((value) => right.includes(value));
 }
 
-export class DashboardModule {
+export class SessionDashboardStore {
   readonly #artifacts: ArtifactStore;
-  readonly #defaultPath: string | undefined;
-  readonly #logger: Pick<AppLogger, "info" | "error"> | undefined;
+  readonly #loadInitialDashboard: InitialDashboardProvider;
   readonly #previews = new Map<string, DashboardState>();
 
-  constructor(artifacts: ArtifactStore, defaultPath?: string, logger?: Pick<AppLogger, "info" | "error">) {
+  constructor(artifacts: ArtifactStore, loadInitialDashboard: InitialDashboardProvider) {
     this.#artifacts = artifacts;
-    this.#defaultPath = defaultPath;
-    this.#logger = logger;
+    this.#loadInitialDashboard = loadInitialDashboard;
   }
 
   forget(sessionId: string): void {
@@ -304,7 +301,8 @@ export class DashboardModule {
   #initialState(sessionId: string): DashboardState {
     let state = this.#previews.get(sessionId);
     if (!state) {
-      state = readDefaultDashboard(this.#defaultPath, this.#logger);
+      state = parseDashboardState(this.#loadInitialDashboard(sessionId));
+      if (state.revision !== 0) throw new DashboardInputError("初始看板 revision 必须为 0");
       this.#previews.set(sessionId, state);
     }
     return parseDashboardState(state);

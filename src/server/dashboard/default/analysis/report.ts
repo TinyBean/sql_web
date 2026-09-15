@@ -1,6 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
-import { parseDashboardState, type DashboardRow, type DashboardState } from "../../src/shared/dashboard.ts";
+import { parseDashboardState, type DashboardRow, type DashboardState } from "../../../../shared/dashboard.ts";
 import { PERIOD_KEYS, type AnalysisContext, type Evidence, type PeriodKey } from "./evidence.ts";
 
 const text = Type.String({ minLength: 1, maxLength: 1800 });

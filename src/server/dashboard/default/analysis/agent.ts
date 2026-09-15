@@ -4,9 +4,9 @@ import {
   type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { assertModelInLocalCatalog } from "../../src/server/agent/local-model-catalog.ts";
-import { loadAgentSkillCatalog } from "../../src/server/agent/skill-catalog.ts";
-import type { DataCommandConfig } from "../database/data-command-config.ts";
+import { assertModelInLocalCatalog } from "../../../agent/local-model-catalog.ts";
+import { loadAgentSkillCatalog } from "../../../agent/skill-catalog.ts";
+import type { DefaultDashboardAnalysisConfig } from "../config.ts";
 import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext, type Evidence } from "./evidence.ts";
 import { AnalysisReportSchema, PeriodKeySchema, validateAnalysisReport } from "./report.ts";
 
@@ -61,7 +61,7 @@ ${JSON.stringify({ throughDate: context.throughDate, periods: context.periods, c
 }
 
 export async function runAnalysisAgent(
-  config: DataCommandConfig["analysis"], context: AnalysisContext, evidence: AnalysisEvidence,
+  config: DefaultDashboardAnalysisConfig, context: AnalysisContext, evidence: AnalysisEvidence,
   onEvent: (event: Record<string, unknown>) => void,
   onReport: (result: ReturnType<typeof validateAnalysisReport>) => void,
 ): Promise<void> {

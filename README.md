@@ -10,6 +10,7 @@ src/
 ├── server/
 │   ├── agent/       # Agent 会话与模型配置
 │   ├── database/    # SQLite 只读查询
+│   ├── dashboard/   # 看板定义、注册表、快照与会话状态；default/ 为默认看板实现
 │   ├── skills/      # 业务技能、规则参考与技能脚本
 │   │   └── test-oee-calculator/
 │   │       ├── assets/      # 工具定义、计算器与数据库辅助代码
@@ -36,13 +37,45 @@ scripts/
 新会话使用固定的 9 张看板卡片，来源于会话 `01a0a299-72d4-7826-95ea-f521e796e3fc` 的最终看板（revision 19），按以下顺序展示：
 
 1. Overall OEE 概览。
-2. OEE 季趋势、月趋势、周趋势（含最高/最低点，周编号从 W00 开始）。
+2. OEE 周趋势、月趋势、季趋势（含最高/最低点，周编号从 W00 开始）。
 3. OEE 极值明细、MT/ST 三组成项对比。
 4. 周、月、季改善措施与责任人清单，每张清单包含 MT/ST 两类。
 
-卡片模板及首次部署的兜底快照保存在 `src/server/tool/default-dashboard.ts`。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用内置快照（业务数据截至 2026-09-14）。原会话的 JSONL 和产物文件不是运行时依赖。
+当前看板是 ID 为 `default` 的看板模块。卡片模板及首次部署的兜底快照保存在 `src/server/dashboard/default/template.ts`，周期、计算、Agent 分析和发布逻辑也在该模块内。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用内置快照（业务数据截至 2026-09-14）。原会话的 JSONL 和产物文件不是运行时依赖。
 
 新会话首次展示时锁定当时的默认版本，从 revision 0 开始；首次保存时将其写入该会话的 baseline 和 current，重置会恢复该会话的 baseline。已打开的空会话也保留其初始版本，且仍不创建持久化产物。已有会话可通过对话更新自己的卡片。
+
+### 新增看板与用户选择
+
+看板通过 `src/server/dashboard/registered.ts` 显式注册，网站和每日任务共用该注册入口。每个 `DashboardDefinition` 提供唯一 `id`、`loadInitial()` 和可选的 `update` 策略；ID 只能包含小写字母、数字、下划线和连字符，以字母开头，最多 64 个字符。重复或未知 ID 会报错，未指定 ID 时选择 `default`。
+
+新增看板时，在独立目录中实现定义并加入注册表。快照使用各自的文件路径，例如 `.data/dashboards/production.json`；`readDashboardSnapshot` / `writeDashboardSnapshot` 提供通用结构校验、大小限制和原子发布，不要求固定卡片数量。初始快照 revision 必须为 0；文件缺失时使用什么兜底内容、额外业务校验及分析产物目录由各模块维护。
+
+以下示例展示每周更新策略；`buildProductionDashboard` 由该看板实现，负责在只读数据库事务中生成完整的 `DashboardState`：
+
+```ts
+const productionDashboard: DashboardDefinition = {
+  id: "production",
+  loadInitial: () => readDashboardSnapshot(snapshotPath),
+  update: {
+    plan({ throughDate }) {
+      // 截止业务日为周日时更新，即通常在周一的每日任务中执行。
+      const due = new Date(throughDate + "T00:00:00Z").getUTCDay() === 0;
+      return { action: due ? "run" : "skip", reason: due ? null : "本周无需更新", outputPath: snapshotPath };
+    },
+    async run(context) {
+      const { buildProductionDashboard } = await import("./build.ts");
+      const state = await buildProductionDashboard(context);
+      writeDashboardSnapshot(snapshotPath, state);
+      return { status: "completed", published: true, dataAsOf: state.dataAsOf, reason: null };
+    },
+  },
+};
+```
+
+`plan(context)` 必须无副作用，不访问 API 或数据库、不写文件和日志、不启动 Agent；dry-run 只调用该方法。`run(context)` 接收数据库路径、截止业务日、运行时间、同步警告、运行 ID 和日志对象，只能只读访问数据库；生成和校验成功后再发布。模块若有自己的分析或缓存文件，使用独立目录以避免相同运行 ID 下相互覆盖。省略 `update` 的看板仅用作初始模板。
+
+会话层使用注入的 `loadInitialDashboard(sessionId)` 获取初始快照。当前服务组装处传入 `() => dashboards.loadInitial()`；后续用户系统可在这里根据会话所属用户的配置调用 `dashboards.loadInitial(dashboardId)`，无需改动卡片编辑、版本冲突或重置逻辑。本次不增加用户存储、登录或看板选择界面，HTTP 契约及历史会话文件格式保持兼容。
 
 ## 每日自动更新
 
@@ -58,9 +91,11 @@ npm run data:daily -- --through-date 2026-09-14
 
 任务串行同步 Availability 和 DUT，复用现有补缺口、失败窗口重试和最近两天刷新机制。DUT 接口的请求起止日期均比目标业务日期晚一天，两张事实表原始日期保持不变。数据范围覆盖截止业务日所属年份的 1 月 1 日至截止日，以及最近完整周（必要时包含上一年）。
 
-同步后，在同一个只读 SQLite 事务中重算 9 张卡片。趋势每年重新开始，周编号保持 `%W`；最高/最低点排除 NULL，按未舍入值比较，并列取最早期间。改善清单分别对应最近完整周、截止业务日所在月累计和季度累计；由临时 Agent 结合年内最低点与历史覆盖自主查询、判断并排序，不限制损失类别。顶层日期范围是年内趋势范围；部分周期、缺日和最新业务日未就绪会显示提示。
+数据库同步范围独立于看板配置，即使没有注册更新策略也照常同步。同步完成并关闭写入连接后，按注册顺序串行执行各看板策略。默认看板每次都更新，在同一个只读 SQLite 事务中重算 9 张卡片。趋势每年重新开始，周编号保持 `%W`；最高/最低点排除 NULL，按未舍入值比较，并列取最早期间。改善清单分别对应最近完整周、截止业务日所在月累计和季度累计；由临时 Agent 结合年内最低点与历史覆盖自主查询、判断并排序，不限制损失类别。顶层日期范围是年内趋势范围；部分周期、缺日和最新业务日未就绪会显示提示。
 
-两个接口均成功时，即使数据缺失也发布已有结果；缺失指标保留 NULL。任何接口硬失败或看板计算/验证/写入失败都会保留上次默认文件，已完成的数据库导入仍保留审计记录。全部卡片一次性原子发布，退出码为成功 `0`、失败 `1`、带警告完成 `2`。
+两个接口均成功时，即使数据缺失也继续执行看板策略并传递同步警告；默认看板发布已有结果，缺失指标保留 NULL。任何接口硬失败都会跳过全部看板，已完成的数据库导入仍保留审计记录。单个看板的计划、计算、验证或写入失败会保留其旧快照并继续更新后续看板，已发布的其他看板不回滚；每个看板的全部卡片一次性原子发布。
+
+命令结果包含 `database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、原因及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；策略正常跳过不计为警告。原有顶层 `published`、`dataAsOf` 和分析字段保留，始终映射默认看板的结果。dry-run 同时展示数据库请求与各看板的执行或跳过计划，不执行更新。
 
 ### 临时 Agent 改善分析
 
@@ -72,7 +107,7 @@ npm run data:daily -- --through-date 2026-09-14
 
 模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。内置快照也不再附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
 
-每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、结果、证据 ID）、`events.jsonl` 和有效的 `report.json`。结果增加 `analysisStatus`、`analysisReason`、`analysisRunId` 和产物路径；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
+每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、结果、证据 ID）、`events.jsonl` 和有效的 `report.json`。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和产物路径，CLI 也保留这些顶层兼容字段；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
 
 安装当前项目的每日 09:00 定时任务：
 

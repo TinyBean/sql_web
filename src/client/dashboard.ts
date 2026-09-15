@@ -127,20 +127,26 @@ function cartesianOption(widget: DashboardLineWidget | DashboardBarWidget): Reco
     },
     splitLine: { lineStyle: { color: "rgba(126, 151, 140, .12)" } },
   };
-  const series = widget.encoding.series.map((item, index) => ({
-    name: item.name,
-    type: widget.kind === "line" ? "line" : "bar",
-    data: widget.data.map((row) => numeric(row[item.column])),
-    connectNulls: false,
-    showSymbol: widget.data.length <= 20,
-    symbolSize: 6,
-    smooth: widget.kind === "line" ? 0.22 : false,
-    stack: widget.kind === "stacked-bar" ? "total" : undefined,
-    barMaxWidth: 24,
-    itemStyle: widget.kind === "line" ? undefined : { borderRadius: horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] },
-    lineStyle: { width: 2 },
-    areaStyle: widget.kind === "line" && index === 0 ? { opacity: 0.06 } : undefined,
-  }));
+  const series = widget.encoding.series.map((item, index) => {
+    const data = widget.data.map((row) => numeric(row[item.column]));
+    // Sparse series (such as extrema) need symbols even on a long trend.
+    const showSymbols = data.filter((value) => value !== null).length <= 20;
+    return {
+      name: item.name,
+      type: widget.kind === "line" ? "line" : "bar",
+      data,
+      connectNulls: false,
+      showSymbol: showSymbols,
+      showAllSymbol: showSymbols,
+      symbolSize: 6,
+      smooth: widget.kind === "line" ? 0.22 : false,
+      stack: widget.kind === "stacked-bar" ? "total" : undefined,
+      barMaxWidth: 24,
+      itemStyle: widget.kind === "line" ? undefined : { borderRadius: horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] },
+      lineStyle: { width: 2 },
+      areaStyle: widget.kind === "line" && index === 0 ? { opacity: 0.06 } : undefined,
+    };
+  });
   return {
     ...commonChartOption(widget),
     legend: {

@@ -29,7 +29,7 @@ import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.t
 import { DatabaseInputError } from "./database/database.ts";
 import { extractCodeInterpreterImages } from "./tool/code-interpreter-images.ts";
 import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
-import { DashboardConflictError, DashboardInputError } from "./tool/dashboard.ts";
+import { DashboardConflictError, DashboardInputError } from "./dashboard/session-store.ts";
 import {
   DASHBOARD_WIDGET_ID_PATTERN,
   MAX_DASHBOARD_WIDGETS,

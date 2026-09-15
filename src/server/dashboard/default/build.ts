@@ -1,8 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
-import { parseDashboardState, type DashboardRow, type DashboardState, type DashboardWidget } from "../../src/shared/dashboard.ts";
-import { getDefaultTestOeeSql } from "../../src/server/skills/test-oee-calculator/assets/test-oee-calculator.ts";
-import { createDefaultDashboard } from "../../src/server/tool/default-dashboard.ts";
-import { addDays, dashboardPeriods, weekLabel, type DatePeriod } from "../../src/server/tool/dashboard-periods.ts";
+import { parseDashboardState, type DashboardRow, type DashboardState, type DashboardWidget } from "../../../shared/dashboard.ts";
+import { getDefaultTestOeeSql } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { createDefaultDashboard } from "./template.ts";
+import { dashboardPeriods, weekLabel } from "./periods.ts";
+import { addDays, type DatePeriod } from "../../database/business-dates.ts";
 
 type Grain = "周" | "月" | "季";
 interface PeriodData extends DatePeriod {

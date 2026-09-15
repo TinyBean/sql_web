@@ -22,6 +22,8 @@
     "data:sync": "tsx scripts/oee-data.ts sync",
     "data:reimport": "tsx scripts/oee-data.ts reimport",
     "data:status": "tsx scripts/oee-data.ts status",
+    "data:daily": "bash scripts/oee-daily.sh",
+    "schedule:install": "node --import tsx scripts/install-daily-schedule.ts",
     "session:html": "node --import tsx scripts/session-to-html.ts",
     "start": "npm run build && node --enable-source-maps dist/src/server/main.js",
     "test": "npm run build && node --test dist/tests/**/*.test.js",

@@ -55,6 +55,7 @@ function fixtureConfig(directory: string): AppConfig {
     databasePath: path.join(directory, "database.sqlite"),
     sessionDir: path.join(directory, "sessions"),
     artifactDir: path.join(directory, "artifacts"),
+    defaultDashboardPath: path.join(directory, "default-dashboard.json"),
     publicDir: directory,
     agentDir: path.join(directory, "agent"),
     logDir: path.join(directory, "logs"),

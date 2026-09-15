@@ -71,6 +71,7 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
       cwd: config.projectRoot,
       sessionDir: config.sessionDir,
       agentDir: config.agentDir,
+      defaultDashboardPath: config.defaultDashboardPath,
       model: config.model,
       logger,
     }),

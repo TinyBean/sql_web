@@ -1,7 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { parseEnv } from "node:util";
+import { loadDataCommandConfig } from "./database/data-command-config.ts";
 import { DailyFileLogger } from "../src/server/logger.ts";
 import { initializeOeeDatabase } from "./database/initialize.ts";
 import {
@@ -46,19 +45,8 @@ async function main(): Promise<void> {
   if (!command) usage();
   const startedAt = Date.now();
   logger.info("oee.command.started", { stage: "command", command, args });
-  let fileEnvironment: Record<string, string | undefined> = {};
-  try {
-    fileEnvironment = parseEnv(readFileSync(path.join(projectRoot, ".env"), "utf8"));
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  const databasePath = path.resolve(
-    projectRoot,
-    process.env["SQL_WEB_DB_PATH"] ?? fileEnvironment["SQL_WEB_DB_PATH"] ?? ".data/database/oee.sqlite",
-  );
-  const apiBaseUrl = process.env["OEE_API_BASE_URL"] ?? fileEnvironment["OEE_API_BASE_URL"];
-  const apiUsername = process.env["API_USER"] ?? fileEnvironment["API_USER"];
-  const apiPassword = process.env["API_PWD"] ?? fileEnvironment["API_PWD"];
+  const config = loadDataCommandConfig(projectRoot);
+  const { databasePath } = config;
   if (command === "init") {
     initializeOeeDatabase(databasePath);
     console.log(JSON.stringify({ databasePath, initialized: true }, null, 2));
@@ -71,13 +59,7 @@ async function main(): Promise<void> {
     });
     return;
   }
-  const store = OeeDataStore.open({
-    databasePath,
-    ...(apiBaseUrl ? { apiBaseUrl } : {}),
-    ...(apiUsername !== undefined ? { apiUsername } : {}),
-    ...(apiPassword !== undefined ? { apiPassword } : {}),
-    logger,
-  });
+  const store = OeeDataStore.open({ ...config, logger });
 
   try {
     if (command === "import") {

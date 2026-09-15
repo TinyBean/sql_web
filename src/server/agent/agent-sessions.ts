@@ -54,6 +54,7 @@ export interface AgentSessionStoreOptions {
   readonly agentDir: string;
   readonly model: ModelSelection;
   readonly artifacts: ArtifactStore;
+  readonly defaultDashboardPath?: string;
   readonly codeInterpreter: CodeInterpreterRuntime;
   readonly logger?: AgentProcessLogger;
 }
@@ -513,7 +514,7 @@ export class AgentSessionStore {
   readonly #activeRequestIds = new Map<string, string>();
 
   private constructor(
-    { database, cwd, sessionDir, agentDir, model, artifacts, codeInterpreter, logger }:
+    { database, cwd, sessionDir, agentDir, model, artifacts, defaultDashboardPath, codeInterpreter, logger }:
       AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
     skillCatalog: AgentSkillCatalog,
@@ -524,7 +525,7 @@ export class AgentSessionStore {
     this.#agentDir = agentDir;
     this.#model = model;
     this.#artifacts = artifacts;
-    this.#dashboard = new DashboardModule(database, artifacts);
+    this.#dashboard = new DashboardModule(artifacts, defaultDashboardPath, logger);
     this.#codeInterpreter = codeInterpreter;
     this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter, true)];
     this.#skillCatalog = skillCatalog;
@@ -690,6 +691,7 @@ export class AgentSessionStore {
       }
     }
     await this.#artifacts.deleteSession(id);
+    this.#dashboard.forget(id);
     this.#logger.info("agent.session.deleted", {
       sessionId: id,
       persisted: filePath !== null,
@@ -782,6 +784,7 @@ export class AgentSessionStore {
     this.#activeRequestIds.clear();
     this.#sessions.clear();
     this.#sessionTimes.clear();
+    this.#dashboard.dispose();
     this.#codeInterpreter.dispose();
   }
 

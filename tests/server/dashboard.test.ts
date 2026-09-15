@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { DatabaseSync } from "node:sqlite";
 import { Value } from "typebox/value";
-import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import {
   DashboardConflictError,
   DashboardInputError,
@@ -13,34 +11,36 @@ import {
   type DashboardWidgetRequest,
 } from "../../src/server/tool/dashboard.ts";
 import { createDashboardTools } from "../../src/server/tool/dashboard-tools.ts";
-import { AppDatabase } from "../../src/server/database/database.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 
 const SESSION_A = "session-dashboard-a";
 const SESSION_B = "session-dashboard-b";
+const DEFAULT_WIDGET_IDS = [
+  "overall-oee-overview",
+  "oee-trend-quarterly-2026",
+  "oee-trend-monthly-2026",
+  "oee-trend-weekly-2026",
+  "oee-extremes-table-2026",
+  "mt-st-components-2026",
+  "improvement-actions-week-2026",
+  "improvement-actions-month-2026",
+  "improvement-actions-quarter-2026",
+];
 
 function fixture(t: TestContext): {
   readonly directory: string;
-  readonly databasePath: string;
-  readonly database: AppDatabase;
   readonly artifacts: ArtifactStore;
   readonly dashboard: DashboardModule;
 } {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-dashboard-"));
-  const databasePath = path.join(directory, "oee.sqlite");
-  initializeOeeDatabase(databasePath);
-  const database = AppDatabase.open({ filePath: databasePath });
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
   t.after(() => {
-    database.close();
     rmSync(directory, { recursive: true, force: true });
   });
   return {
     directory,
-    databasePath,
-    database,
     artifacts,
-    dashboard: new DashboardModule(database, artifacts),
+    dashboard: new DashboardModule(artifacts),
   };
 }
 
@@ -81,33 +81,30 @@ test("previews a default dashboard without creating session artifacts", (t) => {
 
   const first = dashboard.loadOrPreview(SESSION_A);
   assert.equal(first.revision, 0);
-  assert.equal(first.widgets.length, 4);
+  assert.deepEqual(first.widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
   assert.equal(existsSync(sessionDirectory), false);
 
   const second = dashboard.loadOrPreview(SESSION_A);
   assert.equal(second.revision, 0);
-  assert.equal(second.widgets.length, 4);
+  assert.deepEqual(second, first);
+  assert.notEqual(second.widgets[0]?.data, first.widgets[0]?.data);
   assert.equal(existsSync(sessionDirectory), false);
 });
 
-test("initializes and restores a frozen four-widget weekly OEE dashboard per session", (t) => {
+test("initializes and restores the pinned nine-card dashboard per session", (t) => {
   const { dashboard, artifacts } = fixture(t);
   const first = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(first.revision, 0);
-  assert.deepEqual(first.widgets.map((widget) => widget.id), [
-    "overall-oee-overview",
-    "availability-trend-7d",
-    "performance-trend-7d",
-    "yield-trend-7d",
-  ]);
+  assert.deepEqual(first.widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
   assert.equal(first.widgets.every((widget) => widget.warnings.length > 0), true);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_A), first);
+  assert.deepEqual(new DashboardModule(artifacts).loadOrInitialize(SESSION_A), first);
 
   const document = JSON.parse(
     readFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), "utf8"),
   ) as { baseline: unknown; current: unknown };
   assert.deepEqual(document.baseline, document.current);
-  assert.equal(dashboard.loadOrInitialize(SESSION_B).widgets.length, 4);
+  assert.deepEqual(dashboard.loadOrInitialize(SESSION_B), first);
 });
 
 test("materializes one session snapshot atomically and rejects stale revisions", (t) => {
@@ -243,84 +240,79 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("builds the seven-day Overall OEE overview and three factor trends", (t) => {
-  const { databasePath, dashboard } = fixture(t);
-  const writer = new DatabaseSync(databasePath);
-  const availability = writer.prepare(
-    "INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)",
-  );
-  const dut = writer.prepare(
-    "INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,touchdown_index,start_time,end_time,date) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-  );
-  const addDut = (machine: string, lot: string, step: string, date: string): void => {
-    dut.run(
-      machine,
-      lot,
-      "10",
-      "8",
-      "1st",
-      "20",
-      step,
-      "1",
-      `${date}T00:00:00.000Z`,
-      `${date}T00:00:10.000Z`,
-      date,
-    );
-  };
-  for (let day = 26; day <= 31; day += 1) {
-    const date = `2026-08-${String(day).padStart(2, "0")}`;
-    availability.run("MT-01", "P-MT", "Test(Normal)", "5000", date, 43_200);
-    availability.run("ST-01", "P-ST", "Test(Normal)", "7000", date, 43_200);
-    addDut("MT-01", "P-MT", "5000", date);
-    addDut("ST-01", "P-ST", "7000", date);
-  }
-  for (let day = 1; day <= 8; day += 1) {
-    const date = `2026-09-${String(day).padStart(2, "0")}`;
-    availability.run("MT-01", "P-MT", "Test(Normal)", "5000", date, 43_200);
-    availability.run("ST-01", "P-ST", "Test(Normal)", "7000", date, 43_200);
-    addDut("MT-01", "P-MT", "5000", date);
-    addDut("ST-01", "P-ST", "7000", date);
-  }
-  availability.run("MT-01", "P-MT", "Test(Normal)", "5000", "2026-09-09", 43_200);
-  writer.close();
-
-  const state = dashboard.loadOrInitialize("session-fixed-fixture");
-  assert.deepEqual(state.dateRange, { start: "2026-09-02", end: "2026-09-08" });
-  const overview = state.widgets.find((item) => item.id === "overall-oee-overview");
-  assert.equal(overview?.kind, "overview");
-  assert.deepEqual(overview?.data[0], {
-    overall_oee: 20,
-    availability: 50,
-    performance: 50,
-    yield: 80,
-  });
-  assert.equal(overview?.kind === "overview" ? overview.encoding.label : undefined, "7 日 Overall OEE");
-  assert.equal(
-    overview?.kind === "overview" ? overview.encoding.description : undefined,
-    "AVG(MT / ST DAILY OEE)",
-  );
-  assert.deepEqual(overview?.kind === "overview" ? overview.encoding.gauges : undefined, [
-    { name: "Availability", column: "availability" },
-    { name: "Performance", column: "performance" },
-    { name: "Yield", column: "yield" },
+test("preserves the source metrics and layout with empty fallback analysis", (t) => {
+  const { dashboard } = fixture(t);
+  const state = dashboard.loadOrInitialize(SESSION_A);
+  assert.equal(state.dataAsOf, "2026-09-15T02:03:34.568Z");
+  assert.deepEqual(state.dateRange, { start: "2026-07-01", end: "2026-09-14" });
+  assert.deepEqual(state.widgets.map((widget) => widget.size), [
+    "wide", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
   ]);
-  assert.equal(
-    overview?.metricDefinition,
-    "Overall OEE = Availability × Performance × Yield；周期值为可计算 MT/ST 日 OEE 的等权平均",
-  );
-  assert.equal(overview?.warnings.length, 0);
-  for (const id of [
-    "availability-trend-7d",
-    "performance-trend-7d",
-    "yield-trend-7d",
-  ]) {
-    const widget = state.widgets.find((item) => item.id === id);
-    assert.equal(widget?.data.length, 7);
-    assert.equal(widget?.warnings.length, 0);
+  const overview = state.widgets[0];
+  assert.ok(overview?.kind === "overview");
+  assert.equal(overview.data[0]?.["overall_oee_percent"], 56.676983039421856);
+  assert.equal(overview.encoding.label, "2026 年 Overall Test OEE（01-01 至 09-14）");
+  assert.equal(overview.encoding.gauges.length, 5);
+
+  const trends = state.widgets.slice(1, 4);
+  assert.deepEqual(trends.map((widget) => widget.data.length), [3, 9, 37]);
+  for (const trend of trends) {
+    assert.ok(trend.kind === "line");
+    assert.deepEqual(trend.encoding.series.map((series) => series.column), [
+      "oee_percent", "max_point", "min_point",
+    ]);
+    assert.equal(trend.data.filter((row) => row["max_point"] !== null).length, 1);
+    assert.equal(trend.data.filter((row) => row["min_point"] !== null).length, 1);
   }
-  assert.deepEqual(state.widgets.find((item) => item.id === "availability-trend-7d")?.data[0], {
-    date: "2026-09-02",
-    mt: 50,
-    st: 50,
-  });
+  assert.equal(trends[2]?.data[0]?.["period_label"], "2026-W00");
+  assert.equal(state.widgets[4]?.data.length, 6);
+  assert.equal(state.widgets[5]?.kind, "bar");
+  const actions = state.widgets.slice(6);
+  assert.deepEqual(actions.map((widget) => widget.title), [
+    "改善措施与责任人 · 周（W36）",
+    "改善措施与责任人 · 月（2026-09）",
+    "改善措施与责任人 · 季（2026-Q3）",
+  ]);
+  for (const action of actions) {
+    assert.equal(action.kind, "table");
+    assert.deepEqual(action.data, []);
+    assert.ok(action.warnings.some((warning) => warning.includes("本次分析暂不可用")));
+    assert.ok(action.warnings.some((warning) => warning.includes("责任人列为职能建议")));
+  }
+});
+
+test("an edit before initialization uses the pinned baseline and reset restores it", (t) => {
+  const { dashboard, artifacts } = fixture(t);
+  const preview = dashboard.loadOrPreview(SESSION_A);
+  const edited = dashboard.apply(SESSION_A, {
+    action: "remove",
+    baseRevision: 0,
+    widgetId: "oee-trend-weekly-2026",
+  }).dashboard;
+  assert.equal(edited.widgets.length, 8);
+  const restarted = new DashboardModule(artifacts);
+  assert.deepEqual(restarted.loadOrPreview(SESSION_A), edited);
+  assert.deepEqual(restarted.loadOrInitialize(SESSION_B), preview);
+  const reset = restarted.apply(SESSION_A, { action: "reset", baseRevision: 1 }).dashboard;
+  assert.deepEqual(reset, { ...preview, revision: 2 });
+});
+
+test("keeps existing saved dashboards and their reset baseline", (t) => {
+  const { dashboard, artifacts } = fixture(t);
+  const initial = dashboard.loadOrInitialize(SESSION_A);
+  const baseline = { ...initial, widgets: initial.widgets.slice(0, 1) };
+  const current = { ...baseline, revision: 7, widgets: [] };
+  writeFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), JSON.stringify({
+    schemaVersion: 1,
+    baseline,
+    current,
+  }));
+  const restarted = new DashboardModule(artifacts);
+  assert.deepEqual(restarted.loadOrPreview(SESSION_A), current);
+  assert.deepEqual(restarted.loadOrInitialize(SESSION_A), current);
+  assert.deepEqual(
+    restarted.apply(SESSION_A, { action: "reset", baseRevision: 7 }).dashboard,
+    { ...baseline, revision: 8 },
+  );
+  assert.deepEqual(restarted.loadOrInitialize(SESSION_B).widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
 });

@@ -30,13 +30,13 @@ import {
   type DashboardWidget,
   type DashboardWidgetSize,
 } from "../../shared/dashboard.ts";
-import type { AppDatabase, QueryResult } from "../database/database.ts";
+import type { QueryResult } from "../database/database.ts";
 import type { ArtifactStore, SessionArtifactStore } from "./artifact-store.ts";
-import { getDefaultTestOeeSql } from "../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import type { AppLogger } from "../logger.ts";
+import { readDefaultDashboard } from "./default-dashboard-store.ts";
 
 const DASHBOARD_FILENAME = "dashboard.json";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
-const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 
 interface DashboardDocument {
   readonly schemaVersion: typeof DASHBOARD_SCHEMA_VERSION;
@@ -164,254 +164,6 @@ function writeDocument(filePath: string, document: DashboardDocument): void {
   }
 }
 
-function queryRows(database: AppDatabase, sql: string): readonly DashboardRow[] {
-  const result = database.query(sql, undefined, { maxRows: 200 });
-  if (result.truncated) throw new DashboardInputError("默认看板查询结果超过 200 行");
-  return result.rows;
-}
-
-function scalarString(row: DashboardRow | undefined, key: string): string | null {
-  const value = row?.[key];
-  return typeof value === "string" ? value : null;
-}
-
-function validDate(value: string | null): value is string {
-  if (!value || !ISO_DATE_PATTERN.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
-function shiftDate(value: string, days: number): string {
-  const date = new Date(`${value}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-function dateSequence(start: string, count: number): string[] {
-  return Array.from({ length: count }, (_, index) => shiftDate(start, index));
-}
-
-function numeric(value: string | number | null | undefined): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function percent(value: number | null): number | null {
-  return value === null ? null : value * 100;
-}
-
-function rowsByKey(rows: readonly DashboardRow[], key: string): Map<string, DashboardRow> {
-  const mapped = new Map<string, DashboardRow>();
-  for (const row of rows) {
-    const value = row[key];
-    if (typeof value === "string") mapped.set(value, row);
-  }
-  return mapped;
-}
-
-function average(values: readonly (number | null)[]): number | null {
-  let total = 0;
-  let count = 0;
-  for (const value of values) {
-    if (value === null) continue;
-    total += value;
-    count += 1;
-  }
-  return count ? total / count : null;
-}
-
-const FACTOR_DEFINITIONS = [
-  {
-    id: "availability",
-    title: "Availability",
-    sourceColumn: "availability",
-    overviewColumn: "availability",
-    metricDefinition: "Machine_Running 秒数 / (当日机台数 × 86400)",
-  },
-  {
-    id: "performance",
-    title: "Performance",
-    sourceColumn: "performance",
-    overviewColumn: "performance",
-    metricDefinition: "SUM(IN_QTY) / SUM(DUT_NUM)",
-  },
-  {
-    id: "yield",
-    title: "Yield",
-    sourceColumn: "final_yield",
-    overviewColumn: "yield",
-    metricDefinition: "SUM(OUT_QTY) / SUM(IN_QTY)",
-  },
-] as const;
-
-function dashboardWarnings(rows: readonly DashboardRow[]): string[] {
-  const warnings: string[] = [];
-  const calculable = rows.filter((row) => numeric(row["daily_test_oee"]) !== null).length;
-  if (calculable < rows.length) {
-    warnings.push(`最近 7 个业务日共有 ${calculable}/${rows.length} 个 MT/ST 日结果可计算`);
-  }
-  const availabilityMissing = rows.filter((row) => numeric(row["availability_rows"]) === 0).length;
-  const dutMissing = rows.filter((row) => numeric(row["dut_rows"]) === null).length;
-  if (availabilityMissing) warnings.push(`Availability 缺少 ${availabilityMissing} 个业务日类型组合`);
-  if (dutMissing) warnings.push(`DUT 缺少 ${dutMissing} 个业务日类型组合`);
-  return warnings;
-}
-
-function factorWarnings(
-  rows: readonly DashboardRow[],
-  title: string,
-  sourceColumn: string,
-  commonWarnings: readonly string[],
-): string[] {
-  const missing = rows.filter((row) => numeric(row[sourceColumn]) === null).length;
-  return missing
-    ? [...commonWarnings, `${title} 有 ${missing}/${rows.length} 个业务日类型组合无法计算`]
-    : [...commonWarnings];
-}
-
-function emptyLineWidget(
-  id: string,
-  title: string,
-  metricDefinition: string,
-  warning: readonly string[],
-): DashboardWidget {
-  return {
-    id: `${id}-trend-7d`,
-    kind: "line",
-    title: `${title} 日趋势`,
-    subtitle: "等待可用数据",
-    size: "medium",
-    data: [],
-    encoding: {
-      category: "date",
-      series: [{ name: "MT", column: "mt" }, { name: "ST", column: "st" }],
-    },
-    format: { unit: "%", precision: 1 },
-    metricDefinition,
-    warnings: warning,
-  };
-}
-
-function emptyDefaultDashboard(): DashboardState {
-  const now = new Date().toISOString();
-  const warning = ["Availability 或 DUT 数据为空，暂时无法计算默认 Test OEE 看板"];
-  return {
-    schemaVersion: DASHBOARD_SCHEMA_VERSION,
-    revision: 0,
-    dataAsOf: now,
-    dateRange: { start: null, end: null },
-    widgets: [
-      {
-        id: "overall-oee-overview",
-        kind: "overview",
-        title: "Overall OEE",
-        subtitle: "等待可用数据",
-        size: "wide",
-        data: [{ overall_oee: null, availability: null, performance: null, yield: null }],
-        encoding: {
-          value: "overall_oee",
-          label: "Overall OEE",
-          description: "等待可用数据后计算",
-          gauges: [
-            { name: "Availability", column: "availability" },
-            { name: "Performance", column: "performance" },
-            { name: "Yield", column: "yield" },
-          ],
-        },
-        format: { unit: "%", precision: 2 },
-        metricDefinition: "Overall OEE = Availability × Performance × Yield",
-        warnings: warning,
-      },
-      ...FACTOR_DEFINITIONS.map((factor) => emptyLineWidget(
-        factor.id,
-        factor.title,
-        factor.metricDefinition,
-        warning,
-      )),
-    ],
-  };
-}
-
-function buildDefaultDashboard(database: AppDatabase): DashboardState {
-  const bounds = queryRows(database, `SELECT
-    (SELECT MAX(date(substr(date,1,10))) FROM oee_availability) AS availability_end,
-    (SELECT MAX(date(substr(date,1,10))) FROM oee_dut_utilization) AS dut_end`)[0];
-  const availabilityEnd = scalarString(bounds, "availability_end");
-  const dutEnd = scalarString(bounds, "dut_end");
-  const availableEnds = [availabilityEnd, dutEnd].filter(validDate);
-  if (!availableEnds.length) return emptyDefaultDashboard();
-  const end = availableEnds.length === 2
-    ? availableEnds.sort()[0] as string
-    : availableEnds[0] as string;
-  const start = shiftDate(end, -6);
-  const dates = dateSequence(start, 7);
-  const dailyRows = queryRows(database, getDefaultTestOeeSql(start, end).sql);
-  const warnings = dashboardWarnings(dailyRows);
-  if (!validDate(availabilityEnd)) warnings.push("Availability 数据为空");
-  if (!validDate(dutEnd)) warnings.push("DUT 数据为空");
-  const byDayKind = rowsByKey(
-    dailyRows.map((row) => ({ ...row, key: `${String(row["day"])}:${String(row["kind"])}` })),
-    "key",
-  );
-  const calculableRows = dailyRows.filter((row) => numeric(row["daily_test_oee"]) !== null);
-  const overviewData: DashboardRow = {
-    overall_oee: percent(average(calculableRows.map((row) => numeric(row["daily_test_oee"])))),
-    availability: percent(average(calculableRows.map((row) => numeric(row["availability"])))),
-    performance: percent(average(calculableRows.map((row) => numeric(row["performance"])))),
-    yield: percent(average(calculableRows.map((row) => numeric(row["final_yield"])))),
-  };
-
-  const factorWidget = (factor: typeof FACTOR_DEFINITIONS[number]): DashboardWidget => ({
-    id: `${factor.id}-trend-7d`,
-    kind: "line",
-    title: `${factor.title} 日趋势`,
-    subtitle: `${start} 至 ${end} · MT / ST`,
-    size: "medium",
-    data: dates.map((date) => ({
-      date,
-      mt: percent(numeric(byDayKind.get(`${date}:MT`)?.[factor.sourceColumn])),
-      st: percent(numeric(byDayKind.get(`${date}:ST`)?.[factor.sourceColumn])),
-    })),
-    encoding: {
-      category: "date",
-      series: [{ name: "MT", column: "mt" }, { name: "ST", column: "st" }],
-    },
-    format: { unit: "%", precision: 1 },
-    metricDefinition: factor.metricDefinition,
-    warnings: factorWarnings(dailyRows, factor.title, factor.sourceColumn, warnings),
-  });
-
-  return parseDashboardState({
-    schemaVersion: DASHBOARD_SCHEMA_VERSION,
-    revision: 0,
-    dataAsOf: new Date().toISOString(),
-    dateRange: { start, end },
-    widgets: [
-      {
-        id: "overall-oee-overview",
-        kind: "overview",
-        title: "Overall OEE",
-        subtitle: `${start} 至 ${end} · ${calculableRows.length}/${dailyRows.length} 个 MT/ST 日结果可计算`,
-        size: "wide",
-        data: [overviewData],
-        encoding: {
-          value: "overall_oee",
-          label: `${dates.length} 日 Overall OEE`,
-          description: "AVG(MT / ST DAILY OEE)",
-          gauges: [
-            { name: "Availability", column: "availability" },
-            { name: "Performance", column: "performance" },
-            { name: "Yield", column: "yield" },
-          ],
-        },
-        format: { unit: "%", precision: 2 },
-        metricDefinition: "Overall OEE = Availability × Performance × Yield；周期值为可计算 MT/ST 日 OEE 的等权平均",
-        warnings,
-      },
-      ...FACTOR_DEFINITIONS.map(factorWidget),
-    ],
-  });
-}
-
 function snapshotRows(artifacts: SessionArtifactStore, snapshotName: string): QueryResult {
   const snapshot = artifacts.resolveDataSnapshot(snapshotName);
   if (snapshot.rowCount > MAX_DASHBOARD_ROWS_PER_WIDGET) {
@@ -530,36 +282,57 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
 }
 
 export class DashboardModule {
-  readonly #database: AppDatabase;
   readonly #artifacts: ArtifactStore;
+  readonly #defaultPath: string | undefined;
+  readonly #logger: Pick<AppLogger, "info" | "error"> | undefined;
+  readonly #previews = new Map<string, DashboardState>();
 
-  constructor(database: AppDatabase, artifacts: ArtifactStore) {
-    this.#database = database;
+  constructor(artifacts: ArtifactStore, defaultPath?: string, logger?: Pick<AppLogger, "info" | "error">) {
     this.#artifacts = artifacts;
+    this.#defaultPath = defaultPath;
+    this.#logger = logger;
+  }
+
+  forget(sessionId: string): void {
+    this.#previews.delete(sessionId);
+  }
+
+  dispose(): void {
+    this.#previews.clear();
+  }
+
+  #initialState(sessionId: string): DashboardState {
+    let state = this.#previews.get(sessionId);
+    if (!state) {
+      state = readDefaultDashboard(this.#defaultPath, this.#logger);
+      this.#previews.set(sessionId, state);
+    }
+    return parseDashboardState(state);
   }
 
   loadOrPreview(sessionId: string): DashboardState {
     const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
-    return readDocument(filePath)?.current ?? buildDefaultDashboard(this.#database);
+    return readDocument(filePath)?.current ?? this.#initialState(sessionId);
   }
 
   loadOrInitialize(sessionId: string): DashboardState {
     const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
     const existing = readDocument(filePath);
     if (existing) return existing.current;
-    const baseline = buildDefaultDashboard(this.#database);
+    const baseline = this.#initialState(sessionId);
     writeDocument(filePath, {
       schemaVersion: DASHBOARD_SCHEMA_VERSION,
       baseline,
       current: baseline,
     });
+    this.forget(sessionId);
     return baseline;
   }
 
   apply(sessionId: string, command: DashboardCommand): DashboardApplyResult {
     const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
     const document = readDocument(filePath) ?? (() => {
-      const baseline = buildDefaultDashboard(this.#database);
+      const baseline = this.#initialState(sessionId);
       return { schemaVersion: DASHBOARD_SCHEMA_VERSION, baseline, current: baseline } as const;
     })();
     if (command.baseRevision !== document.current.revision) {
@@ -618,6 +391,7 @@ export class DashboardModule {
       widgets,
     });
     writeDocument(filePath, { ...document, current: dashboard });
+    this.forget(sessionId);
     return { dashboard, changedWidgetIds, pointCount };
   }
 }

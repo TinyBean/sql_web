@@ -31,6 +31,61 @@ scripts/
 └── session-to-html.ts  # 持久化会话排障 HTML 导出
 ```
 
+## 默认看板
+
+新会话使用固定的 9 张看板卡片，来源于会话 `01a0a299-72d4-7826-95ea-f521e796e3fc` 的最终看板（revision 19），按以下顺序展示：
+
+1. Overall OEE 概览。
+2. OEE 季趋势、月趋势、周趋势（含最高/最低点，周编号从 W00 开始）。
+3. OEE 极值明细、MT/ST 三组成项对比。
+4. 周、月、季改善措施与责任人清单，每张清单包含 MT/ST 两类。
+
+卡片模板及首次部署的兜底快照保存在 `src/server/tool/default-dashboard.ts`。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用内置快照（业务数据截至 2026-09-14）。原会话的 JSONL 和产物文件不是运行时依赖。
+
+新会话首次展示时锁定当时的默认版本，从 revision 0 开始；首次保存时将其写入该会话的 baseline 和 current，重置会恢复该会话的 baseline。已打开的空会话也保留其初始版本，且仍不创建持久化产物。已有会话可通过对话更新自己的卡片。
+
+## 每日自动更新
+
+手动执行与定时任务使用同一入口：
+
+```bash
+npm run data:daily -- --dry-run
+npm run data:daily
+npm run data:daily -- --through-date 2026-09-14
+```
+
+业务日为上海时间当天 08:30 至次日 08:30。任务在 08:30 后默认同步到昨天，之前同步到前天；显式截止日期也必须是已结束的业务日。`--dry-run` 仅显示计划、接口日期和目标文件，不访问 API，也不创建日志、锁或数据库文件。
+
+任务串行同步 Availability 和 DUT，复用现有补缺口、失败窗口重试和最近两天刷新机制。DUT 接口的请求起止日期均比目标业务日期晚一天，两张事实表原始日期保持不变。数据范围覆盖截止业务日所属年份的 1 月 1 日至截止日，以及最近完整周（必要时包含上一年）。
+
+同步后，在同一个只读 SQLite 事务中重算 9 张卡片。趋势每年重新开始，周编号保持 `%W`；最高/最低点排除 NULL，按未舍入值比较，并列取最早期间。改善清单分别对应最近完整周、截止业务日所在月累计和季度累计；由临时 Agent 结合年内最低点与历史覆盖自主查询、判断并排序，不限制损失类别。顶层日期范围是年内趋势范围；部分周期、缺日和最新业务日未就绪会显示提示。
+
+两个接口均成功时，即使数据缺失也发布已有结果；缺失指标保留 NULL。任何接口硬失败或看板计算/验证/写入失败都会保留上次默认文件，已完成的数据库导入仍保留审计记录。全部卡片一次性原子发布，退出码为成功 `0`、失败 `1`、带警告完成 `2`。
+
+### 临时 Agent 改善分析
+
+指标生成与 Agent 查询在独立子进程的同一个只读 SQLite 事务内运行。子进程先交回基础指标，再使用内存会话和设置、项目 `.data/agent` 的模型凭据启动分析；模型沿用 `SQL_WEB_PROVIDER` / `SQL_WEB_MODEL`（当前为 `local-vllm / zai-org/GLM-5.3-Flash`）。不产生网站会话。
+
+分析分别覆盖最近完整周、当月累计、当季累计的 MT/ST，每类型最多三项。保留原六列：**类型、优先级、问题（损失源）、改善措施、建议责任人、本期损失小时**。问题文本包含简要事实和判断；推测需标注待验证，责任人仅为建议职能。Agent 可查询所有状态、机台及 Performance/Yield；损失小时由程序从 `measure_loss` 的本期同类型实测证据取值，Performance/Yield 等无法对应实测时间的问题保持 `null`。
+
+工具只允许 Skill 目录读取、只读 SQL、标准 OEE 规则工具及结构化提交；最多 60 次调用。`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、优先级和损失证据；首次有效提交作为草稿，Agent 须逐条复核数值、机台、历史结论、日均分母及措施可行性，再提交带复核说明的完整报告；字段错误可在剩余时间内修正。
+
+模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。内置快照也不再附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
+
+每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、结果、证据 ID）、`events.jsonl` 和有效的 `report.json`。结果增加 `analysisStatus`、`analysisReason`、`analysisRunId` 和产物路径；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
+
+安装当前项目的每日 09:00 定时任务：
+
+```bash
+npm run schedule:install -- --dry-run
+npm run schedule:install
+crontab -l
+```
+
+安装程序检查主机时区为 `Asia/Shanghai`、`cron.service` 已运行及依赖可用；保存当前项目和 Node 的绝对路径，在当前用户 crontab 中维护独立标记的 `0 9 * * *` 条目，重复安装不会增加任务，也不会覆盖其他条目。定时任务每天运行一次；主机离线时错过的日期由下次同步补齐。
+
+手动和定时入口使用 `flock` 锁住整个流程，重叠调用输出 skipped 并退出。任务读取项目 `.env`，配置规则与现有数据命令一致。结构化日志位于 `.data/logs/oee-daily-YYYY-MM-DD.log`，包含同步审计、目标日期、缺失范围、发布结果和耗时；cron 启动输出另存为 `oee-daily-console-YYYY-MM-DD.log`。日志日期均为上海时间，凭据不写入任务条目。
+
 ## 数据链路
 
 ```text
@@ -213,6 +268,8 @@ npm test
 | `SQL_WEB_DB_PATH` | `.data/database/oee.sqlite` | SQLite 文件位置 |
 | `SQL_WEB_SESSION_DIR` | `.data/sessions` | Agent session 目录 |
 | `SQL_WEB_ARTIFACT_DIR` | `.data/artifacts` | 会话级数据快照及历史会话产物目录 |
+| `SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` | `600000` | 临时 Agent 分析时限（毫秒），基础指标计算另有同长度的超时保护 |
+| `SQL_WEB_DEFAULT_DASHBOARD_PATH` | `.data/default-dashboard.json` | 每日生成的默认看板；网站和数据命令须使用相同路径 |
 | `SQL_WEB_PYTHON_PATH` | `/usr/bin/python3` | 代码解释器使用的 Python |
 | `SQL_WEB_BWRAP_PATH` | `/usr/bin/bwrap` | bubblewrap 可执行文件 |
 | `SQL_WEB_PRLIMIT_PATH` | `/usr/bin/prlimit` | 资源限制工具 |

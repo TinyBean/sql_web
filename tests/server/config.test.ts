@@ -16,6 +16,7 @@ test("loads the selected model from the project environment file", (t) => {
       "SQL_WEB_PROVIDER=test-provider",
       "SQL_WEB_MODEL=test-model",
       "SQL_WEB_ARTIFACT_DIR=.data/test-artifacts",
+      "SQL_WEB_DEFAULT_DASHBOARD_PATH=.data/current-dashboard.json",
       "SQL_WEB_PYTHON_PATH=/usr/local/bin/python3",
     ].join("\n"),
   );
@@ -30,6 +31,7 @@ test("loads the selected model from the project environment file", (t) => {
   assert.equal(config.agentDir, path.join(config.projectRoot, ".data", "agent"));
   assert.equal(config.logDir, path.join(config.projectRoot, ".data", "logs"));
   assert.equal(config.artifactDir, path.join(config.projectRoot, ".data", "test-artifacts"));
+  assert.equal(config.defaultDashboardPath, path.join(config.projectRoot, ".data", "current-dashboard.json"));
   assert.equal(config.codeInterpreter.pythonPath, "/usr/local/bin/python3");
   assert.equal(config.codeInterpreter.bwrapPath, "/usr/bin/bwrap");
 });

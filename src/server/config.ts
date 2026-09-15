@@ -10,6 +10,7 @@ export interface AppEnvironment {
   readonly SQL_WEB_DB_PATH?: string | undefined;
   readonly SQL_WEB_SESSION_DIR?: string | undefined;
   readonly SQL_WEB_ARTIFACT_DIR?: string | undefined;
+  readonly SQL_WEB_DEFAULT_DASHBOARD_PATH?: string | undefined;
   readonly SQL_WEB_PYTHON_PATH?: string | undefined;
   readonly SQL_WEB_BWRAP_PATH?: string | undefined;
   readonly SQL_WEB_PRLIMIT_PATH?: string | undefined;
@@ -24,6 +25,7 @@ export interface AppConfig {
   readonly databasePath: string;
   readonly sessionDir: string;
   readonly artifactDir: string;
+  readonly defaultDashboardPath: string;
   readonly publicDir: string;
   readonly agentDir: string;
   readonly logDir: string;
@@ -66,6 +68,7 @@ export function loadProjectEnvironment(
       SQL_WEB_DB_PATH: target["SQL_WEB_DB_PATH"],
       SQL_WEB_SESSION_DIR: target["SQL_WEB_SESSION_DIR"],
       SQL_WEB_ARTIFACT_DIR: target["SQL_WEB_ARTIFACT_DIR"],
+      SQL_WEB_DEFAULT_DASHBOARD_PATH: target["SQL_WEB_DEFAULT_DASHBOARD_PATH"],
       SQL_WEB_PYTHON_PATH: target["SQL_WEB_PYTHON_PATH"],
       SQL_WEB_BWRAP_PATH: target["SQL_WEB_BWRAP_PATH"],
       SQL_WEB_PRLIMIT_PATH: target["SQL_WEB_PRLIMIT_PATH"],
@@ -97,6 +100,7 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     databasePath: resolveProjectPath(env.SQL_WEB_DB_PATH, ".data/database/oee.sqlite"),
     sessionDir: resolveProjectPath(env.SQL_WEB_SESSION_DIR, ".data/sessions"),
     artifactDir: resolveProjectPath(env.SQL_WEB_ARTIFACT_DIR, ".data/artifacts"),
+    defaultDashboardPath: resolveProjectPath(env.SQL_WEB_DEFAULT_DASHBOARD_PATH, ".data/default-dashboard.json"),
     publicDir: path.join(PROJECT_ROOT, "public"),
     agentDir: path.join(PROJECT_ROOT, ".data", "agent"),
     logDir: path.join(PROJECT_ROOT, ".data", "logs"),

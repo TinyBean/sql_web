@@ -48,6 +48,9 @@ group.evidence_ids 必须含本期 current.evidence_id。没有可计算最低�
 不要限定为 Assistance、IDLE_NoWIP、HangUp，不得套用固定的措施或责任人映射。
 每项 issue 用中文写事实、简要证据及判断；推测必须标注“待验证”，区分状态损失与根因。
 measure 写针对证据的具体操作及验证办法；suggested_owner 仅给建议责任职能，未提供人员资料不得写姓名。
+comparison、issue、measure、suggested_owner、no_findings_reason 面向业务用户，使用简洁中文，按“发现了什么、依据是什么、建议怎么做”表达，数据来源写实际期间和内容，如“本周（09-07 至 09-13）损失统计”“当季机台明细”“1—8 月历史对比”。
+这些正文不得出现 q11、q13 等内部证据编号、“第 0 行”、measure_loss/execute_sql 等工具名或 hours_per_kind_available_day 等字段名。内部编号和行索引只放在 evidence_ids、minimum_evidence、history_evidence、loss_reference 等结构化引用字段；不要为了可读性删除这些审计引用。
+把工具操作改写为业务动作，如“下周复查各机台损失时长”；日均值明确实际分母，如“每个有数据业务日平均损失 98.6 小时”，保留日期、数值、覆盖差异和待验证说明。MT/ST、OEE、Q1、W36 和机台编号可保留；损失状态和组成项首次出现时配中文解释，如“Assistance（协助等待）”“Availability（可用率）”。
 priority 根据影响、证据和改善价值由 1 起排序；数据不足时允许 items=[]，说明 no_findings_reason。
 loss_reference 只能引用 measure_loss 返回的本期同类型行（evidence_id + 从 0 起 row_index）；
 Performance/Yield 或无法直接对应实测时间的问题用 null，不得折算损失小时。
@@ -127,7 +130,7 @@ export async function runAnalysisAgent(
     }),
     defineTool({
       name: "submit_analysis", label: "提交三期分析报告", executionMode: "sequential",
-      description: "Submit all three periods, each with MT and ST groups, evidence references, autonomous priorities/measures/functional owners. The first structurally valid submission is a draft for evidence review. Review its claims, query more evidence if needed, then resubmit the complete corrected report with verification explaining your checks and corrections. Validation errors can be corrected within the time limit.",
+      description: "Submit all three periods, each with MT and ST groups, evidence references, autonomous priorities/measures/functional owners. Narrative fields must use business-readable Chinese dates, metrics and source descriptions; keep evidence ids and row indices only in structured reference fields, never expose tool or field names in prose. The first valid submission is a draft for evidence review. Review its claims and readability, query more evidence if needed, then resubmit the complete corrected report with verification explaining your checks and corrections. Validation errors can be corrected within the time limit.",
       parameters: AnalysisReportSchema,
       async execute(_id, params) {
         const result = validateAnalysisReport(params, context, evidence.records);

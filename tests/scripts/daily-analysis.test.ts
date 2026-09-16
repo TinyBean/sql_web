@@ -127,6 +127,46 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   database.exec("COMMIT");
 });
 
+test("reports require readable business text while preserving structured audit references", (t) => {
+  const { config, connections } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
+  const evidence = new AnalysisEvidence(database);
+  const context = evidence.context(base, "2026-01-12");
+  const report = reportFor(context);
+  report.verification = "已核对 q2 的原始查询结果。";
+  report.periods[0]!.groups[0]!.items[0]!.issue = "MT 在 Q1 的 W01 可用率偏低；ADH075 的 Assistance（协助等待）需进一步核查。";
+  const result = validateAnalysisReport(report, context, evidence.records);
+  assert.deepEqual(result.report, report, "audit references and business identifiers are preserved");
+  assert.deepEqual(result.report.periods[0]!.groups[0]!.items[0]!.evidence_ids,
+    [context.comparisons.week.current.id]);
+
+  for (const field of ["comparison", "no_findings_reason", "issue", "measure", "suggested_owner"] as const) {
+    const copy = structuredClone(report);
+    const period = copy.periods[0]!;
+    const group = period.groups[0]!;
+    if (field === "comparison") period.comparison = "依据（q11/q13）判断";
+    else if (field === "no_findings_reason") {
+      group.items = [];
+      group.no_findings_reason = "q11 无数据";
+    } else group.items[0]![field] = "依据q11第 0 行判断";
+    assert.throws(() => validateAnalysisReport(copy, context, evidence.records),
+      (error: unknown) => error instanceof Error && error.message.includes(field) && error.message.includes("改写"), field);
+  }
+  for (const internal of [
+    "q11", "（q11/q13）", "第 0 行", "row 0", "row_index=0", "evidence_ids",
+    "measure_loss(week/month)", "execute_sql", "hours_per_kind_available_day", "observed_days",
+  ]) {
+    const copy = structuredClone(report);
+    copy.periods[0]!.groups[0]!.items[0]!.measure = "下周复查 " + internal;
+    assert.throws(() => validateAnalysisReport(copy, context, evidence.records), /改写/u, internal);
+  }
+  report.periods[0]!.groups[0]!.items[0]!.measure = "下周复查各机台损失时长，以每个有数据业务日的平均损失小时进行比较。";
+  const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
+  assert.equal(analyzed.widgets[6]?.data[0]?.["measure"], report.periods[0]!.groups[0]!.items[0]!.measure);
+});
+
 test("unavailable models publish new metrics and empty analysis, without creating website sessions", { timeout: 30_000 }, async (t) => {
   const { config } = fixture(t);
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
@@ -235,7 +275,7 @@ function toolCall(index: number, name: string, args: unknown) {
   return { index, id: "call-" + index + "-" + name, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-test("ephemeral model queries actual evidence, repairs an invalid report and submits autonomous six-column recommendations", { timeout: 30_000 }, async (t) => {
+test("ephemeral model repairs evidence and unreadable prose before publishing six-column recommendations", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
   let turn = 0;
   let rejected = false;
@@ -247,10 +287,10 @@ test("ephemeral model queries actual evidence, repairs an invalid report and sub
       ...PERIOD_KEYS.map((period, index) => toolCall(index + 2, "measure_loss", { period })),
     ];
     const runDir = path.join(config.analysis.artifactDir, "mock-analysis");
-    if (turn === 4) assert.equal(existsSync(path.join(runDir, "report.json")), false, "a draft cannot be published before evidence review");
+    if (turn === 4 || turn === 5) assert.equal(existsSync(path.join(runDir, "report.json")), false, "unreadable prose and an unreviewed draft cannot be published");
     const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
     const report = reportFor(context);
-    if (turn >= 4) report.verification = "已逐条复核原始查询：换线小时与本期同类型证据一致，未把损失出现日数当作全期天数；责任为职能建议。";
+    if (turn >= 5) report.verification = "已逐条复核原始查询：换线小时与本期同类型证据一致，未把损失出现日数当作全期天数；责任为职能建议。";
     for (const period of report.periods) {
       const all = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
       const loss = all.find((entry) => entry.lossPeriod === period.period);
@@ -266,13 +306,14 @@ test("ephemeral model queries actual evidence, repairs an invalid report and sub
       }
     }
     if (turn === 2) { report.periods[0]!.minimum_evidence = "missing"; rejected = true; }
+    if (turn === 3) report.periods[0]!.groups[0]!.items[0]!.issue = "本周换线损失 2.5 小时（q11 第 0 行）";
     return [toolCall(0, "submit_analysis", report)];
   });
   writeFileSync(path.join(directory, "outside.txt"), "must not be readable");
   const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assert.equal(rejected, true);
-  assert.ok(turn >= 4, "requires a separate evidence review after the valid draft");
+  assert.ok(turn >= 5, "requires readable prose and a separate evidence review after the valid draft");
   assert.ok(JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "report.json"), "utf8")).verification);
   assert.match(String(result.state.widgets[6]?.data[0]?.["issue"]), /Conversion/u);
   assert.equal(result.state.widgets[6]?.data[0]?.["loss_hours"], 2.5);
@@ -281,6 +322,8 @@ test("ephemeral model queries actual evidence, repairs an invalid report and sub
   assert.match(events, /read 仅允许/u);
   assert.match(events, /只读/u);
   assert.match(events, /最低点/u);
+  assert.match(events, /业务用户可理解/u);
+  assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(6)), /\bq\d+\b|第\s*0\s*行/u);
   assert.doesNotMatch(events, /must not be readable/u);
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
   const writer = new DatabaseSync(config.databasePath);

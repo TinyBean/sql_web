@@ -3,7 +3,8 @@ import { Value } from "typebox/value";
 import { parseDashboardState, type DashboardRow, type DashboardState } from "../../../../shared/dashboard.ts";
 import { PERIOD_KEYS, type AnalysisContext, type Evidence, type PeriodKey } from "./evidence.ts";
 
-const text = Type.String({ minLength: 1, maxLength: 1800 });
+const readableDescription = "面向业务用户的中文说明，用实际日期、指标和数据来源解释结论，不含 q11 等内部证据编号、查询行号、工具名或字段名。";
+const text = Type.String({ minLength: 1, maxLength: 1800, description: readableDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
 export const PeriodKeySchema = Type.Union([Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
 export const AnalysisReportSchema = Type.Object({
@@ -15,14 +16,14 @@ export const AnalysisReportSchema = Type.Object({
     history_evidence: Type.String(),
     groups: Type.Array(Type.Object({
       kind: Type.Union([Type.Literal("MT"), Type.Literal("ST")]),
-      no_findings_reason: Type.String({ maxLength: 1800 }),
+      no_findings_reason: Type.String({ maxLength: 1800, description: readableDescription }),
       evidence_ids: refs,
       items: Type.Array(Type.Object({
         priority: Type.Integer({ minimum: 1, maximum: 3 }),
         category: Type.Union([Type.Literal("availability"), Type.Literal("performance"), Type.Literal("yield"), Type.Literal("other")]),
         issue: text,
         measure: text,
-        suggested_owner: Type.String({ minLength: 1, maxLength: 160 }),
+        suggested_owner: Type.String({ minLength: 1, maxLength: 160, description: readableDescription }),
         evidence_ids: refs,
         loss_reference: Type.Union([Type.Null(), Type.Object({ evidence_id: Type.String(), row_index: Type.Integer({ minimum: 0 }) }, { additionalProperties: false })]),
       }, { additionalProperties: false }), { maxItems: 3 }),
@@ -31,6 +32,14 @@ export const AnalysisReportSchema = Type.Object({
 }, { additionalProperties: false });
 
 export type AnalysisReport = Static<typeof AnalysisReportSchema>;
+
+function assertReadableText(value: string, field: string): void {
+  // Keep business identifiers such as Q1, W36, ADH075 and MT/ST intact.
+  const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|execute_sql|submit_analysis|evidence_ids?|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
+  if (internalReference.test(value)) {
+    throw new Error(field + " 含内部证据编号、查询行号、工具名或字段名。请改写为业务用户可理解的日期、指标和数据来源（如‘本周损失统计’‘当季机台明细’‘每个有数据业务日的平均损失小时’），保留事实、数值和统计口径；内部引用仅放在 evidence_ids、minimum_evidence、history_evidence、loss_reference 等结构化字段中。");
+  }
+}
 
 export function validateAnalysisReport(
   value: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
@@ -47,6 +56,7 @@ export function validateAnalysisReport(
     const reports = value.periods.filter((report) => report.period === key);
     if (reports.length !== 1) throw new Error("每个周期必须且只能提交一次：" + key);
     const report = reports[0]!;
+    assertReadableText(report.comparison, key + ".comparison");
     const expected = context.comparisons[key];
     if (report.minimum_evidence !== expected.minimum.id || report.history_evidence !== expected.history.id) {
       throw new Error(key + " 的最低点或历史证据引用不匹配初始上下文");
@@ -57,6 +67,7 @@ export function validateAnalysisReport(
       const groups = report.groups.filter((group) => group.kind === kind);
       if (groups.length !== 1) throw new Error(key + " 必须分别覆盖 MT 和 ST");
       const group = groups[0]!;
+      assertReadableText(group.no_findings_reason, key + "/" + kind + ".no_findings_reason");
       checkRefs(group.evidence_ids);
       if (!group.evidence_ids.includes(expected.current.id)) throw new Error(key + "/" + kind + " 缺少本期指标证据");
       if (!group.items.length && !group.no_findings_reason.trim()) throw new Error("空清单必须解释数据不足或无充分依据的原因");
@@ -64,6 +75,9 @@ export function validateAnalysisReport(
       for (const [index, item] of items.entries()) {
         if (item.priority !== index + 1) throw new Error("同周期同类型优先级必须由 1 连续排列且不重复");
         if (![item.issue, item.measure, item.suggested_owner].every((field) => field.trim())) throw new Error("问题、措施、责任职能不能为空");
+        for (const field of ["issue", "measure", "suggested_owner"] as const) {
+          assertReadableText(item[field], key + "/" + kind + ".items[" + index + "]." + field);
+        }
         checkRefs(item.evidence_ids);
         let hours: number | null = null;
         if (item.loss_reference !== null) {

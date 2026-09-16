@@ -245,7 +245,7 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
   const { dashboard } = fixture(t);
   const state = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(state.dataAsOf, "2026-09-15T02:03:34.568Z");
-  assert.deepEqual(state.dateRange, { start: "2026-07-01", end: "2026-09-14" });
+  assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-09-14" });
   assert.deepEqual(state.widgets.map((widget) => widget.size), [
     "wide", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
   ]);

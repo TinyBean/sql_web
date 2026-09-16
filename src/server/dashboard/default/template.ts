@@ -10,7 +10,7 @@ const DEFAULT_DASHBOARD: DashboardState = {
   "revision": 0,
   "dataAsOf": "2026-09-15T02:03:34.568Z",
   "dateRange": {
-    "start": "2026-07-01",
+    "start": "2026-01-01",
     "end": "2026-09-14"
   },
   "widgets": [

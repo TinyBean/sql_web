@@ -5,6 +5,7 @@ import { createDefaultDashboard } from "./template.ts";
 import { dashboardPeriods, periodLabel } from "./periods.ts";
 import { addDays, type DatePeriod } from "../../database/business-dates.ts";
 import { buildMachineExtremesTable } from "./machine-extremes.ts";
+import { buildTypeOverviews } from "./overviews.ts";
 
 type Grain = "周" | "月" | "季";
 interface PeriodData extends DatePeriod {
@@ -118,7 +119,6 @@ export function buildDefaultDashboardInTransaction(
   // At most 732 aggregate day/type rows. This read-only batch intentionally
   // does not use the interactive SQL tool's 200-row display limit.
   const daily = query(database, getDefaultTestOeeSql(periods.trend.start, periods.trend.end).sql);
-  const valid = calculable(daily);
   const commonWarnings = [...syncWarnings, ...coverageWarnings(daily)];
   const latest = daily.filter((row) => row["day"] === throughDate);
   if (calculable(latest).length < 2) commonWarnings.push("最新业务日 " + throughDate + " 的 MT/ST OEE 尚未全部可计算");
@@ -130,25 +130,9 @@ export function buildDefaultDashboardInTransaction(
     widgets.set(id, { ...original, ...change } as DashboardWidget);
   };
   const rangeText = periods.trend.start + " 至 " + throughDate;
-  const overview = widgets.get("overall-oee-overview");
-  if (overview?.kind !== "overview") throw new Error("默认看板概览结构无效");
-  replace(overview.id, {
-    subtitle: "业务日 " + rangeText + "（每天 08:30 至次日 08:30）",
-    data: [{
-      overall_oee_percent: percentage(average(valid, "daily_test_oee"), false),
-      mt_oee_percent: percentage(average(valid.filter((row) => row["kind"] === "MT"), "daily_test_oee"), false),
-      st_oee_percent: percentage(average(valid.filter((row) => row["kind"] === "ST"), "daily_test_oee"), false),
-      avg_availability_percent: percentage(average(valid, "availability"), false),
-      avg_performance_percent: percentage(average(valid, "performance"), false),
-      avg_yield_percent: percentage(average(valid, "final_yield"), false),
-    }],
-    encoding: {
-      ...overview.encoding,
-      label: periods.year + " 年 Overall Test OEE（" + rangeText + "）",
-      description: "MT/ST 日 OEE 等权平均；覆盖 " + valid.length + "/" + daily.length + " 个可计算日类型",
-    },
-    warnings: commonWarnings,
-  });
+  for (const overview of buildTypeOverviews(daily, periods.trend, syncWarnings)) {
+    replace(overview.id, overview);
+  }
 
   const extremeRows: DashboardRow[] = [];
   const grainNames = { "周": "weekly", "月": "monthly", "季": "quarterly" } as const;

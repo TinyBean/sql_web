@@ -5,6 +5,7 @@ import type { DefaultDashboardAnalysisConfig } from "../config.ts";
 import { buildDefaultDashboardInTransaction } from "../build.ts";
 import { AnalysisEvidence } from "./evidence.ts";
 import { applyAnalysisReport } from "./report.ts";
+import { SessionArtifactStore } from "../../../tool/artifact-store.ts";
 
 export interface AnalysisWorkerRequest {
   readonly databasePath: string;
@@ -31,7 +32,8 @@ async function run(request: AnalysisWorkerRequest): Promise<void> {
     const log = (name: string, event: unknown): void => {
       appendFileSync(path.join(request.runDir, name + ".jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event as object }) + "\n", { mode: 0o600 });
     };
-    const evidence = new AnalysisEvidence(database, (record) => log("evidence", record));
+    const artifacts = new SessionArtifactStore(request.runDir, "analysis-data");
+    const evidence = new AnalysisEvidence(database, (record) => log("evidence", record), artifacts);
     const context = evidence.context(state, request.throughDate);
     writeFileSync(path.join(request.runDir, "context.json"), JSON.stringify(context), { mode: 0o600 });
     // Load the model SDK only after the parent has a usable metrics dashboard.

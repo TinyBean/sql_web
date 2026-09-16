@@ -181,7 +181,7 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   assert.equal(card("tall").querySelectorAll("tbody tr").length, 2000);
 
   const defaults = createDefaultDashboard();
-  const machineTable = defaults.widgets[5]!;
+  const machineTable = defaults.widgets.find((widget) => widget.id === "mt-st-components-2026")!;
   assert.equal(machineTable.kind, "table");
   state = { ...defaults, widgets: [machineTable] };
   renderer.render(state);

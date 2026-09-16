@@ -90,7 +90,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal(existsSync(sessionArtifactDirectory), false);
   const emptySerialized = await store.getSerialized(created.id);
   assert.deepEqual(emptySerialized.messages, []);
-  assert.equal(emptySerialized.dashboard.widgets.length, 9);
+  assert.equal(emptySerialized.dashboard.widgets.length, 10);
   assert.equal(existsSync(emptySessionFile), false);
   assert.equal(existsSync(sessionArtifactDirectory), false);
   assert.doesNotMatch(piSession.systemPrompt, /## 数据库结构/u);

@@ -29,6 +29,13 @@ export function loadDataCommandConfig(
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
     throw new Error("SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS 必须是有效的正整数毫秒数");
   }
+  const tokenSetting = (name: string, fallback: number, minimum: number): number => {
+    const value = Number(setting(name) ?? fallback);
+    if (!Number.isSafeInteger(value) || value < minimum || value > 2_147_483_647) {
+      throw new Error(name + " 必须是至少 " + minimum + " 的整数 token 数");
+    }
+    return value;
+  };
   return {
     databasePath: path.resolve(projectRoot, setting("SQL_WEB_DB_PATH") ?? ".data/database/oee.sqlite"),
     defaultDashboardPath: path.resolve(projectRoot, setting("SQL_WEB_DEFAULT_DASHBOARD_PATH") ?? ".data/default-dashboard.json"),
@@ -40,6 +47,13 @@ export function loadDataCommandConfig(
       provider: setting("SQL_WEB_PROVIDER")?.trim() ?? "",
       model: setting("SQL_WEB_MODEL")?.trim() ?? "",
       timeoutMs,
+      contextWindow: tokenSetting("SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW", 262144, 16384),
+      maxOutputTokens: tokenSetting("SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS", 32768, 1024),
+      codeInterpreter: {
+        pythonPath: path.resolve(projectRoot, setting("SQL_WEB_PYTHON_PATH")?.trim() || "/usr/bin/python3"),
+        bwrapPath: path.resolve(projectRoot, setting("SQL_WEB_BWRAP_PATH")?.trim() || "/usr/bin/bwrap"),
+        prlimitPath: path.resolve(projectRoot, setting("SQL_WEB_PRLIMIT_PATH")?.trim() || "/usr/bin/prlimit"),
+      },
     },
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
     ...(apiUsername !== undefined ? { apiUsername } : {}),

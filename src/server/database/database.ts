@@ -382,6 +382,15 @@ export class AppDatabase {
     this.#reader = reader;
   }
 
+  /** Borrow an existing transaction without taking ownership of its connection. */
+  static readOnlyQueries(reader: DatabaseSync): Pick<AppDatabase, "query" | "exportQueryJson"> {
+    const database = new AppDatabase("", reader);
+    return {
+      query: database.query.bind(database),
+      exportQueryJson: database.exportQueryJson.bind(database),
+    };
+  }
+
   static open({ filePath }: DatabaseOptions): AppDatabase {
     const resolvedFilePath = path.resolve(filePath);
     let reader: DatabaseSync | undefined;

@@ -5,6 +5,13 @@ export interface DefaultDashboardAnalysisConfig {
   readonly provider: string;
   readonly model: string;
   readonly timeoutMs: number;
+  readonly contextWindow: number;
+  readonly maxOutputTokens: number;
+  readonly codeInterpreter: {
+    readonly pythonPath: string;
+    readonly bwrapPath: string;
+    readonly prlimitPath: string;
+  };
 }
 
 export interface DefaultDashboardGenerationConfig {

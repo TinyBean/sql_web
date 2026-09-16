@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { parseHTML } from "linkedom";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 
 function dashboard(value: number): DashboardState {
   return {
@@ -56,13 +57,14 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   let disposed = 0;
   let resized = 0;
   let chartOption: Record<string, unknown> | undefined;
+  const chartOptions: Record<string, unknown>[] = [];
   Object.defineProperty(browser, "echarts", {
     configurable: true,
     value: {
       init() {
         initialized += 1;
         return {
-          setOption(option: Record<string, unknown>) { chartOption = option; },
+          setOption(option: Record<string, unknown>) { chartOption = option; chartOptions.push(option); },
           resize() { resized += 1; },
           dispose() { disposed += 1; },
         };
@@ -231,8 +233,27 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   const gaugeSeries = chartOption?.["series"] as Array<Record<string, unknown>>;
   assert.equal(gaugeSeries.length, 3);
   assert.equal(gaugeSeries.every((series) => series["type"] === "gauge"), true);
-  renderer.render({ ...dashboard(2), widgets: [] });
+
+  const defaults = createDefaultDashboard();
+  renderer.render({ ...defaults, widgets: defaults.widgets.slice(0, 2) });
+  assert.equal(initialized, 5);
   assert.equal(disposed, 3);
+  assert.deepEqual([...grid.querySelectorAll<HTMLElement>(".metric-overview.metric-size-wide")].map((card) => card.dataset["widgetId"]),
+    ["mt-oee-overview", "st-oee-overview"]);
+  for (const [index, option] of chartOptions.slice(-2).entries()) {
+    const widget = defaults.widgets[index]!;
+    const card = grid.querySelector(`[data-widget-id='${widget.id}']`)!;
+    assert.equal(card.querySelector(".overview-oee span")?.textContent, "Overall OEE");
+    assert.equal(card.querySelector(".overview-oee strong")?.textContent,
+      Number(widget.data[0]?.["overall_oee_percent"]).toFixed(2) + "%");
+    const series = option["series"] as Array<{ name: string; data: Array<{ value: number }> }>;
+    assert.deepEqual(series.map((gauge) => gauge.name), ["Availability", "Performance", "Yield"]);
+    assert.deepEqual(series.map((gauge) => gauge.data[0]?.value), [
+      widget.data[0]?.["avg_availability_percent"], widget.data[0]?.["avg_performance_percent"], widget.data[0]?.["avg_yield_percent"],
+    ]);
+  }
+  renderer.render({ ...dashboard(2), widgets: [] });
+  assert.equal(disposed, 5);
   renderer.dispose();
   assert.equal(grid.children.length, 0);
 });

@@ -18,7 +18,8 @@ import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 const SESSION_A = "session-dashboard-a";
 const SESSION_B = "session-dashboard-b";
 const DEFAULT_WIDGET_IDS = [
-  "overall-oee-overview",
+  "mt-oee-overview",
+  "st-oee-overview",
   "oee-trend-weekly-2026",
   "oee-trend-monthly-2026",
   "oee-trend-quarterly-2026",
@@ -93,7 +94,7 @@ test("previews a default dashboard without creating session artifacts", (t) => {
   assert.equal(existsSync(sessionDirectory), false);
 });
 
-test("initializes and restores the pinned nine-card dashboard per session", (t) => {
+test("initializes and restores the pinned ten-card dashboard per session", (t) => {
   const { dashboard, artifacts } = fixture(t);
   const first = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(first.revision, 0);
@@ -200,7 +201,7 @@ test("validates snapshot shape and emits only a transient full update plus compa
 test("accepts stringified model-server arguments and preserves an existing widget size", async (t) => {
   const { dashboard, artifacts } = fixture(t);
   const baseline = dashboard.loadOrInitialize(SESSION_A);
-  const original = baseline.widgets.find((widget) => widget.id === "overall-oee-overview");
+  const original = baseline.widgets.find((widget) => widget.id === "mt-oee-overview");
   assert.ok(original);
   const snapshot = createSnapshot(artifacts, SESSION_A, "mt oee compatibility", [
     { oee_pct: 23.95 },
@@ -214,7 +215,7 @@ test("accepts stringified model-server arguments and preserves an existing widge
     snapshot,
     date_range: JSON.stringify({ start: "2026-08-31", end: "2026-09-06" }),
     widget: JSON.stringify({
-      id: "overall-oee-overview",
+      id: "mt-oee-overview",
       kind: "kpi",
       title: "Overall OEE",
       subtitle: "上周",
@@ -237,7 +238,7 @@ test("accepts stringified model-server arguments and preserves an existing widge
   const current = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(current.revision, 1);
   assert.deepEqual(current.dateRange, { start: "2026-08-31", end: "2026-09-06" });
-  const updated = current.widgets.find((widget) => widget.id === "overall-oee-overview");
+  const updated = current.widgets.find((widget) => widget.id === "mt-oee-overview");
   assert.equal(updated?.size, original.size);
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
@@ -248,15 +249,15 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
   assert.equal(state.dataAsOf, "2026-09-15T02:03:34.568Z");
   assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-09-14" });
   assert.deepEqual(state.widgets.map((widget) => widget.size), [
-    "wide", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
+    "wide", "wide", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
   ]);
   const overview = state.widgets[0];
   assert.ok(overview?.kind === "overview");
-  assert.equal(overview.data[0]?.["overall_oee_percent"], 56.676983039421856);
-  assert.equal(overview.encoding.label, "2026 年 Overall Test OEE（01-01 至 09-14）");
-  assert.equal(overview.encoding.gauges.length, 5);
+  assert.equal(overview.data[0]?.["overall_oee_percent"], 51.55133290776901);
+  assert.equal(overview.encoding.label, "Overall OEE");
+  assert.equal(overview.encoding.gauges.length, 3);
 
-  const trends = state.widgets.slice(1, 4);
+  const trends = state.widgets.slice(2, 5);
   assert.deepEqual(trends.map((widget) => widget.data.length), [37, 9, 3]);
   for (const trend of trends) {
     assert.ok(trend.kind === "line");
@@ -267,18 +268,18 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
     assert.equal(trend.data.filter((row) => row["min_point"] !== null).length, 1);
   }
   assert.equal(trends[0]?.data[0]?.["period_label"], "2026-W00");
-  assert.equal(state.widgets[4]?.data.length, 6);
-  const machines = state.widgets[5]!;
+  assert.equal(state.widgets[5]?.data.length, 6);
+  const machines = state.widgets[6]!;
   assert.equal(machines.kind, "table");
   assert.equal(machines.title, "OEE 机台 TOP10（周/月/季）· 极值单项对应");
   assert.equal(machines.data.length, 6);
   for (const row of machines.data) {
-    const original: DashboardRow | undefined = state.widgets[4]!.data.find((item) =>
+    const original: DashboardRow | undefined = state.widgets[5]!.data.find((item) =>
       item["grain"] === row["grain"] && item["point_type"] === row["point_type"]);
     assert.equal(row["period_label"], original?.["period_label"]);
     assert.equal(row["oee_percent"], original?.["oee_percent"]);
   }
-  const actions = state.widgets.slice(6);
+  const actions = state.widgets.slice(7);
   assert.deepEqual(actions.map((widget) => widget.title), [
     "改善措施与责任人 · 周（W36）",
     "改善措施与责任人 · 月（2026-09）",
@@ -300,7 +301,7 @@ test("an edit before initialization uses the pinned baseline and reset restores 
     baseRevision: 0,
     widgetId: "oee-trend-weekly-2026",
   }).dashboard;
-  assert.equal(edited.widgets.length, 8);
+  assert.equal(edited.widgets.length, 9);
   const restarted = new SessionDashboardStore(artifacts, createDefaultDashboard);
   assert.deepEqual(restarted.loadOrPreview(SESSION_A), edited);
   assert.deepEqual(restarted.loadOrInitialize(SESSION_B), preview);

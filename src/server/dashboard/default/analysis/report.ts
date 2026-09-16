@@ -33,6 +33,28 @@ export const AnalysisReportSchema = Type.Object({
 
 export type AnalysisReport = Static<typeof AnalysisReportSchema>;
 
+/** Some compatible providers stringify nested JSON tool arguments. Decode only structural fields. */
+export function parseAnalysisReport(value: unknown): AnalysisReport {
+  const structural = new Set(["periods", "groups", "items", "evidence_ids", "loss_reference"]);
+  const decode = (input: unknown, key = ""): unknown => {
+    if (structural.has(key) && typeof input === "string") {
+      try { input = JSON.parse(input) as unknown; }
+      catch { throw new Error(key + " 必须是数组/对象或合法的 JSON 字符串"); }
+    }
+    if (Array.isArray(input)) return input.map((entry) => decode(entry));
+    if (input && typeof input === "object") {
+      return Object.fromEntries(Object.entries(input).map(([name, entry]) => [name, decode(entry, name)]));
+    }
+    return input;
+  };
+  const decoded = decode(value);
+  if (!Value.Check(AnalysisReportSchema, decoded)) {
+    const first = [...Value.Errors(AnalysisReportSchema, decoded)][0];
+    throw new Error("报告字段或结构无效：" + (first ? first.instancePath + " " + first.message : "请提交完整三期、每期 MT/ST 两组"));
+  }
+  return decoded;
+}
+
 function assertReadableText(value: string, field: string): void {
   // Keep business identifiers such as Q1, W36, ADH075 and MT/ST intact.
   const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|execute_sql|submit_analysis|evidence_ids?|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
@@ -42,9 +64,9 @@ function assertReadableText(value: string, field: string): void {
 }
 
 export function validateAnalysisReport(
-  value: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
+  input: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
 ): { report: AnalysisReport; rows: Record<PeriodKey, DashboardRow[]> } {
-  if (!Value.Check(AnalysisReportSchema, value)) throw new Error("报告字段或结构无效，请按 submit_analysis 参数结构提交完整三期、每期 MT/ST 两组");
+  const value = parseAnalysisReport(input);
   const rows = {} as Record<PeriodKey, DashboardRow[]>;
   const checkRefs = (ids: readonly string[]): void => {
     for (const id of ids) {

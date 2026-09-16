@@ -252,7 +252,7 @@ test("restores current dashboard after restart and compaction while retaining th
   assert.ok(keptEntry);
   session.sessionManager.appendCompaction("第一轮看板讨论已压缩", keptEntry.id, 40_000);
   const current = await store.editDashboard(created.id, {
-    action: "remove", baseRevision: 0, widgetId: "overall-oee-overview",
+    action: "remove", baseRevision: 0, widgetId: "mt-oee-overview",
   });
   setInitial({ ...created.dashboard, widgets: [], dataAsOf: "2026-09-17T01:00:00.000Z" });
   store.dispose();

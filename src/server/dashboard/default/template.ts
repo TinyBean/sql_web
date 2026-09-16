@@ -2,9 +2,10 @@ import { parseDashboardState, type DashboardState } from "../../../shared/dashbo
 
 // Frozen from session 01a0a299-72d4-7826-95ea-f521e796e3fc, revision 19:
 // .data/sessions/2026-09-15T01-06-00-532Z_01a0a299-72d4-7826-95ea-f521e796e3fc.jsonl
-// Trend cards use week/month/quarter order; snapshot metrics and timestamps are preserved.
+// Trend cards use week/month/quarter order; their metrics and timestamps are preserved.
 // The former MT/ST bar is replaced with a machine ranking table for the same
-// date range and extrema; the other eight cards retain their frozen contents.
+// date range and extrema. The overview is split into full-width MT/ST cards,
+// computed separately for that date range; trend/table contents stay frozen.
 // Only the revision starts over for a new session. No source-session files are
 // needed at runtime, and opening the dashboard never refreshes these snapshots.
 const DEFAULT_DASHBOARD: DashboardState = {
@@ -17,44 +18,34 @@ const DEFAULT_DASHBOARD: DashboardState = {
   },
   "widgets": [
     {
-      "id": "overall-oee-overview",
+      "id": "mt-oee-overview",
       "kind": "overview",
-      "title": "Overall OEE",
-      "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
       "size": "wide",
+      "title": "MT · OEE 概览",
+      "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
       "data": [
         {
-          "overall_oee_percent": 56.676983039421856,
-          "mt_oee_percent": 51.484914842176266,
-          "st_oee_percent": 61.869051236667474,
-          "avg_availability_percent": 70.91631466869268,
-          "avg_performance_percent": 80.7730309103925,
-          "avg_yield_percent": 98.74551059147475
+          "overall_oee_percent": 51.55133290776901,
+          "avg_availability_percent": 65.9790042584808,
+          "avg_performance_percent": 79.4095365161564,
+          "avg_yield_percent": 98.3704577874588
         }
       ],
       "encoding": {
         "value": "overall_oee_percent",
-        "label": "2026 年 Overall Test OEE（01-01 至 09-14）",
-        "description": "MT/ST 日 OEE 等权平均；覆盖 484/514 个可计算日类型",
+        "label": "Overall OEE",
+        "description": "MT 日 OEE 等权平均；覆盖 245/257 个可计算业务日",
         "gauges": [
           {
-            "name": "MT OEE",
-            "column": "mt_oee_percent"
-          },
-          {
-            "name": "ST OEE",
-            "column": "st_oee_percent"
-          },
-          {
-            "name": "平均 Availability",
+            "name": "Availability",
             "column": "avg_availability_percent"
           },
           {
-            "name": "平均 Performance",
+            "name": "Performance",
             "column": "avg_performance_percent"
           },
           {
-            "name": "平均 Yield",
+            "name": "Yield",
             "column": "avg_yield_percent"
           }
         ]
@@ -63,10 +54,51 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "Overall Test OEE = AVG(MT/ST 日 Test OEE)×100；日 Test OEE = Availability×Performance×Yield；多日为可计算日 OEE 等权平均（非按机台/产量加权）。PCIe 机台（TSPH001-013）已排除；仅统计有效 LOT（P/M/R/A/F/L 开头）",
+      "metricDefinition": "MT Overall OEE = AVG(MT 日 Test OEE)×100；日 Test OEE = Availability×Performance×Yield。四项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
       "warnings": [
-        "514 个日类型中 484 个可计算，30 个因缺 Availability 或 DUT 数据未计入平均",
-        "2026-09 为截至 09-14 的部分月数据"
+        "MT 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，四项指标仅使用 OEE 可计算日"
+      ]
+    },
+    {
+      "id": "st-oee-overview",
+      "kind": "overview",
+      "size": "wide",
+      "title": "ST · OEE 概览",
+      "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
+      "data": [
+        {
+          "overall_oee_percent": 61.705900449088816,
+          "avg_availability_percent": 75.78892046162244,
+          "avg_performance_percent": 82.15021201649581,
+          "avg_yield_percent": 99.0799770086894
+        }
+      ],
+      "encoding": {
+        "value": "overall_oee_percent",
+        "label": "Overall OEE",
+        "description": "ST 日 OEE 等权平均；覆盖 245/257 个可计算业务日",
+        "gauges": [
+          {
+            "name": "Availability",
+            "column": "avg_availability_percent"
+          },
+          {
+            "name": "Performance",
+            "column": "avg_performance_percent"
+          },
+          {
+            "name": "Yield",
+            "column": "avg_yield_percent"
+          }
+        ]
+      },
+      "format": {
+        "unit": "%",
+        "precision": 2
+      },
+      "metricDefinition": "ST Overall OEE = AVG(ST 日 Test OEE)×100；日 Test OEE = Availability×Performance×Yield。四项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "warnings": [
+        "ST 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，四项指标仅使用 OEE 可计算日"
       ]
     },
     {

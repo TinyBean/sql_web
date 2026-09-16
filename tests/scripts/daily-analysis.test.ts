@@ -8,7 +8,11 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
-import { applyAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
+import { applyAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
+import { analysisBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
+import { createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/tools.ts";
+import { SessionArtifactStore } from "../../src/server/tool/artifact-store.ts";
+import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
 import { generateAnalyzedDashboard } from "../../src/server/dashboard/default/analysis/run.ts";
 import { buildDefaultDashboardInTransaction } from "../../src/server/dashboard/default/build.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
@@ -66,6 +70,107 @@ function reportFor(context: AnalysisContext): AnalysisReport {
   })) };
 }
 
+test("daily queries reuse shared tools and freeze complete evidence without copying rows into context", async (t) => {
+  const { config, directory, connections } = fixture(t);
+  const writer = new DatabaseSync(config.databasePath);
+  for (let index = 0; index < 205; index += 1) {
+    writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)")
+      .run("ADH" + index, "P-LOT", "Conversion", "5000", "2026-01-05", 3600);
+  }
+  writer.close();
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  database.exec("BEGIN");
+  const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
+  const artifacts = new SessionArtifactStore(directory, "test-snapshots");
+  const evidence = new AnalysisEvidence(database, undefined, artifacts);
+  const context = evidence.context(base, "2026-01-12");
+  const loss = evidence.measureLoss("week", context.periods.week, [], [], true);
+  assert.equal(loss.rows.length, 207);
+  assert.equal(loss.truncated, false);
+  const preview = evidenceOutput(loss);
+  assert.equal(preview.details.preview.rows.length, 3);
+  assert.equal(preview.details.preview.truncated, true);
+  assert.ok(preview.content[0]!.text.length < 2500);
+  assert.doesNotMatch(preview.content[0]!.text, /WITH facts/u);
+  const frozen = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(loss.snapshot!.name).filePath, "utf8"));
+  assert.deepEqual(frozen.rows, loss.rows);
+  const report = reportFor(context);
+  const item = report.periods[0]!.groups[0]!.items[0]!;
+  item.category = "availability";
+  item.evidence_ids.push(loss.id);
+  item.loss_reference = { evidence_id: loss.id, row_index: 201 };
+  assert.equal(validateAnalysisReport(report, context, evidence.records).rows.week[0]!["loss_hours"], 1);
+
+  const interpreter = await CodeInterpreterRuntime.create({ ...config.analysis.codeInterpreter, projectRoot: directory });
+  t.after(() => interpreter.dispose());
+  const tools = createAnalysisTools(evidence, interpreter);
+  const sql = tools.find((tool) => tool.name === "execute_sql")!;
+  const run = (params: Record<string, unknown>) => sql.execute("query", params, undefined, undefined, undefined as never);
+  const concurrent = new DatabaseSync(config.databasePath);
+  concurrent.prepare("UPDATE oee_availability SET time_span=7200 WHERE tool_name LIKE 'ADH%'").run();
+  concurrent.close();
+  const result = await run({ sql: "SELECT tool_name, time_span FROM oee_availability WHERE tool_name LIKE 'ADH%' ORDER BY tool_name", save_as: "all-machines" });
+  const details = JSON.parse(result.content.find((part) => part.type === "text")!.text);
+  assert.equal(details.row_count, 205);
+  assert.equal(details.preview.rows.length, 3);
+  assert.equal(details.preview.rows[0].row.time_span, 3600, "borrowed queries retain the original transaction");
+  assert.equal(evidence.records.get(details.evidence_id)!.rows.length, 205);
+  await assert.rejects(run({ sql: "SELECT 0", save_as: "all-machines" }), /已固定/u);
+  await assert.rejects(run({ sql: "SELECT 0", save_as: loss.snapshot!.name }), /保留名称/u);
+  await assert.rejects(run({ sql: "DELETE FROM oee_availability" }), /只读/u);
+  await assert.rejects(run({ sql: "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100001) SELECT i FROM n", save_as: "too-many" }), /快照未保存/u);
+  assert.throws(() => artifacts.resolveDataSnapshot("too-many"));
+  const empty = await run({ sql: "SELECT 1 WHERE 0" });
+  assert.equal(JSON.parse(empty.content.find((part) => part.type === "text")!.text).row_count, 0);
+  const python = tools.find((tool) => tool.name === "code_interpreter");
+  if (interpreter.status.available) {
+    assert.ok(python);
+    const calculated = await python.execute("python", {
+      snapshot: details.snapshot.name,
+      code: "emit_result(metrics={'count': len(snapshot_rows), 'seconds': sum(row['time_span'] for row in snapshot_rows)})",
+    }, undefined, undefined, undefined as never);
+    assert.deepEqual(calculated.details.result.metrics, { count: 205, seconds: 205 * 3600 });
+  } else {
+    assert.equal(python, undefined, "SQL snapshots remain available when the sandbox is unavailable");
+  }
+  database.exec("COMMIT");
+});
+
+test("stringified report structures are decoded before strict validation without echoing the report", (t) => {
+  const { config, connections } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  const evidence = new AnalysisEvidence(database);
+  const context = evidence.context(buildDefaultDashboardInTransaction(database, "2026-01-12"), "2026-01-12");
+  const report = reportFor(context);
+  assert.deepEqual(parseAnalysisReport({ periods: JSON.stringify(report.periods) }), report);
+  const nested = { periods: report.periods.map((period) => ({ ...period, groups: JSON.stringify(period.groups) })) };
+  assert.deepEqual(validateAnalysisReport(nested, context, evidence.records).report, report);
+  assert.throws(() => parseAnalysisReport({ periods: "[" }), /合法的 JSON/u);
+  assert.throws(() => parseAnalysisReport({ periods: JSON.stringify([{ ...report.periods[0], period: "invalid" }]) }), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(error.message.length < 500);
+    assert.doesNotMatch(error.message, /Performance|Socket/u);
+    return true;
+  });
+});
+
+test("daily model budgets respect deployment limits and reserve compaction/output space", (t) => {
+  const { config, directory } = fixture(t);
+  const budget = analysisBudget({ contextWindow: 1_000_000, maxTokens: 131072 }, config.analysis);
+  assert.equal(budget.contextWindow, 262144);
+  assert.equal(budget.maxTokens, 32768);
+  assert.equal(budget.compaction.enabled, true);
+  assert.ok(budget.compaction.reserveTokens > budget.maxTokens);
+  const smaller = analysisBudget({ contextWindow: 16384, maxTokens: 8192 }, config.analysis);
+  assert.equal(smaller.maxTokens, 4096);
+  assert.ok(smaller.compaction.keepRecentTokens < smaller.contextWindow - smaller.compaction.reserveTokens);
+  for (const name of ["SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW", "SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS"]) {
+    for (const value of ["0", "-1", "NaN", "1.5"]) assert.throws(() => loadDataCommandConfig(directory, { [name]: value }), /整数 token/u);
+  }
+});
+
 test("analysis evidence shares the metrics snapshot and validates six unchanged columns and actual measured hours", (t) => {
   const { config, connections } = fixture(t);
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
@@ -93,12 +198,12 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   item.evidence_ids.push(loss.id);
   item.loss_reference = { evidence_id: loss.id, row_index: 0 };
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
-  assert.equal(analyzed.widgets[6]?.data[0]?.["loss_hours"], 2.5);
-  assert.equal(analyzed.widgets[6]?.data[1]?.["loss_hours"], null);
-  assert.match(String(analyzed.widgets[6]?.data[0]?.["suggested_owner"]), /工艺工程/u);
+  assert.equal(analyzed.widgets[7]?.data[0]?.["loss_hours"], 2.5);
+  assert.equal(analyzed.widgets[7]?.data[1]?.["loss_hours"], null);
+  assert.match(String(analyzed.widgets[7]?.data[0]?.["suggested_owner"]), /工艺工程/u);
   const original = createDefaultDashboard();
   assert.deepEqual(analyzed.widgets.map((w) => [w.id, w.size]), original.widgets.map((w) => [w.id, w.size]));
-  for (const widget of analyzed.widgets.slice(6)) {
+  for (const widget of analyzed.widgets.slice(7)) {
     assert.equal(widget.kind, "table");
     if (widget.kind !== "table") continue;
     assert.deepEqual(widget.encoding.columns, [
@@ -164,7 +269,7 @@ test("reports require readable business text while preserving structured audit r
   }
   report.periods[0]!.groups[0]!.items[0]!.measure = "下周复查各机台损失时长，以每个有数据业务日的平均损失小时进行比较。";
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
-  assert.equal(analyzed.widgets[6]?.data[0]?.["measure"], report.periods[0]!.groups[0]!.items[0]!.measure);
+  assert.equal(analyzed.widgets[7]?.data[0]?.["measure"], report.periods[0]!.groups[0]!.items[0]!.measure);
 });
 
 test("unavailable models publish new metrics and empty analysis, without creating website sessions", { timeout: 30_000 }, async (t) => {
@@ -174,7 +279,7 @@ test("unavailable models publish new metrics and empty analysis, without creatin
     publish(_file, state) {
       assert.equal(state.dateRange?.end, "2026-01-12");
       assert.ok(Math.abs(Number(state.widgets[0]?.data[0]?.["overall_oee_percent"]) - 100 / 6) < 1e-10);
-      for (const widget of state.widgets.slice(6)) {
+      for (const widget of state.widgets.slice(7)) {
         assert.deepEqual(widget.data, []);
         assert.ok(widget.warnings.some((warning) => warning.includes("本次分析暂不可用")));
       }
@@ -208,7 +313,7 @@ test("parent terminates a blocked child after base delivery and waits for proces
   assert.equal(result.analysisStatus, "timed_out");
   const pid = Number(readFileSync(path.join(result.analysisArtifactDir, "pid"), "utf8"));
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-  assert.ok(result.state.widgets.slice(6).every((widget) => widget.data.length === 0));
+  assert.ok(result.state.widgets.slice(7).every((widget) => widget.data.length === 0));
 });
 
 test("invalid timeout settings fail early", (t) => {
@@ -235,22 +340,28 @@ test("empty current periods and missing minima retain nulls and require explicit
   }
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
   assert.equal(analyzed.widgets[0]?.data[0]?.["overall_oee_percent"], null);
-  assert.ok(analyzed.widgets.slice(6).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
+  assert.ok(analyzed.widgets.slice(7).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
 });
 
-async function mockModel(t: TestContext, directory: string, responder: (body: Record<string, unknown>) => unknown): Promise<Server> {
+async function mockModel(t: TestContext, directory: string, responder: (body: Record<string, unknown>) => unknown,
+  options: { contextWindow?: number; maxTokens?: number; firstPromptTokens?: number } = {}): Promise<Server> {
+  let requests = 0;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     try {
       const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>;
-      const calls = responder(body);
+      const result = responder(body);
+      const calls = typeof result === "string" ? null : result;
+      requests += 1;
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: ' + JSON.stringify({
         id: "completion", object: "chat.completion.chunk", created: 0, model: "test-model",
-        choices: [{ index: 0, delta: { role: "assistant", ...(calls ? { tool_calls: calls } : { content: "done" }) }, finish_reason: null }],
+        choices: [{ index: 0, delta: { role: "assistant", ...(calls ? { tool_calls: calls } : { content: typeof result === "string" ? result : "done" }) }, finish_reason: null }],
       }) + '\n\ndata: ' + JSON.stringify({
         id: "completion", choices: [{ index: 0, delta: {}, finish_reason: calls ? "tool_calls" : "stop" }],
+        ...(requests === 1 && options.firstPromptTokens ? { usage: { prompt_tokens: options.firstPromptTokens,
+          completion_tokens: 1, total_tokens: options.firstPromptTokens + 1 } } : {}),
       }) + '\n\ndata: [DONE]\n\n');
     } catch (error) {
       response.writeHead(500); response.end(String(error));
@@ -266,7 +377,7 @@ async function mockModel(t: TestContext, directory: string, responder: (body: Re
   writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({ providers: { test: {
     baseUrl: "http://127.0.0.1:" + address.port + "/v1", api: "openai-completions", apiKey: "test-key",
     models: [{ id: "test-model", name: "test model", reasoning: false, input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 }],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: options.contextWindow ?? 128000, maxTokens: options.maxTokens ?? 8192 }],
   } } }));
   return server;
 }
@@ -279,8 +390,16 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
   const { config, directory } = fixture(t);
   let turn = 0;
   let rejected = false;
-  await mockModel(t, directory, () => {
+  await mockModel(t, directory, (body) => {
     turn += 1;
+    assert.equal(body["max_tokens"] ?? body["max_completion_tokens"], 8192);
+    if (turn > 1) {
+      const messages = body["messages"] as { role: string; name?: string; content: string }[];
+      for (const message of messages.filter((message) => message.role === "tool" && message.name === "measure_loss")) {
+        assert.ok(message.content.length < 2500, "full SQL and evidence rows stay outside the prompt");
+      }
+      assert.doesNotMatch(JSON.stringify(messages), /Received arguments:/u);
+    }
     if (turn === 1) return [
       toolCall(0, "read", { path: path.join(directory, "outside.txt") }),
       toolCall(1, "execute_sql", { sql: "DELETE FROM oee_availability" }),
@@ -307,7 +426,7 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
     }
     if (turn === 2) { report.periods[0]!.minimum_evidence = "missing"; rejected = true; }
     if (turn === 3) report.periods[0]!.groups[0]!.items[0]!.issue = "本周换线损失 2.5 小时（q11 第 0 行）";
-    return [toolCall(0, "submit_analysis", report)];
+    return [toolCall(0, "submit_analysis", { ...report, periods: JSON.stringify(report.periods) })];
   });
   writeFileSync(path.join(directory, "outside.txt"), "must not be readable");
   const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
@@ -315,21 +434,55 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
   assert.equal(rejected, true);
   assert.ok(turn >= 5, "requires readable prose and a separate evidence review after the valid draft");
   assert.ok(JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "report.json"), "utf8")).verification);
-  assert.match(String(result.state.widgets[6]?.data[0]?.["issue"]), /Conversion/u);
-  assert.equal(result.state.widgets[6]?.data[0]?.["loss_hours"], 2.5);
-  assert.equal(result.state.widgets[7]?.data[0]?.["loss_hours"], 7.5);
+  assert.match(String(result.state.widgets[7]?.data[0]?.["issue"]), /Conversion/u);
+  assert.equal(result.state.widgets[7]?.data[0]?.["loss_hours"], 2.5);
+  assert.equal(result.state.widgets[8]?.data[0]?.["loss_hours"], 7.5);
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
   assert.match(events, /read 仅允许/u);
   assert.match(events, /只读/u);
   assert.match(events, /最低点/u);
   assert.match(events, /业务用户可理解/u);
-  assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(6)), /\bq\d+\b|第\s*0\s*行/u);
+  assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(7)), /\bq\d+\b|第\s*0\s*行/u);
   assert.doesNotMatch(events, /must not be readable/u);
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
   const writer = new DatabaseSync(config.databasePath);
   assert.equal(writer.prepare("SELECT COUNT(*) AS n FROM oee_availability").get()?.["n"], 12);
   writer.exec("BEGIN IMMEDIATE; COMMIT");
   writer.close();
+});
+
+test("ephemeral analysis compacts context and restores snapshot references and draft status", { timeout: 30_000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  let turn = 0;
+  let summaries = 0;
+  await mockModel(t, directory, (body) => {
+    assert.ok(Number(body["max_tokens"] ?? body["max_completion_tokens"]) <= 32768);
+    if (!body["tools"]) { summaries += 1; return "已检查数据库。继续按系统给定比较基准、证据快照目录和草稿状态完成三期报告。"; }
+    turn += 1;
+    if (turn === 1) return [
+      toolCall(0, "execute_sql", { sql: "SELECT 1 AS marker", save_as: "compact-check" }),
+      // A long failed query makes enough history eligible for an actual summary.
+      toolCall(1, "execute_sql", { sql: "-- " + "x".repeat(70_000) + "\nSELECT 1", save_as: "large-request" }),
+    ];
+    const messages = JSON.stringify(body["messages"]);
+    assert.match(messages, /compact-check/u);
+    assert.match(messages, /minimum_evidence/u, "system rules and comparison anchors survive compaction");
+    const runDir = path.join(config.analysis.artifactDir, "compaction-test");
+    const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
+    const report = reportFor(context);
+    if (turn >= 3) {
+      assert.match(messages, /\\"draft_validated\\":true/u);
+      report.verification = "已逐条复查本期、最低点与历史证据，缺失保持缺失；措施与根因区分。";
+    }
+    return [toolCall(0, "submit_analysis", report)];
+  }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000 });
+  const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "compaction-test");
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assert.ok(summaries >= 1, "SDK must actually invoke compaction, not merely enable its setting");
+  const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
+  assert.match(events, /"type":"compaction_end"/u);
+  assert.match(events, /"contextWindow":262144/u);
+  assert.match(events, /"maxOutputTokens":32768/u);
 });
 
 test("tool budget includes malformed calls and terminates at sixty without a report", { timeout: 30_000 }, async (t) => {
@@ -340,5 +493,5 @@ test("tool budget includes malformed calls and terminates at sixty without a rep
   assert.match(result.analysisReason ?? "", /60 次/u);
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(events.filter((event) => event.type === "tool_call").length, 60);
-  assert.ok(result.state.widgets.slice(6).every((widget) => widget.data.length === 0));
+  assert.ok(result.state.widgets.slice(7).every((widget) => widget.data.length === 0));
 });

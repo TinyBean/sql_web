@@ -109,38 +109,31 @@ export interface DashboardToolContext {
   readonly sessionId: string;
 }
 
-export function createAgentTools(
-  database: AppDatabase,
+export const executeSqlParameters = Type.Object({
+  sql: Type.String({ description: "A single read-only SQLite SELECT, WITH, PRAGMA, or EXPLAIN query." }),
+  parameters: sqlParameters,
+  limit: Type.Optional(Type.Integer({
+    description: "Inline row limit from 1 to 200. With save_as, only controls preview rows and is capped at 20; the snapshot still contains the complete result.",
+    minimum: 1, maximum: INLINE_MAX_ROWS,
+  })),
+  save_as: Type.Optional(Type.String({
+    description: "Short meaningful logical snapshot name. The server normalizes Chinese or English text, digits, spaces, underscores, and hyphens and returns the canonical name.",
+    minLength: 1, maxLength: 64,
+  })),
+});
+
+export function createExecuteSqlTool(
+  database: Pick<AppDatabase, "query" | "exportQueryJson">,
   artifacts: SessionArtifactStore,
-  codeInterpreter: CodeInterpreterRuntime,
-  usedGeneratedImageIds: Set<string> = new Set<string>(),
-  dashboardContext?: DashboardToolContext,
 ) {
-  const executeSqlTool = defineTool({
+  return defineTool({
     name: "execute_sql",
     label: "执行只读 SQL",
     description:
       "Execute exactly one read-only SQLite query. Without save_as, return up to 200 rows inline. With save_as, atomically store the complete result as a session-scoped data snapshot (up to 100,000 rows or 32 MiB) and return its normalized logical name, metadata, up to 20 preview rows, and the exact Python row contract. Reusing a name replaces it only after the new query completes successfully. Pass the returned logical name to code_interpreter.snapshot; never copy preview rows into Python code. Snapshot rows are already objects, not positional arrays. Writes, DDL, and state-changing PRAGMAs are rejected.",
     promptSnippet: "执行只读 SQLite 查询;可用 save_as 保存会话级数据快照供后续计算",
     executionMode: "sequential",
-    parameters: Type.Object({
-      sql: Type.String({ description: "A single read-only SQLite SELECT, WITH, PRAGMA, or EXPLAIN query." }),
-      parameters: sqlParameters,
-      limit: Type.Optional(
-        Type.Integer({
-          description:
-            "Inline row limit from 1 to 200. With save_as, only controls preview rows and is capped at 20; the snapshot still contains the complete result.",
-          minimum: 1,
-          maximum: INLINE_MAX_ROWS,
-        }),
-      ),
-      save_as: Type.Optional(Type.String({
-        description:
-          "Short meaningful logical snapshot name. The server normalizes Chinese or English text, digits, spaces, underscores, and hyphens and returns the canonical name.",
-        minLength: 1,
-        maxLength: 64,
-      })),
-    }),
+    parameters: executeSqlParameters,
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<ExecuteSqlDetails>> {
       signal?.throwIfAborted();
       if ("output_format" in (params as object)) {
@@ -211,7 +204,16 @@ export function createAgentTools(
       };
     },
   });
+}
 
+export function createAgentTools(
+  database: Pick<AppDatabase, "query" | "exportQueryJson">,
+  artifacts: SessionArtifactStore,
+  codeInterpreter: CodeInterpreterRuntime,
+  usedGeneratedImageIds: Set<string> = new Set<string>(),
+  dashboardContext?: DashboardToolContext,
+) {
+  const executeSqlTool = createExecuteSqlTool(database, artifacts);
   const currentTimeTool = defineTool({
     name: "get_current_time",
     label: "查询当前时间",

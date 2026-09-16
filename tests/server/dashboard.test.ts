@@ -1,4 +1,5 @@
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
+import type { DashboardRow } from "../../src/shared/dashboard.ts";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -267,7 +268,16 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
   }
   assert.equal(trends[0]?.data[0]?.["period_label"], "2026-W00");
   assert.equal(state.widgets[4]?.data.length, 6);
-  assert.equal(state.widgets[5]?.kind, "bar");
+  const machines = state.widgets[5]!;
+  assert.equal(machines.kind, "table");
+  assert.equal(machines.title, "OEE 机台 TOP10（周/月/季）· 极值单项对应");
+  assert.equal(machines.data.length, 6);
+  for (const row of machines.data) {
+    const original: DashboardRow | undefined = state.widgets[4]!.data.find((item) =>
+      item["grain"] === row["grain"] && item["point_type"] === row["point_type"]);
+    assert.equal(row["period_label"], original?.["period_label"]);
+    assert.equal(row["oee_percent"], original?.["oee_percent"]);
+  }
   const actions = state.widgets.slice(6);
   assert.deepEqual(actions.map((widget) => widget.title), [
     "改善措施与责任人 · 周（W36）",

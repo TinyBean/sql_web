@@ -14,6 +14,7 @@ import { createDefaultDashboardDefinition } from "../../src/server/dashboard/def
 import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/periods.ts";
 import { addDays, latestClosedBusinessDate } from "../../src/server/database/business-dates.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
+import type { DashboardRow } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import type { SyncOptions, SyncResult } from "../../scripts/database/oee-data-store.ts";
 
@@ -108,6 +109,18 @@ test("generates nine live cards using canonical calculations, stable extrema, an
     ["2026-W00", 20, 20, 20], ["2026-W01", 20, null, null],
   ]);
   assert.equal(state.widgets[4]?.data.length, 6);
+  const machines = state.widgets[5]!;
+  assert.equal(machines.kind, "table");
+  assert.deepEqual(machines.data.map((row) => [row["grain"], row["point_type"]]), [
+    ["周", "最低"], ["周", "最高"], ["月", "最低"], ["月", "最高"], ["季", "最低"], ["季", "最高"],
+  ]);
+  for (const row of machines.data) {
+    const extreme: DashboardRow | undefined = state.widgets[4]!.data.find((item) =>
+      item["grain"] === row["grain"] && item["point_type"] === row["point_type"]);
+    assert.equal(row["period_label"], extreme?.["period_label"]);
+    assert.equal(row["oee_percent"], extreme?.["oee_percent"]);
+    assert.match(String(row["top10_machines"]), /^1\.ST-01\(ST 20\.00%\)、2\.MT-01\(MT /u);
+  }
   const actions = state.widgets[6]!;
   assert.deepEqual(actions.data, []);
   assert.ok(actions.warnings.some((warning) => warning.includes("本次分析暂不可用")));
@@ -121,6 +134,8 @@ test("empty and cross-year dashboards contain null metrics and accurate period w
   assert.equal(empty.widgets.length, 9);
   assert.equal(empty.widgets[0]?.data[0]?.["overall_oee_percent"], null);
   assert.equal(empty.widgets[4]?.data.length, 0);
+  assert.equal(empty.widgets[5]?.kind, "table");
+  assert.deepEqual(empty.widgets[5]?.data, []);
   assert.equal(empty.widgets[6]?.data.length, 0);
   assert.ok(empty.widgets[0]?.warnings.some((warning) => warning.includes("2027-01-01")));
   assert.equal(empty.widgets[1]?.data[0]?.["period_label"], "2027-W00");

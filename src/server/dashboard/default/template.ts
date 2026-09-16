@@ -3,6 +3,8 @@ import { parseDashboardState, type DashboardState } from "../../../shared/dashbo
 // Frozen from session 01a0a299-72d4-7826-95ea-f521e796e3fc, revision 19:
 // .data/sessions/2026-09-15T01-06-00-532Z_01a0a299-72d4-7826-95ea-f521e796e3fc.jsonl
 // Trend cards use week/month/quarter order; snapshot metrics and timestamps are preserved.
+// The former MT/ST bar is replaced with a machine ranking table for the same
+// date range and extrema; the other eight cards retain their frozen contents.
 // Only the revision starts over for a new session. No source-session files are
 // needed at runtime, and opening the dashboard never refreshes these snapshots.
 const DEFAULT_DASHBOARD: DashboardState = {
@@ -584,51 +586,92 @@ const DEFAULT_DASHBOARD: DashboardState = {
     },
     {
       "id": "mt-st-components-2026",
-      "kind": "bar",
-      "title": "MT/ST 三组成项对比（2026 年至今）",
-      "subtitle": "日组成项等权平均，业务日 2026-01-01 至 09-14",
+      "kind": "table",
       "size": "wide",
+      "title": "OEE 机台 TOP10（周/月/季）· 极值单项对应",
+      "subtitle": "与 OEE 极值明细逐项对应的机台 TOP10 list",
       "data": [
         {
-          "kind": "MT",
-          "availability_percent": 65.97,
-          "performance_percent": 79.31,
-          "yield_percent": 98.38
+          "grain": "周",
+          "point_type": "最低",
+          "period_label": "2026-W00",
+          "oee_percent": 41.42,
+          "top10_machines": "1.ADH069(MT 1.09%)、2.ADH189(ST 5.75%)、3.ADH175(ST 8.03%)、4.ADH190(ST 9.20%)、5.ADH179(ST 10.24%)、6.ADH074(MT 10.44%)、7.ADH020(MT 11.27%)、8.ADH191(ST 13.83%)、9.ADH180(ST 13.89%)、10.ADH016(MT 15.08%)"
         },
         {
-          "kind": "ST",
-          "availability_percent": 75.87,
-          "performance_percent": 82.24,
-          "yield_percent": 99.11
+          "grain": "周",
+          "point_type": "最高",
+          "period_label": "2026-W21",
+          "oee_percent": 64.47,
+          "top10_machines": "1.ADH005(MT 20.13%)、2.ADH203(MT 28.96%)、3.ADH124(MT 31.16%)、4.ADH194(ST 31.74%)、5.ADH106(MT 32.62%)、6.ADH040(MT 33.62%)、7.ADH074(MT 35.04%)、8.ADH018(MT 36.28%)、9.ADH024(MT 36.38%)、10.ADH027(MT 37.16%)"
+        },
+        {
+          "grain": "月",
+          "point_type": "最低",
+          "period_label": "2026-01",
+          "oee_percent": 52.4,
+          "top10_machines": "1.ADH153(ST 1.10%)、2.ADH162(ST 6.44%)、3.ADH170(ST 6.72%)、4.ADH005(MT 10.53%)、5.ADH147(ST 14.07%)、6.ADH149(ST 21.54%)、7.ADH109(MT 23.70%)、8.ADH091(MT 25.01%)、9.ADH045(MT 25.13%)、10.ADH101(MT 25.38%)"
+        },
+        {
+          "grain": "月",
+          "point_type": "最高",
+          "period_label": "2026-08",
+          "oee_percent": 59.04,
+          "top10_machines": "1.ADH186(ST 10.43%)、2.ADH182(MT 14.79%)、3.ADH125(ST 17.95%)、4.ADH203(MT 20.16%)、5.ADH204(MT 20.79%)、6.ADH108(MT 27.09%)、7.ADH137(MT 28.94%)、8.ADH076(MT 28.96%)、9.ADH179(ST 29.01%)、10.ADH188(ST 31.59%)"
+        },
+        {
+          "grain": "季",
+          "point_type": "最低",
+          "period_label": "2026-Q1",
+          "oee_percent": 54.06,
+          "top10_machines": "1.ADH005(MT 15.43%)、2.ADH141(MT 24.62%)、3.ADH109(MT 27.07%)、4.ADH113(ST 27.95%)、5.ADH065(MT 32.89%)、6.ADH047(MT 34.95%)、7.ADH017(MT 35.27%)、8.ADH089(MT 36.27%)、9.ADH101(MT 36.60%)、10.ADH045(MT 36.61%)"
+        },
+        {
+          "grain": "季",
+          "point_type": "最高",
+          "period_label": "2026-Q2",
+          "oee_percent": 58.44,
+          "top10_machines": "1.ADH017(MT 25.51%)、2.ADH005(MT 33.39%)、3.ADH203(MT 36.75%)、4.ADH204(MT 37.10%)、5.ADH049(MT 38.26%)、6.ADH162(ST 40.95%)、7.ADH043(MT 41.30%)、8.ADH123(MT 41.88%)、9.ADH023(MT 41.90%)、10.ADH053(MT 41.93%)"
         }
       ],
       "encoding": {
-        "category": "kind",
-        "series": [
+        "columns": [
           {
-            "name": "Availability",
-            "column": "availability_percent"
+            "key": "grain",
+            "label": "粒度"
           },
           {
-            "name": "Performance",
-            "column": "performance_percent"
+            "key": "point_type",
+            "label": "极值"
           },
           {
-            "name": "Yield",
-            "column": "yield_percent"
+            "key": "period_label",
+            "label": "周期"
+          },
+          {
+            "key": "oee_percent",
+            "label": "周期OEE%"
+          },
+          {
+            "key": "top10_machines",
+            "label": "TOP10 机台（机台 OEE 最低）"
           }
-        ],
-        "orientation": "vertical"
+        ]
       },
       "format": {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "各类型日组成项的等权平均百分数值（仅计可计算日）：Availability = Machine_Running 秒 / (机台数×86400)；Performance = SUM(IN_QTY)/SUM(DUT_NUM)；Yield = SUM(OUT_QTY)/SUM(IN_QTY)。用于解释 ST OEE 61.87% 高于 MT 51.48% 的结构差异",
+      "metricDefinition": "与 OEE 极值明细（周/月/季）逐项对应；周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总：运行秒数÷（有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×SUM(OUT_QTY)÷SUM(IN_QTY)×100；MT/ST 合并为一台，按 Availability 累计时长标注主要类型，并列取 MT。按未舍入机台 OEE 升序取最低 10 台，并列按机台编号；不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计，缺日不会补零。",
       "warnings": [
-        "MT 与 ST 各有 242/257 个日类型可计算，缺数据日未计入平均",
-        "2026-09 为截至 09-14 的部分月数据",
-        "本图替代原 7 日组成项趋势（方案 A），与主页面全期口径统一"
+        "周粒度最低点 2026-W00 仅 4 天（01-01~01-04，元旦假期），Availability 仅 53% 为主要拖累",
+        "月粒度最低点 2026-01 同样受月初低 Availability 影响",
+        "周 2026-W00（2026-01-01 至 2026-01-04）：可计算机台 106/114，展示 10 台；入榜机台 Availability 覆盖 1–4/4 天，DUT 覆盖 1–4/4 天；缺失或零分母为 NULL，不参与排名",
+        "周 2026-W21（2026-05-25 至 2026-05-31）：可计算机台 149/149，展示 10 台；入榜机台 Availability 覆盖 1–7/7 天，DUT 覆盖 1–7/7 天；缺失或零分母为 NULL，不参与排名",
+        "月 2026-01（2026-01-01 至 2026-01-31）：可计算机台 146/148，展示 10 台；入榜机台 Availability 覆盖 1–21/31 天，DUT 覆盖 1–16/31 天；缺失或零分母为 NULL，不参与排名",
+        "月 2026-08（2026-08-01 至 2026-08-31）：可计算机台 150/150，展示 10 台；入榜机台 Availability 覆盖 3–27/31 天，DUT 覆盖 2–29/31 天；缺失或零分母为 NULL，不参与排名",
+        "季 2026-Q1（2026-01-01 至 2026-03-31）：可计算机台 149/149，展示 10 台；入榜机台 Availability 覆盖 25–82/90 天，DUT 覆盖 20–75/90 天；缺失或零分母为 NULL，不参与排名",
+        "季 2026-Q2（2026-04-01 至 2026-06-30）：可计算机台 151/151，展示 10 台；入榜机台 Availability 覆盖 35–86/91 天，DUT 覆盖 28–88/91 天；缺失或零分母为 NULL，不参与排名"
       ]
     },
     {

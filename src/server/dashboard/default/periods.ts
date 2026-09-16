@@ -35,3 +35,9 @@ export function weekLabel(day: string): string {
   const week = ordinal < firstMonday ? 0 : Math.floor((ordinal - firstMonday) / 7) + 1;
   return day.slice(0, 4) + "-W" + String(week).padStart(2, "0");
 }
+
+export function periodLabel(day: string, grain: "周" | "月" | "季"): string {
+  if (grain === "周") return weekLabel(day);
+  if (grain === "月") return day.slice(0, 7);
+  return day.slice(0, 4) + "-Q" + Math.ceil(Number(day.slice(5, 7)) / 3);
+}

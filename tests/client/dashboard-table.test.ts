@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { parseHTML } from "linkedom";
 import type { DashboardState, DashboardTableWidget } from "../../src/shared/dashboard.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 
 function table(id: string, size: DashboardTableWidget["size"], columnCount = 2): DashboardTableWidget {
   return {
@@ -178,6 +179,29 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   renderer.previewOrder(["numeric", "tall", "empty"]);
   assert.equal(grid.firstElementChild, card("numeric"));
   assert.equal(card("tall").querySelectorAll("tbody tr").length, 2000);
+
+  const defaults = createDefaultDashboard();
+  const machineTable = defaults.widgets[5]!;
+  assert.equal(machineTable.kind, "table");
+  state = { ...defaults, widgets: [machineTable] };
+  renderer.render(state);
+  const machineCard = card(machineTable.id);
+  assert.equal(machineCard.style.gridColumn, "span 12");
+  assert.deepEqual([...machineCard.querySelectorAll("th")].map((cell) => cell.textContent), [
+    "粒度", "极值", "周期", "周期OEE%", "TOP10 机台（机台 OEE 最低）",
+  ]);
+  assert.equal(machineCard.querySelectorAll("tbody tr").length, 6);
+  const lists = [...machineCard.querySelectorAll("tbody tr td:last-child")];
+  assert.deepEqual(lists.map((cell) => cell.textContent), machineTable.data.map((row) => row["top10_machines"]));
+  assert.ok(lists.every((cell) => cell.textContent!.includes("10.")));
+  const machineColumns = [...machineCard.querySelectorAll("col")];
+  assert.ok(Number.parseFloat(machineColumns[4]!.style.width) > Number.parseFloat(machineColumns[0]!.style.width));
+  width = 420;
+  notifyResize();
+  assert.equal(machineCard.style.gridColumn, "span 12");
+  assert.deepEqual([...machineCard.querySelectorAll("tbody tr td:last-child")].map((cell) => cell.textContent),
+    machineTable.data.map((row) => row["top10_machines"]), "narrow layouts must retain every machine in all six lists");
+
   width = 1200;
   notifyResize(false);
   assert.equal(frames.size, 1);

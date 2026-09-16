@@ -2,8 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 import { parseDashboardState, type DashboardRow, type DashboardState, type DashboardWidget } from "../../../shared/dashboard.ts";
 import { getDefaultTestOeeSql } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { createDefaultDashboard } from "./template.ts";
-import { dashboardPeriods, weekLabel } from "./periods.ts";
+import { dashboardPeriods, periodLabel } from "./periods.ts";
 import { addDays, type DatePeriod } from "../../database/business-dates.ts";
+import { buildMachineExtremesTable } from "./machine-extremes.ts";
 
 type Grain = "周" | "月" | "季";
 interface PeriodData extends DatePeriod {
@@ -49,16 +50,10 @@ function coverageWarnings(rows: readonly DashboardRow[]): string[] {
   ];
 }
 
-function labelFor(day: string, grain: Grain): string {
-  if (grain === "周") return weekLabel(day);
-  if (grain === "月") return day.slice(0, 7);
-  return day.slice(0, 4) + "-Q" + Math.ceil(Number(day.slice(5, 7)) / 3);
-}
-
 function groupPeriods(rows: readonly DashboardRow[], grain: Grain): PeriodData[] {
   const groups = new Map<string, DashboardRow[]>();
   for (const row of rows) {
-    const label = labelFor(String(row["day"]), grain);
+    const label = periodLabel(String(row["day"]), grain);
     const group = groups.get(label) ?? [];
     group.push(row);
     groups.set(label, group);
@@ -193,25 +188,12 @@ export function buildDefaultDashboardInTransaction(
     data: extremeRows, warnings: commonWarnings,
     metricDefinition: "周/月/季的 MT/ST 日 OEE 等权平均极值；组成项为同一期间各自可计算日类型的平均值",
   });
-  replace("mt-st-components-2026", {
-    title: "MT/ST 三组成项对比（" + periods.year + " 年至今）",
-    subtitle: rangeText + " · 仅统计 OEE 可计算日类型",
-    data: ["MT", "ST"].map((kind) => {
-      const rows = valid.filter((row) => row["kind"] === kind);
-      return {
-        kind, availability_percent: percentage(average(rows, "availability")),
-        performance_percent: percentage(average(rows, "performance")),
-        yield_percent: percentage(average(rows, "final_yield")),
-      };
-    }),
-    metricDefinition: "按 MT/ST 分组，分别平均 OEE 可计算日类型的 Availability、Performance、Yield",
-    warnings: commonWarnings,
-  });
+  replace("mt-st-components-2026", buildMachineExtremesTable(database, extremeRows, periods.trend, commonWarnings));
   for (const [key, grain, period] of [
     ["week", "周", periods.week], ["month", "月", periods.month], ["quarter", "季", periods.quarter],
   ] as const) {
     const periodDaily = query(database, getDefaultTestOeeSql(period.start, period.end).sql);
-    const label = labelFor(key === "week" ? period.start : period.end, grain);
+    const label = periodLabel(key === "week" ? period.start : period.end, grain);
     const periodText = period.start + " 至 " + period.end;
     const warnings = [...syncWarnings, ...coverageWarnings(periodDaily), "本次分析暂不可用：尚未生成临时 Agent 报告", "责任人列为职能建议，需管理层确认后指派到人"];
     if (key !== "week" && isPartial({ ...period, label, rows: [] }, grain)) {

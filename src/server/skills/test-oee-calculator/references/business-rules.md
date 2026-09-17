@@ -59,6 +59,15 @@ Availability 使用 `oee_availability.step` 和 `oee_availability.tool_name`；P
 - 两张事实表先分别计算到 `业务日 + MT/ST` 粒度，再以 Availability 日结果为主表，按这两个键左连接 DUT 日结果。
 - DUT 中没有对应 Availability 日类型的结果不进入默认 OEE；Availability 没有匹配 DUT 或任一组成项无法计算时，该日该类型 OEE 为 `NULL`。
 
+### 业务周与周编号
+
+- 一个业务周为周日至周六的七个业务日闭区间。每个业务日仍为当天 08:30 至次日 08:30，因此完整业务周在次周日 08:30 结束。
+- 周编号使用周日起始的 `%U`，标签为 `YYYY-Wnn`；每年首个周日开始 W01，之前的业务日为 W00。不得使用周一起始的 `%W` 或 ISO 周编号。
+- 例如 2026-W36 对应业务日 **2026-09-06 至 2026-09-12**；2026-09-13 已属于 W37。2026-W00 为 01-01 至 01-03，W01 为 01-04 至 01-10。
+- “最近完整周”取截止已结束业务日当日或之前最近的周六作为结束日，向前六天为开始日。截止日为周六时包含该周；截止日为周日时，结束日是前一天周六。例如截至业务日 2026-09-16，最近完整周为 09-06 至 09-12。
+- 年内趋势仍从 1 月 1 日开始，跨年周在趋势中按各自年份拆分并标注部分周；最近完整周保留完整七天，必要时跨年查询。周趋势、周极值、对应机台排名和周改善分析须使用一致的周范围。
+- 历史快照可能采用旧周定义。解释既有快照时保留其原日期与口径；按新定义查询或更新周卡片时重新计算对应日期范围，不能只改周标签。
+
 ### 单日组成项
 
 对每个 `业务日 + MT/ST`：
@@ -102,6 +111,33 @@ Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 
 - Yield 包含所有 `test_stage`，包括 `1st`、`Rescreen` 和 `2ndRescreen`。
 - 不限制比率上限，不舍入中间值，也不静默修正负值或其他源数据异常。
+
+### 概览字段映射与核对
+
+`get_default_dashboard_sql(view: "overview")` 返回一行，可保存为一个快照供多张概览卡片引用。该行同时包含合并指标和分类指标，按以下映射选择字段：
+
+| 卡片口径 | OEE（`encoding.value`） | Availability | Performance | Yield |
+|---|---|---|---|---|
+| MT | `mt_oee_percent` | `mt_availability_percent` | `mt_performance_percent` | `mt_yield_percent` |
+| ST | `st_oee_percent` | `st_availability_percent` | `st_performance_percent` | `st_yield_percent` |
+| MT/ST 合并 | `overall_oee_percent` | `avg_availability_percent` | `avg_performance_percent` | `avg_yield_percent` |
+
+三个组成项分别写入 `encoding.gauges[].column`。分类四项指标均对该类型 OEE 可计算业务日等权平均，合并四项指标均对全部可计算日类型等权平均。不能将分类 OEE 搭配共享快照中的合并 `avg_*` 系数。
+
+分类覆盖使用同类型前缀，以下 `{type}` 为 `mt` 或 `st`：
+
+| 字段 | 含义 |
+|---|---|
+| `{type}_calculable_day_count` | 该类型日 OEE 非 NULL 的业务日数，也是四项平均值共同的样本数 |
+| `{type}_selected_day_count` | 所选闭区间的业务日数，包含无数据日 |
+| `{type}_availability_day_count` | 该类型有有效 Availability 记录的业务日数，包含全为 loss 的日 |
+| `{type}_dut_day_count` | 该类型 Availability 日结果有匹配 DUT 的业务日数，包含因零分母而 OEE 不可计算的日 |
+
+合并覆盖沿用 `calculable_day_type_count`、`selected_day_type_count`、`availability_day_type_count`、`dut_day_type_count`，单位为日类型，不能除以二推算某一类型的覆盖。
+
+提交 `update_dashboard` 前核对字段映射、日期、分类覆盖和卡片标题、说明一致。仅修改标题或 OEE 字段不会自动筛选三个系数。旧快照缺少分类字段时，用当前工具重新生成 SQL 并执行保存，不从合并均值补齐。
+
+OEE 保持 `AVG(日 Availability × 日 Performance × 日 Yield)`，不要求等于三个平均系数的乘积。MT/ST 系数可能真实相同，不能仅按数值相同判错；应核对分类字段及其计算样本。
 
 ## 日期过滤与数据覆盖
 

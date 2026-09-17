@@ -243,10 +243,10 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("preserves the source metrics and layout with empty fallback analysis", (t) => {
+test("preserves nonweekly metrics and layout with refreshed Sunday-week fallback data", (t) => {
   const { dashboard } = fixture(t);
   const state = dashboard.loadOrInitialize(SESSION_A);
-  assert.equal(state.dataAsOf, "2026-09-15T02:03:34.568Z");
+  assert.equal(state.dataAsOf, "2026-09-17T02:08:39.697Z");
   assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-09-14" });
   assert.deepEqual(state.widgets.map((widget) => widget.size), [
     "wide", "wide", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
@@ -258,7 +258,7 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
   assert.equal(overview.encoding.gauges.length, 3);
 
   const trends = state.widgets.slice(2, 5);
-  assert.deepEqual(trends.map((widget) => widget.data.length), [37, 9, 3]);
+  assert.deepEqual(trends.map((widget) => widget.data.length), [38, 9, 3]);
   for (const trend of trends) {
     assert.ok(trend.kind === "line");
     assert.deepEqual(trend.encoding.series.map((series) => series.column), [
@@ -268,6 +268,9 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
     assert.equal(trend.data.filter((row) => row["min_point"] !== null).length, 1);
   }
   assert.equal(trends[0]?.data[0]?.["period_label"], "2026-W00");
+  assert.equal(trends[0]?.data.at(-1)?.["period_label"], "2026-W37");
+  assert.ok(trends[0]?.warnings.some((warning) => warning.includes("周日至周六")));
+  assert.equal(trends[0]?.data.find((row) => row["period_label"] === "2026-W36")?.["oee_percent"], 55.61);
   assert.equal(state.widgets[5]?.data.length, 6);
   const machines = state.widgets[6]!;
   assert.equal(machines.kind, "table");
@@ -281,10 +284,11 @@ test("preserves the source metrics and layout with empty fallback analysis", (t)
   }
   const actions = state.widgets.slice(7);
   assert.deepEqual(actions.map((widget) => widget.title), [
-    "改善措施与责任人 · 周（W36）",
+    "改善措施与责任人 · 周（2026-W36）",
     "改善措施与责任人 · 月（2026-09）",
     "改善措施与责任人 · 季（2026-Q3）",
   ]);
+  assert.match(actions[0]!.subtitle, /2026-09-06 至 2026-09-12/u);
   for (const action of actions) {
     assert.equal(action.kind, "table");
     assert.deepEqual(action.data, []);

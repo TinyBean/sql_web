@@ -179,8 +179,8 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
   const evidence = new AnalysisEvidence(database);
   const context = evidence.context(base, "2026-01-12");
-  assert.deepEqual(context.comparisons.week.minimum.range, { start: "2026-01-01", end: "2026-01-04" });
-  assert.deepEqual(context.comparisons.week.current.range, { start: "2026-01-05", end: "2026-01-11" });
+  assert.deepEqual(context.comparisons.week.minimum.range, { start: "2026-01-01", end: "2026-01-03" });
+  assert.deepEqual(context.comparisons.week.current.range, { start: "2026-01-04", end: "2026-01-10" });
   const writer = new DatabaseSync(config.databasePath);
   writer.prepare("UPDATE oee_availability SET time_span=18000 WHERE final_state='Conversion'").run();
   writer.close();
@@ -332,7 +332,7 @@ test("empty current periods and missing minima retain nulls and require explicit
   const evidence = new AnalysisEvidence(database);
   const context = evidence.context(base, "2027-01-01");
   assert.equal(context.comparisons.week.minimum.range, undefined);
-  assert.deepEqual(context.comparisons.week.current.range, { start: "2026-12-21", end: "2026-12-27" });
+  assert.deepEqual(context.comparisons.week.current.range, { start: "2026-12-20", end: "2026-12-26" });
   const report = reportFor(context);
   for (const period of report.periods) for (const group of period.groups) {
     group.items = [];

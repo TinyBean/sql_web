@@ -589,7 +589,27 @@ export function getDefaultTestOeeDashboardSql(
   COUNT(daily_test_oee) AS calculable_day_type_count,
   COUNT(*) AS selected_day_type_count,
   SUM(CASE WHEN availability_rows>0 THEN 1 ELSE 0 END) AS availability_day_type_count,
-  COUNT(dut_rows) AS dut_day_type_count
+  COUNT(dut_rows) AS dut_day_type_count,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN availability END)
+    AS mt_availability_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN performance END)
+    AS mt_performance_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN final_yield END)
+    AS mt_yield_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN availability END)
+    AS st_availability_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN performance END)
+    AS st_performance_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN final_yield END)
+    AS st_yield_percent,
+  COUNT(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_calculable_day_count,
+  COUNT(CASE WHEN kind='MT' THEN 1 END) AS mt_selected_day_count,
+  COUNT(CASE WHEN kind='MT' AND availability_rows>0 THEN 1 END) AS mt_availability_day_count,
+  COUNT(CASE WHEN kind='MT' THEN dut_rows END) AS mt_dut_day_count,
+  COUNT(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_calculable_day_count,
+  COUNT(CASE WHEN kind='ST' THEN 1 END) AS st_selected_day_count,
+  COUNT(CASE WHEN kind='ST' AND availability_rows>0 THEN 1 END) AS st_availability_day_count,
+  COUNT(CASE WHEN kind='ST' THEN dut_rows END) AS st_dut_day_count
 FROM ${dailySubquery}`
     : `SELECT
   day,

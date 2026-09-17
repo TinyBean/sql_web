@@ -26,6 +26,8 @@ export function latestClosedBusinessDate(now = new Date()): string {
 
 export function latestCompleteWeek(throughDate: string): DatePeriod {
   assertDate(throughDate);
-  const end = addDays(throughDate, -new Date(throughDate + "T00:00:00.000Z").getUTCDay());
+  // throughDate is a closed business-day label; include that Saturday when available.
+  const daysSinceSaturday = (new Date(throughDate + "T00:00:00.000Z").getUTCDay() + 1) % 7;
+  const end = addDays(throughDate, -daysSinceSaturday);
   return { start: addDays(end, -6), end };
 }

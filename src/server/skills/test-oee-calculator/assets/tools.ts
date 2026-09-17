@@ -47,7 +47,7 @@ export function createTools(): ToolDefinition[] {
     name: "get_default_dashboard_sql",
     label: "获取默认 Test OEE 看板 SQL",
     description:
-      "生成默认 Test OEE 看板所需的确定性 SQLite 查询，直接复用标准逐日 SQL。overview 返回恰好一行的周期汇总和完整覆盖计数；trends 返回逐业务日的 MT/ST 宽表。所有以 _percent 结尾的列都是百分数值（percentage points，例如 56.65 表示 56.65%），可直接配合 Dashboard 的 % unit，禁止再次乘以 100。工具只返回 SQL，不连接数据库。",
+      "生成默认 Test OEE 看板所需的确定性 SQLite 查询，直接复用标准逐日 SQL。overview 返回恰好一行，包含合并及 MT/ST 各自的四项指标和覆盖计数。分类概览的 OEE、Availability、Performance、Yield 必须全部绑定同一 mt_ 或 st_ 前缀的 _percent 字段，四项仅平均该类型 OEE 可计算日；avg_*_percent 是 MT/ST 合并均值，只用于合并概览。分类覆盖使用同前缀的 calculable_day_count、selected_day_count、availability_day_count、dut_day_count，不能从合并计数推算。trends 返回逐业务日的 MT/ST 宽表，按需要选择视图。所有 _percent 列都是百分数值（例如 56.65 表示 56.65%），可直接配合 Dashboard 的 % unit，禁止再次乘以 100。工具只返回 SQL，不连接数据库。",
     executionMode: "sequential",
     parameters: Type.Object({
       start_date: Type.String({

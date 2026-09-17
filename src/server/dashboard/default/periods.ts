@@ -30,9 +30,9 @@ export function weekLabel(day: string): string {
   assertDate(day);
   const yearStart = day.slice(0, 4) + "-01-01";
   const start = new Date(yearStart + "T00:00:00.000Z");
-  const firstMonday = (8 - start.getUTCDay()) % 7;
+  const firstSunday = (7 - start.getUTCDay()) % 7;
   const ordinal = (Date.parse(day) - Date.parse(yearStart)) / 86_400_000;
-  const week = ordinal < firstMonday ? 0 : Math.floor((ordinal - firstMonday) / 7) + 1;
+  const week = ordinal < firstSunday ? 0 : Math.floor((ordinal - firstSunday) / 7) + 1;
   return day.slice(0, 4) + "-W" + String(week).padStart(2, "0");
 }
 

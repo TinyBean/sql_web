@@ -70,7 +70,7 @@ function groupPeriods(rows: readonly DashboardRow[], grain: Grain): PeriodData[]
 function isPartial(period: PeriodData, grain: Grain): boolean {
   const start = new Date(period.start + "T00:00:00.000Z");
   const nextDay = addDays(period.end, 1);
-  if (grain === "周") return start.getUTCDay() !== 1 ||
+  if (grain === "周") return start.getUTCDay() !== 0 ||
     (Date.parse(nextDay) - Date.parse(period.start)) / 86_400_000 !== 7;
   if (grain === "月") return period.start.slice(8) !== "01" || nextDay.slice(8) !== "01";
   return !["01-01", "04-01", "07-01", "10-01"].includes(period.start.slice(5)) ||
@@ -142,11 +142,11 @@ export function buildDefaultDashboardInTransaction(
     const partials = grouped.filter((period) => isPartial(period, grain));
     const warnings = [...commonWarnings];
     if (partials.length) warnings.push("部分" + grain + "：" + partials.map((period) => period.label).join("、") + "；与完整周期比较时需注意覆盖天数");
-    if (grain === "周") warnings.push("周标签采用周一为起始的 %W 编号；年初首个周一之前为 W00");
+    if (grain === "周") warnings.push("业务周为周日至周六；周标签采用周日起始的 %U 编号，年初首个周日之前为 W00");
     replace("oee-trend-" + grainNames[grain] + "-2026", {
       title: "OEE " + grain + "趋势（" + periods.year + " 年至今）",
       subtitle: rangeText + " · MT/ST 日 OEE 等权平均",
-      metricDefinition: "按" + grain + "聚合可计算的 MT/ST 日 OEE 并等权平均；极值按未舍入值比较，并列取最早期间",
+      metricDefinition: "按" + grain + (grain === "周" ? "（周日至周六）" : "") + "聚合可计算的 MT/ST 日 OEE 并等权平均；极值按未舍入值比较，并列取最早期间",
       warnings,
       data: grouped.map((period) => ({
         period_label: period.label,

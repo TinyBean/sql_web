@@ -12,7 +12,7 @@ import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
 import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
 import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
 import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/periods.ts";
-import { addDays, latestClosedBusinessDate } from "../../src/server/database/business-dates.ts";
+import { addDays, latestClosedBusinessDate, latestCompleteWeek } from "../../src/server/database/business-dates.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { DashboardRow } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
@@ -58,26 +58,46 @@ test("resolves closed business dates at 08:30 and across month, year, and leap d
 test("aligns the two API ranges and includes the previous year's complete week", () => {
   const plan = dailyUpdatePlan(["--dry-run"], new Date("2027-01-02T01:00:00Z"));
   assert.equal(plan.dryRun, true);
-  assert.equal(plan.syncStart, "2026-12-21");
+  assert.equal(plan.syncStart, "2026-12-20");
   assert.deepEqual(dashboardPeriods(plan.throughDate).trend, { start: "2027-01-01", end: "2027-01-01" });
-  assert.deepEqual(dashboardPeriods(plan.throughDate).week, { start: "2026-12-21", end: "2026-12-27" });
+  assert.deepEqual(dashboardPeriods(plan.throughDate).week, { start: "2026-12-20", end: "2026-12-26" });
   assert.deepEqual(plan.requests, [
-    { dataset: "availability", initialStartDate: "2026-12-21", throughDate: "2027-01-01", overlapDays: 2 },
-    { dataset: "dut_utilization", initialStartDate: "2026-12-22", throughDate: "2027-01-02", overlapDays: 2 },
+    { dataset: "availability", initialStartDate: "2026-12-20", throughDate: "2027-01-01", overlapDays: 2 },
+    { dataset: "dut_utilization", initialStartDate: "2026-12-21", throughDate: "2027-01-02", overlapDays: 2 },
   ]);
-  assert.deepEqual(dashboardPeriods("2026-09-13").week, { start: "2026-09-07", end: "2026-09-13" });
+  assert.deepEqual(dashboardPeriods("2026-09-13").week, { start: "2026-09-06", end: "2026-09-12" });
 });
 
-test("week labels match SQLite %W including years beginning on Monday and Sunday", () => {
+test("complete weeks end on Saturday and keep business-day and year boundaries", () => {
+  for (const [throughDate, start, end] of [
+    ["2026-09-11", "2026-08-30", "2026-09-05"],
+    ["2026-09-12", "2026-09-06", "2026-09-12"],
+    ["2026-09-13", "2026-09-06", "2026-09-12"],
+    ["2026-09-16", "2026-09-06", "2026-09-12"],
+    ["2026-09-19", "2026-09-13", "2026-09-19"],
+    ["2026-01-03", "2025-12-28", "2026-01-03"],
+    ["2026-01-04", "2025-12-28", "2026-01-03"],
+    ["2028-03-04", "2028-02-27", "2028-03-04"],
+  ] as const) assert.deepEqual(latestCompleteWeek(throughDate), { start, end });
+  assert.deepEqual(latestCompleteWeek(latestClosedBusinessDate(new Date("2026-09-13T00:29:59Z"))),
+    { start: "2026-08-30", end: "2026-09-05" });
+  assert.deepEqual(latestCompleteWeek(latestClosedBusinessDate(new Date("2026-09-13T00:30:00Z"))),
+    { start: "2026-09-06", end: "2026-09-12" });
+});
+
+test("week labels match SQLite %U including years beginning on Monday and Sunday", () => {
   const database = new DatabaseSync(":memory:");
   try {
-    const label = database.prepare("SELECT strftime('%Y-W%W', ?) AS label");
+    const label = database.prepare("SELECT strftime('%Y-W%U', ?) AS label");
     for (const year of [2023, 2024, 2026, 2027, 2028]) {
       for (let day = year + "-01-01"; day <= year + "-12-31"; day = addDays(day, 1)) {
         assert.equal(weekLabel(day), label.get(day)?.["label"]);
       }
     }
   } finally { database.close(); }
+  assert.equal(weekLabel("2026-09-06"), "2026-W36");
+  assert.equal(weekLabel("2026-09-12"), "2026-W36");
+  assert.equal(weekLabel("2026-09-13"), "2026-W37");
 });
 
 test("generates ten live cards using canonical calculations, stable extrema, and empty analysis placeholders", (t) => {
@@ -124,8 +144,38 @@ test("generates ten live cards using canonical calculations, stable extrema, and
   const actions = state.widgets[7]!;
   assert.deepEqual(actions.data, []);
   assert.ok(actions.warnings.some((warning) => warning.includes("本次分析暂不可用")));
-  assert.match(actions.subtitle ?? "", /2025-12-29 至 2026-01-04/u);
+  assert.match(actions.subtitle ?? "", /2025-12-28 至 2026-01-03/u);
   assert.doesNotMatch(JSON.stringify(state), /W36|09-14|484\/514/u);
+});
+
+test("weekly trends, extrema, machine rankings and complete-week analysis share Sunday boundaries", (t) => {
+  const { config } = fixture(t);
+  const writer = new DatabaseSync(config.databasePath);
+  seed(writer, "2026-01-03", "MT", 20); // Saturday: W00, 20%
+  seed(writer, "2026-01-04", "MT", 40); // Sunday: W01, 10%
+  seed(writer, "2026-01-10", "MT", 10); // Saturday: W01, 40%
+  seed(writer, "2026-01-11", "MT", 80); // Sunday: W02, 5%
+  writer.close();
+
+  const state = buildDefaultDashboard(config.databasePath, "2026-01-11");
+  const weekly = state.widgets[2]!;
+  assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
+    ["2026-W00", 20, null, null], ["2026-W01", 25, 25, null], ["2026-W02", 5, null, 5],
+  ]);
+  assert.equal(weekly.warnings.find((warning) => warning.startsWith("部分周：")),
+    "部分周：2026-W00、2026-W02；与完整周期比较时需注意覆盖天数");
+  assert.match(weekly.metricDefinition, /周日至周六/u);
+  const extremes = state.widgets[5]!.data.filter((row) => row["grain"] === "周");
+  assert.deepEqual(extremes.map((row) => [row["point_type"], row["period_label"], row["oee_percent"]]), [
+    ["最高", "2026-W01", 25], ["最低", "2026-W02", 5],
+  ]);
+  const machines = state.widgets[6]!;
+  assert.deepEqual(machines.data.filter((row) => row["grain"] === "周").map((row) => [
+    row["period_label"], row["top10_machines"],
+  ]), [["2026-W02", "1.MT-01(MT 5.00%)"], ["2026-W01", "1.MT-01(MT 16.00%)"]]);
+  assert.ok(machines.warnings.some((warning) => warning.includes("2026-W01（2026-01-04 至 2026-01-10）")));
+  assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
+  assert.match(state.widgets[7]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
 });
 
 test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable days", (t) => {
@@ -153,7 +203,7 @@ test("empty and cross-year dashboards contain null metrics and accurate period w
   assert.equal(empty.widgets[7]?.data.length, 0);
   assert.ok(empty.widgets[0]?.warnings.some((warning) => warning.includes("2027-01-01")));
   assert.equal(empty.widgets[2]?.data[0]?.["period_label"], "2027-W00");
-  assert.match(empty.widgets[7]!.subtitle, /2026-12-21 至 2026-12-27/u);
+  assert.match(empty.widgets[7]!.subtitle, /2026-12-20 至 2026-12-26/u);
   assert.match(empty.widgets[2]!.title, /2027/u);
   assert.match(empty.widgets[8]!.warnings.join(" "), /部分月/u);
 });

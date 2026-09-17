@@ -7,6 +7,7 @@ import { parseDashboardState, type DashboardState } from "../../../../shared/das
 import type { DefaultDashboardGenerationConfig } from "../config.ts";
 import type { AnalysisWorkerRequest } from "./worker.ts";
 import { analysisUnavailable } from "./report.ts";
+import { readAnalysisEvents, summarizeAnalysisEvents } from "./metrics.ts";
 
 export interface DailyAnalysisResult {
   readonly state: DashboardState;
@@ -40,6 +41,7 @@ export async function generateAnalyzedDashboard(
   logger.info("daily.analysis.started", { ...metadata, runDir });
   return new Promise((resolve, reject) => {
     let base: DashboardState | undefined;
+    let baseReadyAt: number | undefined;
     let analyzed: DashboardState | undefined;
     let failure: string | null = null;
     let timedOut = false;
@@ -70,6 +72,7 @@ export async function generateAnalyzedDashboard(
         if (!message || typeof message !== "object" || !("type" in message)) throw new Error("无效的分析子进程消息");
         if (message.type === "base" && "state" in message && !base) {
           base = parseDashboardState(message.state);
+          baseReadyAt = Date.now();
           writeFileSync(path.join(runDir, "base-dashboard.json"), JSON.stringify(base), { mode: 0o600 });
           clearTimeout(timer);
           timer = setTimeout(timeout, config.analysis.timeoutMs);
@@ -93,6 +96,9 @@ export async function generateAnalyzedDashboard(
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       try {
+        writeFileSync(path.join(runDir, "metrics.json"), JSON.stringify(summarizeAnalysisEvents(
+          readAnalysisEvents(path.join(runDir, "events.jsonl")), started, Date.now(), baseReadyAt,
+        ), null, 2), { mode: 0o600 });
         if (stderr) writeFileSync(path.join(runDir, "worker-stderr.log"), stderr, { mode: 0o600 });
         if (!base) {
           const reason = failure ?? "基础看板计算失败 (" + (signal ?? code) + ")";

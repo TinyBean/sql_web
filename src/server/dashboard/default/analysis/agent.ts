@@ -11,7 +11,10 @@ import type { DefaultDashboardAnalysisConfig } from "../config.ts";
 import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext, type Evidence } from "./evidence.ts";
 import { AnalysisReportSchema, parseAnalysisReport, PeriodKeySchema, validateAnalysisReport } from "./report.ts";
 import { analysisBudget } from "./budget.ts";
-import { createAnalysisTools, evidenceOutput } from "./tools.ts";
+import { createAnalysisTools } from "./tools.ts";
+
+import { lossEvidenceOutput } from "./loss-output.ts";
+import { AnalysisDrafts, FinalizeAnalysisSchema, GetAnalysisDraftSchema, parseFinalizeAnalysis } from "./drafts.ts";
 
 export const MAX_ANALYSIS_TOOL_CALLS = 60;
 
@@ -41,7 +44,7 @@ export function analysisPrompt(context: AnalysisContext): string {
     minimum: summary(context.comparisons[key].minimum),
     history: summary(context.comparisons[key].history),
   }]));
-  return `请完成每日默认看板的周、月、季三期改善分析，并调用 submit_analysis 提交一次完整报告。
+  return `请完成每日默认看板的周、月、季三期改善分析，先调用 submit_analysis 保存完整草稿，收到复核要求后，再调用 finalize_analysis 提交复核与修改。
 分析最近完整周、当月累计、当季累计，各期分别覆盖 MT/ST，每类型最多三项建议。
 结合年内对应粒度 Overall OEE 最低点及历史数据，解释问题是否持续、改善或新出现；
 comparison 中写比较结论、覆盖差异及可比性。minimum_evidence/history_evidence 填下面相应 evidence_id，
@@ -49,10 +52,12 @@ group.evidence_ids 必须含本期 current.evidence_id。没有可计算最低�
 阅读 Test OEE Skill 和两个 references 后，优先调用 measure_loss 分别查询三期全部损失状态，
 再按需要用 measure_loss(by_machine=true)、execute_sql 和 Skill SQL 工具自主调查机台、状态及组成项。
 数据库数据采用冻结快照传递。execute_sql 自动保存完整结果，measure_loss 和初始比较证据也附带 snapshot。
-预览不是完整结果：需要计算时将 snapshot.name（初始比较为 snapshot 字符串）传给 code_interpreter.snapshot，使用 snapshot_rows（list[dict]），不要手抄预览或把数据库数据塞进代码/user_input。
-用 enumerate(snapshot_rows) 保留原始行号再排序筛选，输出少量结论及相应 evidence_id/row_index；不要打印完整快照。Python 不可用时使用聚合 SQL 或缩小 measure_loss 范围核实事实。
+measure_loss 的 view.mode=complete 表示全部结果，summary 包含全量派生统计及局部排名；优先直接使用这些确定性统计，不要仅为读取、排序、求和重复调用 Python。execute_sql 的预览不是完整结果：需要额外计算时将 snapshot.name（初始比较为 snapshot 字符串）传给 code_interpreter.snapshot，使用 snapshot_rows（list[dict]），不要手抄预览或把数据库数据塞进代码/user_input。
+用 enumerate(snapshot_rows) 保留原始行号再排序筛选，输出少量结论及相应 evidence_id/row_index；不要打印完整快照。Python 正确示例：emit_result(summary='覆盖核查', metrics={'rows': len(snapshot_rows)})；code 必填，emit_result 只调用一次，空集合与零分母必须处理。Python 不可用时使用聚合 SQL 或缩小 measure_loss 范围核实事实。
 每次请求附带当前证据快照目录、工具剩余额度和草稿状态；压缩后依据目录继续调查，证据编号、完整数据和报告校验不会丢失。
 不要限定为 Assistance、IDLE_NoWIP、HangUp，不得套用固定的措施或责任人映射。
+历史和机台 SQL 补查必须原样复用 Skill get_sql_expressions 返回的日期、LOT、平台、MT/ST、派生状态表达式，不能用 lot_id!='None' 或宽泛 STEP 前缀代替标准过滤。本期损失以 measure_loss 标准口径为准，不得混入未过滤的原始状态查询数值。
+每项 issue 保留判断所需的关键数值、实际分母、主要机台及必要历史对比即可，避免反复抄写整表日期和相同统计；measure 写具体动作及验证指标，不重复 issue。无需在提交前再用自由文本复述完整报告。
 每项 issue 用中文写事实、简要证据及判断；推测必须标注“待验证”，区分状态损失与根因。
 measure 写针对证据的具体操作及验证办法；suggested_owner 仅给建议责任职能，未提供人员资料不得写姓名。
 comparison、issue、measure、suggested_owner、no_findings_reason 面向业务用户，使用简洁中文，按“发现了什么、依据是什么、建议怎么做”表达，数据来源写实际期间和内容，如“本周（09-07 至 09-13）损失统计”“当季机台明细”“1—8 月历史对比”。
@@ -104,14 +109,17 @@ async function runSession(
   const catalog = await loadAgentSkillCatalog();
   let toolCalls = 0;
   let accepted = false;
-  let draftValidated = false;
+  const drafts = new AnalysisDrafts(context, evidence.records);
+  let turnId = 0;
+  let confirmationRequired = false;
+  const toolStartedAt = new Map<string, number>();
   let exhausted = false;
   let modelError: string | undefined;
   const guard: ExtensionFactory = (pi) => {
     pi.on("context", (event) => ({ messages: [
       { role: "custom", customType: "sql_web.analysis.context", display: false, timestamp: Date.now(),
         content: JSON.stringify({ throughDate: context.throughDate, remaining_tool_calls: MAX_ANALYSIS_TOOL_CALLS - toolCalls,
-          draft_validated: draftValidated, review_required: draftValidated && !accepted,
+          draft_validated: drafts.id !== null, draft_id: drafts.id, confirmation_required: confirmationRequired, review_required: drafts.id !== null && !accepted,
           code_interpreter: interpreter.status, evidence: evidence.catalog() }) },
       ...event.messages.filter((message) => message.role !== "custom" || message.customType !== "sql_web.analysis.context")
         .map((message) => message.role === "toolResult" && message.isError ? {
@@ -152,28 +160,47 @@ async function runSession(
       }),
       async execute(_id, params, signal) {
         signal?.throwIfAborted();
-        return evidenceOutput(evidence.measureLoss(params.period, context.periods[params.period], params.states, params.machines, params.by_machine));
+        return lossEvidenceOutput(evidence.measureLoss(params.period, context.periods[params.period], params.states, params.machines, params.by_machine));
       },
     }),
     defineTool({
-      name: "submit_analysis", label: "提交三期分析报告", executionMode: "sequential",
-      description: "Submit all three periods, each with MT and ST groups, evidence references, autonomous priorities/measures/functional owners. Narrative fields must use business-readable Chinese dates, metrics and source descriptions; keep evidence ids and row indices only in structured reference fields, never expose tool or field names in prose. The first valid submission is a draft for evidence review. Review its claims and readability, query more evidence if needed, then resubmit the complete corrected report with verification explaining your checks and corrections. Validation errors can be corrected within the time limit.",
-      parameters: AnalysisReportSchema,
-      prepareArguments: parseAnalysisReport,
+      name: "submit_analysis", label: "保存三期分析草稿", executionMode: "sequential",
+      description: "Save a complete validated draft, never publishes. Returns a new draft_id; previous ids expire. After receiving review instructions, review the evidence in a later model turn and use finalize_analysis with only updates and verification. Do not regenerate an unchanged report. Narrative must be business-readable Chinese; keep evidence references in structured fields.",
+      parameters: AnalysisReportSchema, prepareArguments: parseAnalysisReport,
       async execute(_id, params) {
-        const result = validateAnalysisReport(params, context, evidence.records);
-        if (!draftValidated) {
-          draftValidated = true;
-          onEvent({ type: "analysis_draft", report: result.report });
-          return output({
-            accepted: false, review_required: true,
-            instruction: "请以审稿视角逐条复核此草稿后重新提交完整报告，verification 写明复核结果和修正。逐个核对数值、机台和日期是否确有对应证据；‘最高/持续上升/全部/排除某原因’等结论须核对完整历史，不能只比较首尾。比较损失日均时统一分母，observed_days 是该损失出现日数，不能与全期/可计算日数混用。不要把状态当作已确认根因，comparison 中的解释也须区分事实与待验证假设。检查每项改善目标是否比当前更好、是否可行；不能仅以减少损失小时为由建议取消必要的维护、检测或流程。证据不足的说法应删除、限定范围或补查。核对引用涉及的每一台机、每一期间；无数据不能宣称损失为零。",
+        const draft = drafts.submit(params, turnId);
+        confirmationRequired = false;
+        onEvent({ type: "analysis_draft", turnId, ...draft });
+        return output({ draft_id: draft.draft_id, accepted: false, review_required: true,
+          instruction: "逐条核对数值、机台、日期、完整历史、日均分母和措施可行性，根因推测须待验证。不能把损失出现日数当覆盖天数，不能为降低损失取消必要维护。证据不足须补查、限定或删除。补查若发现原查询口径错误或与草稿冲突，必须用 updates 修正所有受影响的 comparison、issue 和 measure；不能只在 verification 写已核对而保留错误正文。逐项确认正文数值来自当前引用的标准口径证据；旧查询被更正后不能继续沿用其数值，无匹配记录也不能直接宣称为零。然后用 finalize_analysis 提交 verification 和 updates；无修改传 updates=[]。示例：{\"draft_id\":\"返回的ID\",\"verification\":\"复核说明\",\"updates\":[{\"op\":\"update_item\",\"period\":\"week\",\"kind\":\"MT\",\"priority\":1,\"changes\":{\"issue\":\"修正说明\"}}]}。新增、删除、重排使用 replace_group；比较说明使用 update_period。不要重新输出未改字段；需要查看草稿时调用 get_analysis_draft。",
+        });
+      },
+    }),
+    defineTool({
+      name: "get_analysis_draft", label: "读取当前分析草稿", executionMode: "sequential",
+      description: "Read the exact server-held draft after compaction or when needed for review. Optionally filter by period and/or kind. This does not change the draft.",
+      parameters: GetAnalysisDraftSchema,
+      async execute(_id, params) { return output(drafts.get(params)); },
+    }),
+    defineTool({
+      name: "finalize_analysis", label: "提交复核与修改", executionMode: "sequential",
+      description: "Finalize a previously validated draft in a later model turn. verification must explain evidence review. updates=[] confirms without changes. update_period replaces comparison; update_item changes fields at original period/kind/priority (cannot change priority); replace_group replaces a whole group for additions/deletions/reordering. Duplicate or conflicting targets are rejected. The complete merged report undergoes every original validation; failed updates never mutate the draft. The first valid review returns the actual merged report for a short confirmation turn. Check every promised correction against that report, then call again with updates=[] if correct, or provide missing updates; any update requires confirmation in a later turn. Use native arrays/objects, not JSON strings.",
+      parameters: FinalizeAnalysisSchema, prepareArguments: parseFinalizeAnalysis,
+      async execute(_id, params) {
+        const result = drafts.finalize(params, turnId);
+        onEvent({ type: "analysis_review", turnId, ...params });
+        if (!confirmationRequired || params.updates.length > 0) {
+          const draft = drafts.submit(result.report, turnId);
+          confirmationRequired = true;
+          onEvent({ type: "analysis_draft", stage: "merged_review", turnId, ...draft });
+          return output({ accepted: false, confirmation_required: true, draft_id: draft.draft_id,
+            applied_updates: params.updates, merged_report: result.report,
+            instruction: "这是程序实际合并后的完整报告。请核对刚才 verification 声称的每一项修正是否真的出现在对应字段，尤其数值、日期区间、日均分母、历史结论。未出现在 applied_updates 的修改不会自动发生。若有遗漏或错误，在下一轮用新的 draft_id 和 updates 补齐；若所有修正已落入正文，下一轮 finalize_analysis 使用 updates=[] 确认即可。不要在最终 verification 声称未实际应用的修改。",
           });
         }
-        if (!params.verification?.trim()) throw new Error("请先复核草稿的证据与结论，填写 verification，再提交完整报告");
         onReport(result);
         accepted = true;
-        return output({ accepted: true });
+        return output({ accepted: true, draft_id: drafts.id });
       },
     }),
   ];
@@ -184,19 +211,27 @@ async function runSession(
   });
   session.agent.toolExecution = "sequential";
   const unsubscribe = session.subscribe((event) => {
-    if (event.type === "tool_execution_start") {
+    if (event.type === "turn_start") {
+      turnId += 1;
+      onEvent({ type: "model_turn_start", turnId, phase: drafts.id ? "review" : "investigation" });
+    } else if (event.type === "tool_execution_start") {
       // Count schema errors and unknown tools too, before SDK validation.
       toolCalls += 1;
-      onEvent({ type: "tool_call", number: toolCalls, name: event.toolName });
+      toolStartedAt.set(event.toolCallId, Date.now());
+      onEvent({ type: "tool_call", number: toolCalls, name: event.toolName, turnId, toolCallId: event.toolCallId });
     } else if (event.type === "message_end" && event.message.role === "assistant") {
       modelError = event.message.stopReason === "error" ? event.message.errorMessage ?? "模型请求失败" : undefined;
-      onEvent({ type: "assistant", message: event.message });
+      onEvent({ type: "assistant", message: event.message, turnId, outputTokens: event.message.usage.output, phase: drafts.id ? "review" : "investigation" });
     } else if (event.type === "tool_execution_end") {
-      onEvent({ type: "tool_result", name: event.toolName, isError: event.isError, result: event.result });
+      const toolStart = toolStartedAt.get(event.toolCallId);
+      toolStartedAt.delete(event.toolCallId);
+      onEvent({ durationMs: toolStart === undefined ? null : Date.now() - toolStart, type: "tool_result", name: event.toolName, isError: event.isError, result: event.result, turnId, toolCallId: event.toolCallId });
       if (accepted || toolCalls >= MAX_ANALYSIS_TOOL_CALLS) {
         exhausted ||= !accepted;
         void session.abort();
       }
+    } else if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+      onEvent({ ...event, turnId });
     } else if (event.type === "compaction_start" || event.type === "compaction_end") {
       onEvent({ ...event });
     }
@@ -209,7 +244,9 @@ async function runSession(
     // Tool schema/references failures are returned to the model in the same turn.
     // A model that stops with prose instead of submitting gets two repair turns.
     for (let repair = 0; !accepted && !exhausted && !modelError && repair < 2; repair += 1) {
-      await session.prompt("尚未收到有效报告。请根据工具错误修正，并调用 submit_analysis 提交周/月/季、各 MT/ST 的完整分析。不要仅用文本回复。");
+      await session.prompt(drafts.id
+        ? "当前已有有效草稿 " + drafts.id + "。根据错误修正，用 finalize_analysis 提交 verification 和 updates；不要重新输出完整报告。"
+        : "尚无有效草稿。请根据错误修正，调用 submit_analysis 保存三期各 MT/ST 完整草稿，然后复核并 finalize_analysis。不要仅文本回复。");
     }
     if (!accepted) throw new Error(exhausted ? "已达到 60 次工具调用上限" : modelError ?? "未提交有效完整分析报告");
   } catch (error) {

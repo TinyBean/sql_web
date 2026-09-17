@@ -7,47 +7,55 @@ const readableDescription = "面向业务用户的中文说明，用实际日期
 const text = Type.String({ minLength: 1, maxLength: 1800, description: readableDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
 export const PeriodKeySchema = Type.Union([Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
+export const AnalysisKindSchema = Type.Union([Type.Literal("MT"), Type.Literal("ST")]);
+export const AnalysisItemSchema = Type.Object({
+  priority: Type.Integer({ minimum: 1, maximum: 3 }),
+  category: Type.Union([Type.Literal("availability"), Type.Literal("performance"), Type.Literal("yield"), Type.Literal("other")]),
+  issue: text, measure: text,
+  suggested_owner: Type.String({ minLength: 1, maxLength: 160, description: readableDescription }),
+  evidence_ids: refs,
+  loss_reference: Type.Union([Type.Null(), Type.Object({ evidence_id: Type.String(), row_index: Type.Integer({ minimum: 0 }) }, { additionalProperties: false })]),
+}, { additionalProperties: false });
+export const AnalysisGroupSchema = Type.Object({
+  kind: AnalysisKindSchema,
+  no_findings_reason: Type.String({ maxLength: 1800, description: readableDescription }),
+  evidence_ids: refs,
+  items: Type.Array(AnalysisItemSchema, { maxItems: 3 }),
+}, { additionalProperties: false });
 export const AnalysisReportSchema = Type.Object({
   verification: Type.Optional(Type.String({ minLength: 1, maxLength: 5000 })),
   periods: Type.Array(Type.Object({
-    period: PeriodKeySchema,
-    comparison: text,
-    minimum_evidence: Type.String(),
-    history_evidence: Type.String(),
-    groups: Type.Array(Type.Object({
-      kind: Type.Union([Type.Literal("MT"), Type.Literal("ST")]),
-      no_findings_reason: Type.String({ maxLength: 1800, description: readableDescription }),
-      evidence_ids: refs,
-      items: Type.Array(Type.Object({
-        priority: Type.Integer({ minimum: 1, maximum: 3 }),
-        category: Type.Union([Type.Literal("availability"), Type.Literal("performance"), Type.Literal("yield"), Type.Literal("other")]),
-        issue: text,
-        measure: text,
-        suggested_owner: Type.String({ minLength: 1, maxLength: 160, description: readableDescription }),
-        evidence_ids: refs,
-        loss_reference: Type.Union([Type.Null(), Type.Object({ evidence_id: Type.String(), row_index: Type.Integer({ minimum: 0 }) }, { additionalProperties: false })]),
-      }, { additionalProperties: false }), { maxItems: 3 }),
-    }, { additionalProperties: false }), { minItems: 2, maxItems: 2 }),
+    period: PeriodKeySchema, comparison: text,
+    minimum_evidence: Type.String(), history_evidence: Type.String(),
+    groups: Type.Array(AnalysisGroupSchema, { minItems: 2, maxItems: 2 }),
   }, { additionalProperties: false }), { minItems: 3, maxItems: 3 }),
 }, { additionalProperties: false });
 
 export type AnalysisReport = Static<typeof AnalysisReportSchema>;
 
-/** Some compatible providers stringify nested JSON tool arguments. Decode only structural fields. */
-export function parseAnalysisReport(value: unknown): AnalysisReport {
-  const structural = new Set(["periods", "groups", "items", "evidence_ids", "loss_reference"]);
-  const decode = (input: unknown, key = ""): unknown => {
+/** Decode only structural fields; never guess repairs or echo report contents. */
+export function decodeAnalysisStructures(value: unknown): unknown {
+  const structural = new Set(["periods", "groups", "items", "evidence_ids", "loss_reference", "updates", "changes", "group"]);
+  const decode = (input: unknown, key = "", location = "$"): unknown => {
     if (structural.has(key) && typeof input === "string") {
       try { input = JSON.parse(input) as unknown; }
-      catch { throw new Error(key + " 必须是数组/对象或合法的 JSON 字符串"); }
+      catch (error) {
+        const position = error instanceof Error ? error.message.match(/position \d+|line \d+ column \d+/gu)?.join("; ") : undefined;
+        throw new Error(location + " 必须是数组/对象或合法的 JSON 字符串" + (position ? "（" + position + "）" : "") +
+          "；请直接传结构化数组/对象，修正该字段，不要将整个报告转成字符串");
+      }
     }
-    if (Array.isArray(input)) return input.map((entry) => decode(entry));
+    if (Array.isArray(input)) return input.map((entry, index) => decode(entry, "", location + "[" + index + "]"));
     if (input && typeof input === "object") {
-      return Object.fromEntries(Object.entries(input).map(([name, entry]) => [name, decode(entry, name)]));
+      return Object.fromEntries(Object.entries(input).map(([name, entry]) => [name, decode(entry, name, location + "." + name)]));
     }
     return input;
   };
-  const decoded = decode(value);
+  return decode(value);
+}
+
+export function parseAnalysisReport(value: unknown): AnalysisReport {
+  const decoded = decodeAnalysisStructures(value);
   if (!Value.Check(AnalysisReportSchema, decoded)) {
     const first = [...Value.Errors(AnalysisReportSchema, decoded)][0];
     throw new Error("报告字段或结构无效：" + (first ? first.instancePath + " " + first.message : "请提交完整三期、每期 MT/ST 两组"));
@@ -57,7 +65,7 @@ export function parseAnalysisReport(value: unknown): AnalysisReport {
 
 function assertReadableText(value: string, field: string): void {
   // Keep business identifiers such as Q1, W36, ADH075 and MT/ST intact.
-  const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|execute_sql|submit_analysis|evidence_ids?|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
+  const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|execute_sql|submit_analysis|finalize_analysis|get_analysis_draft|draft_id|evidence_ids?|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
   if (internalReference.test(value)) {
     throw new Error(field + " 含内部证据编号、查询行号、工具名或字段名。请改写为业务用户可理解的日期、指标和数据来源（如‘本周损失统计’‘当季机台明细’‘每个有数据业务日的平均损失小时’），保留事实、数值和统计口径；内部引用仅放在 evidence_ids、minimum_evidence、history_evidence、loss_reference 等结构化字段中。");
   }

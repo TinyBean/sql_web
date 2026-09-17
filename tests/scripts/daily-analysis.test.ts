@@ -25,6 +25,11 @@ import { createDefaultDashboardDefinition } from "../../src/server/dashboard/def
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 
+import { AnalysisDrafts } from "../../src/server/dashboard/default/analysis/drafts.ts";
+import { lossEvidenceOutput, LOSS_VIEW_BYTES } from "../../src/server/dashboard/default/analysis/loss-output.ts";
+import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
+import type { Evidence } from "../../src/server/dashboard/default/analysis/evidence.ts";
+
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
 
 function fixture(t: TestContext, timeoutMs = 20_000) {
@@ -301,7 +306,8 @@ test("unavailable models publish new metrics and empty analysis, without creatin
 });
 
 test("parent terminates a blocked child after base delivery and waits for process exit", { timeout: 10_000 }, async (t) => {
-  const { config, directory } = fixture(t, 250);
+  // Allow the instrumented child to start on loaded CI hosts before testing its blocked phase.
+  const { config, directory } = fixture(t, 1500);
   const worker = path.join(directory, "blocked.mjs");
   writeFileSync(path.join(directory, "base.json"), JSON.stringify(createDefaultDashboard()));
   writeFileSync(worker, `import {readFileSync,writeFileSync} from 'node:fs';
@@ -344,7 +350,7 @@ test("empty current periods and missing minima retain nulls and require explicit
 });
 
 async function mockModel(t: TestContext, directory: string, responder: (body: Record<string, unknown>) => unknown,
-  options: { contextWindow?: number; maxTokens?: number; firstPromptTokens?: number } = {}): Promise<Server> {
+  options: { contextWindow?: number; maxTokens?: number; firstPromptTokens?: number; tokenUsageRequest?: number } = {}): Promise<Server> {
   let requests = 0;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -360,7 +366,7 @@ async function mockModel(t: TestContext, directory: string, responder: (body: Re
         choices: [{ index: 0, delta: { role: "assistant", ...(calls ? { tool_calls: calls } : { content: typeof result === "string" ? result : "done" }) }, finish_reason: null }],
       }) + '\n\ndata: ' + JSON.stringify({
         id: "completion", choices: [{ index: 0, delta: {}, finish_reason: calls ? "tool_calls" : "stop" }],
-        ...(requests === 1 && options.firstPromptTokens ? { usage: { prompt_tokens: options.firstPromptTokens,
+        ...(requests === (options.tokenUsageRequest ?? 1) && options.firstPromptTokens ? { usage: { prompt_tokens: options.firstPromptTokens,
           completion_tokens: 1, total_tokens: options.firstPromptTokens + 1 } } : {}),
       }) + '\n\ndata: [DONE]\n\n');
     } catch (error) {
@@ -396,7 +402,7 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
     if (turn > 1) {
       const messages = body["messages"] as { role: string; name?: string; content: string }[];
       for (const message of messages.filter((message) => message.role === "tool" && message.name === "measure_loss")) {
-        assert.ok(message.content.length < 2500, "full SQL and evidence rows stay outside the prompt");
+        assert.ok(message.content.length < 15000, "loss views are bounded");
       }
       assert.doesNotMatch(JSON.stringify(messages), /Received arguments:/u);
     }
@@ -406,7 +412,7 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
       ...PERIOD_KEYS.map((period, index) => toolCall(index + 2, "measure_loss", { period })),
     ];
     const runDir = path.join(config.analysis.artifactDir, "mock-analysis");
-    if (turn === 4 || turn === 5) assert.equal(existsSync(path.join(runDir, "report.json")), false, "unreadable prose and an unreviewed draft cannot be published");
+    if (turn >= 4) assert.equal(existsSync(path.join(runDir, "report.json")), false, "unreadable prose, unreviewed drafts and unconfirmed updates cannot be published");
     const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
     const report = reportFor(context);
     if (turn >= 5) report.verification = "已逐条复核原始查询：换线小时与本期同类型证据一致，未把损失出现日数当作全期天数；责任为职能建议。";
@@ -426,13 +432,28 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
     }
     if (turn === 2) { report.periods[0]!.minimum_evidence = "missing"; rejected = true; }
     if (turn === 3) report.periods[0]!.groups[0]!.items[0]!.issue = "本周换线损失 2.5 小时（q11 第 0 行）";
+    if (turn >= 5) {
+      const draft = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line)).findLast((event) => event.type === "analysis_draft");
+      if (turn >= 6) {
+        assert.equal(draft.stage, "merged_review");
+        assert.equal(draft.report.periods[0].groups[0].items[0].issue, "Conversion（换线）损失 2.5 小时，准备时间待验证");
+      }
+      if (turn >= 7) assert.equal(draft.report.periods[0].groups[0].items[0].measure, "记录换线准备环节并在下周核对相同口径日均时长");
+      const updates = turn === 5
+        ? [{ op: "update_item", period: "week", kind: "MT", priority: 1, changes: { issue: "Conversion（换线）损失 2.5 小时，准备时间待验证" } }]
+        : turn === 6
+          ? [{ op: "update_item", period: "week", kind: "MT", priority: 1, changes: { measure: "记录换线准备环节并在下周核对相同口径日均时长" } }]
+          : [];
+      return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: report.verification, updates })];
+    }
     return [toolCall(0, "submit_analysis", { ...report, periods: JSON.stringify(report.periods) })];
   });
   writeFileSync(path.join(directory, "outside.txt"), "must not be readable");
   const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assert.equal(rejected, true);
-  assert.ok(turn >= 5, "requires readable prose and a separate evidence review after the valid draft");
+  assert.ok(turn >= 7, "requires review, inspection of merged updates, and confirmation after the last correction");
   assert.ok(JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "report.json"), "utf8")).verification);
   assert.match(String(result.state.widgets[7]?.data[0]?.["issue"]), /Conversion/u);
   assert.equal(result.state.widgets[7]?.data[0]?.["loss_hours"], 2.5);
@@ -474,13 +495,26 @@ test("ephemeral analysis compacts context and restores snapshot references and d
       assert.match(messages, /\\"draft_validated\\":true/u);
       report.verification = "已逐条复查本期、最低点与历史证据，缺失保持缺失；措施与根因区分。";
     }
+    if (turn >= 3) {
+      const draft = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line)).findLast((event) => event.type === "analysis_draft");
+      if (turn === 3) return [toolCall(0, "get_analysis_draft", { draft_id: draft.draft_id, period: "week", kind: "MT" })];
+      if (turn === 4) return "草稿分析已完成。";
+      if (turn === 5) {
+        assert.match(messages, /当前已有有效草稿/u, "prose-only completion is repaired using the saved draft");
+        return [toolCall(0, "measure_loss", { period: "week", states: ["Conversion"] })];
+      }
+      return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: report.verification, updates: [] })];
+    }
     return [toolCall(0, "submit_analysis", report)];
-  }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000 });
+  }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000, tokenUsageRequest: 2 });
   const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "compaction-test");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assert.ok(summaries >= 1, "SDK must actually invoke compaction, not merely enable its setting");
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
   assert.match(events, /"type":"compaction_end"/u);
+  assert.ok(events.indexOf('"type":"analysis_draft"') < events.indexOf('"type":"compaction_start"'), "draft is created before history compaction");
+  assert.match(events, /"name":"measure_loss"/u, "review can add fresh evidence after restoring the draft");
   assert.match(events, /"contextWindow":262144/u);
   assert.match(events, /"maxOutputTokens":32768/u);
 });
@@ -494,4 +528,120 @@ test("tool budget includes malformed calls and terminates at sixty without a rep
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(events.filter((event) => event.type === "tool_call").length, 60);
   assert.ok(result.state.widgets.slice(7).every((widget) => widget.data.length === 0));
+});
+
+
+test("draft updates preserve validated evidence, reject conflicts and keep the original immutable", (t) => {
+  const { config, connections } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  const evidence = new AnalysisEvidence(database);
+  const context = evidence.context(buildDefaultDashboardInTransaction(database, "2026-01-12"), "2026-01-12");
+  const drafts = new AnalysisDrafts(context, evidence.records);
+  assert.throws(() => drafts.finalize({ draft_id: "missing", verification: "已核实", updates: [] }, 2), /尚无/u);
+  const original = reportFor(context);
+  const first = drafts.submit(original, 1);
+  const request = { draft_id: first.draft_id, verification: "逐项复核本期、历史与最低点证据，保留待验证根因。", updates: [] as unknown[] };
+  assert.throws(() => drafts.finalize(request, 1), /之后的模型轮次/u);
+  assert.deepEqual(drafts.finalize(request, 2).report, { ...original, verification: request.verification });
+  assert.throws(() => drafts.finalize({ ...request, verification: " " }, 2), /verification/u);
+  const change = { op: "update_item", period: "week", kind: "MT", priority: 1,
+    changes: { issue: "本周 Performance 偏低，配置原因待验证。" } };
+  const updated = drafts.finalize({ ...request, updates: [change] }, 2);
+  assert.equal(updated.report.periods[0]!.groups[0]!.items[0]!.issue, change.changes.issue);
+  assert.deepEqual(drafts.get({ draft_id: first.draft_id }).report, original);
+  assert.throws(() => drafts.finalize({ ...request, updates: [change, change] }, 2), /重复/u);
+  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, priority: 3 }] }, 2), /不存在/u);
+  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, changes: { priority: 2 } }] }, 2), /无效/u);
+  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, changes: { evidence_ids: ["missing"] } }] }, 2), /证据/u);
+  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, changes: { issue: "来自 q11 第 0 行" } }] }, 2), /内部/u);
+  const group = original.periods[0]!.groups[0]!;
+  const replacement = { op: "replace_group", period: "week", kind: "MT", group: {
+    no_findings_reason: "没有足够依据", evidence_ids: group.evidence_ids, items: [],
+  } };
+  assert.throws(() => drafts.finalize({ ...request, updates: [replacement, change] }, 2), /同时/u);
+  assert.throws(() => drafts.finalize({ ...request, updates: [change, replacement] }, 2), /同时/u);
+  assert.equal(drafts.finalize({ ...request, updates: [replacement] }, 2).rows.week.length, 1);
+  const reordered = { ...replacement, group: { ...replacement.group, no_findings_reason: "", items: [
+    { ...group.items[0]!, priority: 2, issue: "第二项需要检查" }, { ...group.items[0]!, priority: 1, issue: "第一项需要检查" },
+  ] } };
+  assert.equal(drafts.finalize({ ...request, updates: [reordered] }, 2).rows.week[0]!["issue"], "第一项需要检查");
+  assert.deepEqual(drafts.get({ draft_id: first.draft_id, period: "week", kind: "ST" }).report.periods[0]!.groups.map((g) => g.kind), ["ST"]);
+  const periodUpdate = { op: "update_period", period: "week", comparison: "历史与本周覆盖不同，仅比较日均。" };
+  assert.equal(drafts.finalize({ ...request, updates: [periodUpdate] }, 2).report.periods[0]!.comparison, periodUpdate.comparison);
+  assert.throws(() => drafts.finalize({ ...request, updates: [periodUpdate, periodUpdate] }, 2), /重复/u);
+  assert.throws(() => drafts.finalize({ ...request, updates: "[{" }, 2), /\$\.updates.*JSON/u);
+  assert.deepEqual(drafts.get({ draft_id: first.draft_id }).report, original, "all failed merges leave the stored draft intact");
+  drafts.submit(original, 3);
+  assert.throws(() => drafts.get({ draft_id: first.draft_id }), /过期/u);
+  assert.throws(() => drafts.finalize(request, 4), /过期/u);
+});
+
+test("loss views preserve original row references and compute scoped statistics without summing coverage", () => {
+  const rows = Array.from({ length: 40 }, (_, i) => ({ kind: i % 2 ? "ST" : "MT", state_group: i % 4 < 2 ? "PM" : "Conversion",
+    machine: "M" + String(40 - i).padStart(2, "0"), loss_hours: i === 0 ? 10.004 : 10,
+    observed_days: 1, kind_availability_days: 5, selected_days: 7 }));
+  const record: Evidence = { id: "q11", sql: "SELECT", parameters: [], rows, truncated: false,
+    lossPeriod: "week", range: { start: "2026-01-05", end: "2026-01-11" },
+    lossScope: { states: ["PM", "Conversion"], machines: [], byMachine: true } };
+  const full = lossEvidenceOutput({ ...record, rows: rows.slice(0, 12) }).details;
+  assert.ok(full.view.mode === "complete");
+  assert.deepEqual(full.view.rows?.map((r) => r.row_index), Array.from({ length: 12 }, (_, i) => i));
+  const output = lossEvidenceOutput(record).details;
+  assert.ok(output.view.mode === "summary");
+  const mt = output.view.by_kind![0]!;
+  assert.equal(mt.kind_availability_days, 5);
+  assert.equal(mt.ranking.length, 10);
+  assert.equal(mt.ranking[0]!.row_index, 0, "ranking compares unrounded values");
+  assert.equal(mt.ranking[1]!.row["machine"], "M02", "ties use machine id");
+  assert.ok(Math.abs(mt.loss_hours! - 200.004) < 1e-8);
+  assert.ok(Math.abs(mt.state_totals.reduce((sum, state) => sum + state.share_percent!, 0) - 100) < 1e-8);
+  for (const state of mt.state_totals) assert.equal(state.hours_per_kind_available_day, state.loss_hours! / 5);
+  for (const entry of output.view.by_kind!.flatMap((kind) => kind.ranking)) assert.deepEqual(entry.row, rows[entry.row_index]);
+  assert.deepEqual(output.scope, record.lossScope);
+  const st = output.view.by_kind![1]!;
+  assert.equal(st.loss_hours, 200);
+  assert.equal(st.ranking.length, 10, "both types receive their own top ten");
+  assert.equal(lossEvidenceOutput({ ...record, rows: rows.slice(0, 32) }).details.view.mode, "complete");
+  assert.equal(lossEvidenceOutput({ ...record, rows: rows.slice(0, 33) }).details.view.mode, "summary");
+  const ties = lossEvidenceOutput({ ...record, rows: rows.map((r) => ({ ...r, machine: "same", loss_hours: 10 })) }).details.view;
+  assert.ok(ties.mode === "summary");
+  assert.equal(ties.by_kind![0]!.ranking[0]!.row["state_group"], "Conversion", "machine ties use state name");
+  const zero = lossEvidenceOutput({ ...record, rows: rows.map((r) => ({ ...r, loss_hours: 0, kind_availability_days: 0 })) });
+  assert.ok(zero.details.view.mode === "summary");
+  assert.ok(zero.details.view.by_kind!.every((g) => g.state_totals.every((state) => state.share_percent === null && state.hours_per_kind_available_day === null)));
+  const inconsistent = lossEvidenceOutput({ ...record, rows: rows.map((r, i) => ({ ...r, kind_availability_days: i < 2 ? 4 : 5 })) }).details.view;
+  assert.ok(inconsistent.mode === "summary");
+  assert.ok(inconsistent.by_kind!.every((g) => g.kind_availability_days === null && g.state_totals.every((s) => s.hours_per_kind_available_day === null)));
+  const missing = lossEvidenceOutput({ ...record, rows: [] }).details;
+  assert.equal(missing.view.mode, "complete");
+  const truncated = lossEvidenceOutput({ ...record, truncated: true }).details;
+  assert.equal(truncated.view.mode, "unavailable");
+  assert.equal("by_kind" in truncated.view, false);
+  const huge = lossEvidenceOutput({ ...record, rows: rows.map((r, i) => ({ ...r, machine: "M".repeat(1000) + i, state_group: "S".repeat(1000) + i })) }).details;
+  assert.ok(Buffer.byteLength(JSON.stringify(huge.view)) <= LOSS_VIEW_BYTES);
+  assert.equal(huge.view.rows_complete, false);
+  assert.ok(huge.view.mode === "summary");
+  assert.equal(huge.view.state_summaries_complete, false);
+  assert.ok(rows.every((r) => r.kind_availability_days === 5), "summary computation does not mutate evidence");
+});
+
+test("analysis metrics separate model intervals and tools and record unfinished timeout work", () => {
+  const at = (ms: number) => new Date(ms).toISOString();
+  const events = [
+    { at: at(100), type: "session" }, { at: at(100), type: "model_turn_start", turnId: 1 },
+    { at: at(600), type: "assistant", turnId: 1, message: { usage: { input: 100, output: 20 }, content: [{ type: "toolCall", name: "measure_loss" }] } },
+    { at: at(600), type: "tool_call", toolCallId: "a", name: "measure_loss" },
+    { at: at(700), type: "tool_result", toolCallId: "a", name: "measure_loss", isError: false },
+    { at: at(700), type: "model_turn_start", turnId: 2 },
+    { at: at(800), type: "auto_retry_start" },
+  ];
+  const metrics = summarizeAnalysisEvents(events, 0, 1000, 50);
+  assert.equal(metrics.baseMs, 50);
+  assert.equal(metrics.startupMs, 100);
+  assert.equal(metrics.modelObservedMs, 500);
+  assert.equal(metrics.toolMs, 100);
+  assert.equal(metrics.outputTokens, 20);
+  assert.equal(metrics.retryCount, 1);
+  assert.deepEqual(metrics.pending, [{ kind: "model", name: "client_observed", durationMs: 300 }]);
 });

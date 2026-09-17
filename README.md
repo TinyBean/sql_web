@@ -111,15 +111,28 @@ npm run data:daily -- --through-date 2026-09-14
 
 分析正文使用业务用户可读的中文日期、指标和数据来源说明；内部证据编号（如 `q11`）、查询行号、工具名及字段名只用于结构化引用和审计。提交校验发现这些内部标记出现在正文时，要求 Agent 保留事实和统计口径、改写后再提交。
 
-临时 Agent 复用网站的 `execute_sql`、`get_current_time` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，另保留 `measure_loss` 和结构化提交；最多 60 次调用。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，模型只收到元数据、证据编号和最多 3 行、6 KB 预览，Python 按逻辑名称直接读取完整数据；预览截断不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限证据不能用于报告。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
+临时 Agent 复用网站的 `execute_sql`、`get_current_time` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，另保留 `measure_loss` 和结构化提交；最多 60 次调用。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限证据不能用于报告。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
 
 自动上下文压缩已启用。每日分析的上下文上限默认 262144 token、单次输出上限默认 32768 token，均不超过模型目录上限；用 `SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW` 按实际部署容量调整、`SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS` 调整输出上限。输出还最多占上下文四分之一，提前为系统指令、工具和证据目录预留空间。压缩后保留系统中的口径与比较基准，每次请求重新提供快照目录、工具额度和草稿状态；完整证据和校验在服务端独立保存。模型将报告数组序列化成 JSON 字符串时会先规范化再严格校验，错误反馈不会重复回显整个报告。
 
-`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、优先级和损失证据；首次有效提交作为草稿，Agent 须逐条复核数值、机台、历史结论、日均分母及措施可行性，再提交带复核说明的完整报告；字段错误可在剩余时间内修正。
+`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、优先级和损失证据；`submit_analysis` 校验并保存完整草稿，返回 `draft_id`，再次完整提交会使旧 ID 失效。Agent 须在后续模型轮次逐条复核数值、机台、历史结论、日均分母及措施可行性，再调用 `finalize_analysis` 提交 `draft_id`、`verification` 和 `updates`。无修改时 `updates=[]`；`update_period` 修改比较说明，`update_item` 按周期、类型、原优先级修改条目，新增、删除及重排使用 `replace_group`。重复或冲突的修改被拒绝；合并后仍执行全部原有校验，失败不改变草稿。首次有效复核返回实际修改及完整合并结果、生成新的草稿 ID；Agent 必须在后续轮次核对复核说明中的修正已落实，再以 `updates=[]` 确认，若补交修改则再次确认。该短步骤避免“说明已修改、实际漏提交”的情况。压缩后可用 `get_analysis_draft` 按周期、类型读取服务端草稿。字段错误反馈包含路径及可获取的错误位置，不猜测修复损坏 JSON。
 
 模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。内置快照也不再附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
 
-每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID 和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态和压缩事件）和有效的 `report.json`。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和产物路径，CLI 也保留这些顶层兼容字段；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
+每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID 和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态、轮次和工具 ID、工具耗时、完整草稿、复核修改及压缩事件）、`metrics.json`（分阶段耗时、token、错误、重试及超时未完成区间）和有效的 `report.json`。模型耗时为客户端观测的等待与生成区间，可能包括重试和压缩，不代表服务端纯推理时间。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和产物路径，CLI 也保留这些顶层兼容字段；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
+
+分析性能对照使用独立的旧版工作目录和一致数据库备份，不同步数据、不发布看板、不创建网站会话：
+
+```bash
+node --import tsx scripts/benchmark-daily-analysis.ts \
+  --baseline-root /tmp/sql-web-baseline \
+  --output-dir .data/analysis-benchmark/comparison \
+  --through-date 2026-09-16 --pairs 3
+```
+
+旧版目录需包含原版本源码及可用依赖。脚本使用当前项目的同一模型配置和凭据，通过 SQLite backup 创建数据库副本；也可用 `--snapshot /path/to/backup.sqlite` 指定已有一致备份。按“旧/新、新/旧、旧/新”顺序串行运行，保存完整报告、证据、`evaluation.json` 和 `summary.json`。性能只比较成功运行的中位数，旧版成功不足两次时不认定提速目标；质量评审单独记录，不能仅凭耗时结果认定通过。评审核对关键数值、机台、日期和措施依据，以及旧版多次出现的有效高优先级问题是否得到保留或有证据的排除。
+
+提交示例、回退边界和真实对照记录见 [临时 Agent 耗时优化与验收](docs/default-analysis-performance.md)。
 
 安装当前项目的每日 09:00 定时任务：
 

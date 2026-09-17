@@ -18,6 +18,7 @@ export interface Evidence {
   readonly sourceId?: string;
   readonly range?: DatePeriod;
   readonly lossPeriod?: PeriodKey;
+  readonly lossScope?: { readonly states: readonly string[]; readonly machines: readonly string[]; readonly byMachine: boolean };
   readonly snapshot?: DataSnapshotDescriptor;
 }
 
@@ -88,7 +89,7 @@ export class AnalysisEvidence {
   catalog() {
     return [...this.records.values()].map((record) => ({
       evidence_id: record.id, snapshot: record.snapshot?.name ?? null, row_count: record.rows.length,
-      truncated: record.truncated, range: record.range, loss_period: record.lossPeriod,
+      truncated: record.truncated, range: record.range, loss_period: record.lossPeriod, loss_scope: record.lossScope,
     }));
   }
 
@@ -176,6 +177,7 @@ export class AnalysisEvidence {
     FROM losses JOIN coverage USING (kind)
     ORDER BY kind, loss_hours DESC, state_group${byMachine ? ", machine" : ""}`;
     // Only this program-generated measurement can supply display hours.
-    return this.#save({ ...this.#read(sql, parameters, 100_000), lossPeriod: periodKey, range: period });
+    return this.#save({ ...this.#read(sql, parameters, 100_000), lossPeriod: periodKey, range: period,
+      lossScope: { states: [...states], machines: [...machines], byMachine } });
   }
 }

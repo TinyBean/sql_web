@@ -309,6 +309,12 @@ npm run data:init
 npm start
 ```
 
+后台启动
+
+```bash
+npm run build && setsid -f node --enable-source-maps dist/src/server/main.js >> nohup.out 2>&1 < /dev/null
+```
+
 打开 <http://127.0.0.1:3000>。
 
 开发和验证：

@@ -13,7 +13,7 @@ function fixture(t: TestContext) {
     "INSERT INTO oee_availability(tool_name,date,time_span,step,final_state,lot_id) VALUES(?,?,?,?,?,?)",
   );
   const dut = database.prepare(
-    "INSERT INTO oee_dut_utilization(machine_id,date,in_qty,out_qty,dut_num,step_id,lot_id,test_stage) VALUES(?,?,?,?,?,?,?,?)",
+    "INSERT INTO oee_dut_utilization(machine_id,date,in_qty,out_qty,dut_num,step_id,lot_id,test_stage,touchdown_index,start_time,end_time) VALUES(?,?,?,?,?,?,?,?,'1','2026-01-01T00:00:00.000Z','2026-01-01T00:00:10.000Z')",
   );
   return {
     database,
@@ -29,6 +29,26 @@ function fixture(t: TestContext) {
 
 const monthRange = { start: "2026-01-01", end: "2026-01-31" };
 const monthLow = { grain: "月", point_type: "最低", period_label: "2026-01", oee_percent: 55.55 };
+
+test("machine test time shares each daily type standard including DUT without Availability", (t) => {
+  const { database, a, d } = fixture(t);
+  for (const day of ["2026-01-01", "2026-01-02"]) {
+    for (const machine of ["A", "B"]) {
+      a(machine, day, 43200); d(machine, day, 10, 10, 10);
+    }
+  }
+  d("DUT-ONLY", "2026-01-01", 10, 10, 10);
+  database.exec(`UPDATE oee_dut_utilization SET end_time = CASE
+    WHEN date='2026-01-02' THEN '2026-01-01T00:00:20.000Z'
+    WHEN machine_id='B' THEN '2026-01-01T00:00:30.000Z'
+    WHEN machine_id='DUT-ONLY' THEN '2026-01-01T00:00:50.000Z'
+    ELSE end_time END`);
+  // Standards: Jan 1 = 30s; Jan 2 = 20s. Each machine's standard total is 50s.
+  const table = buildMachineExtremesTable(database, [monthLow], monthRange);
+  assert.equal(table.data[0]!["top10_machines"], "1.B(MT 50.00%)、2.A(MT 83.33%)");
+  database.exec("UPDATE oee_dut_utilization SET end_time=NULL WHERE date='2026-01-02'");
+  assert.equal(buildMachineExtremesTable(database, [monthLow], monthRange).data[0]!["top10_machines"], null);
+});
 
 test("machine rankings aggregate the whole period, merge types and include end-day timestamps and DUT-only days", (t) => {
   const { database, a, d } = fixture(t);

@@ -347,13 +347,14 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.ok(Math.abs(Number(day1Mt["availability"]) - 5 / 6) < 1e-12);
   assert.equal(day1Mt["dut_rows"], 1_000);
   assert.equal(day1Mt["performance"], 0.5);
-  assert.equal(Object.hasOwn(day1Mt, "dut_on"), false);
-  assert.equal(Object.hasOwn(day1Mt, "test_time_performance"), false);
-  assert.ok(Math.abs(Number(day1Mt["daily_test_oee"]) - 1 / 3) < 1e-12);
+  assert.equal(day1Mt["dut_on"], 0.5);
+  assert.equal(day1Mt["test_time_performance"], 10000 / 10081);
+  assert.equal(day1Mt["trimmed_rows_each_tail"], 1);
+  assert.ok(Math.abs(Number(day1Mt["daily_test_oee"]) - 1 / 3 * (10000 / 10081)) < 1e-12);
   assert.ok(Math.abs(Number(day2Mt["daily_test_oee"]) - 0.4) < 1e-12);
   assert.equal(day1Mt["calculable_day_count"], 2);
   assert.equal(day1Mt["selected_day_count"], 2);
-  const expectedPeriodOee = (1 / 3 + 0.4) / 2;
+  const expectedPeriodOee = (1 / 3 * (10000 / 10081) + 0.4) / 2;
   assert.ok(Math.abs(Number(day1Mt["period_test_oee"]) - expectedPeriodOee) < 1e-12);
   assert.equal(day1St["availability_rows"], 0);
   assert.equal(day1St["machine_count"], 0);
@@ -375,7 +376,8 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.equal(overview["availability_day_type_count"], 2);
   assert.equal(overview["dut_day_type_count"], 2);
   assert.equal(overview["avg_performance_percent"], 50);
-  assert.equal(Object.hasOwn(overview, "avg_test_time_percent"), false);
+  assert.equal(overview["avg_test_time_percent"], (10000 / 10081 + 1) / 2 * 100);
+  assert.equal(overview["avg_dut_on_percent"], 50);
 
   const trends = database.prepare(
     getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-02", "trends").sql,
@@ -522,8 +524,9 @@ test("publishes deterministic database-free Skill tools", async () => {
     periodAggregation: string;
   };
   assert.match(defaultSql.sql, /LEFT JOIN dut_daily AS d ON d\.day=a\.day AND d\.kind=a\.kind/u);
-  assert.match(defaultSql.sql, /END AS performance/u);
-  assert.doesNotMatch(defaultSql.sql, /dut_on|test_time|duration_trimmed/u);
+  assert.match(defaultSql.sql, /r\.dut_on AS performance/u);
+  assert.match(defaultSql.sql, /duration_trimmed/u);
+  assert.match(defaultSql.sql, /d\.test_time_performance/u);
   assert.match(defaultSql.sql, /AVG\(r\.daily_test_oee\) OVER/u);
   assert.deepEqual(defaultSql.dailyGrain, ["day", "kind"]);
   assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");

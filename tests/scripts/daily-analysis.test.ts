@@ -51,7 +51,7 @@ function fixture(t: TestContext, timeoutMs = 20_000) {
         .run(kind + "-01", "P-LOT", "Test(Normal)", step, date, date === "2026-01-01" ? 21_600 : 43_200);
       database.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)")
         .run(kind + "-01", "P-LOT", "Conversion", step, date, 9000);
-      database.prepare("INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date) VALUES(?,?,?,?,?,?,?,?)")
+      database.prepare("INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date,touchdown_index,start_time,end_time) VALUES(?,?,?,?,?,?,?,?,'1','2026-01-01T00:00:00.000Z','2026-01-01T00:00:10.000Z')")
         .run(kind + "-01", "P-LOT", "10", "8", "1st", "20", step, date);
     }
   }

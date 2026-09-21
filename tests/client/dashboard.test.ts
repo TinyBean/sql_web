@@ -246,10 +246,14 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
     assert.equal(card.querySelector(".overview-oee span")?.textContent, "Overall OEE");
     assert.equal(card.querySelector(".overview-oee strong")?.textContent,
       Number(widget.data[0]?.["overall_oee_percent"]).toFixed(2) + "%");
-    const series = option["series"] as Array<{ name: string; data: Array<{ value: number }> }>;
-    assert.deepEqual(series.map((gauge) => gauge.name), ["Availability", "Performance", "Yield"]);
+    const series = option["series"] as Array<{ name: string; center: string[]; data: Array<{ value: number; name: string }> }>;
+    assert.deepEqual(series.map((gauge) => gauge.name), ["Availability", "Performance (DUT-On)", "Performance (Test Time)", "Yield"]);
+    assert.ok(card.querySelector(".overview-four-gauges"));
+    assert.deepEqual(series.map((gauge) => gauge.center), [["25%", "22%"], ["75%", "22%"], ["25%", "72%"], ["75%", "72%"]]);
+    assert.equal(series[1]!.data[0]!.name, "Performance\n(DUT-On)");
+    assert.equal(series[2]!.data[0]!.name, "Performance\n(Test Time)");
     assert.deepEqual(series.map((gauge) => gauge.data[0]?.value), [
-      widget.data[0]?.["avg_availability_percent"], widget.data[0]?.["avg_performance_percent"], widget.data[0]?.["avg_yield_percent"],
+      widget.data[0]?.["avg_availability_percent"], widget.data[0]?.["avg_dut_on_percent"], widget.data[0]?.["avg_test_time_percent"], widget.data[0]?.["avg_yield_percent"],
     ]);
   }
   renderer.render({ ...dashboard(2), widgets: [] });

@@ -36,18 +36,20 @@ scripts/
 
 新会话使用固定的 10 张看板卡片，以会话 `01a0a299-72d4-7826-95ea-f521e796e3fc` 的最终看板（revision 19）为基础，按以下顺序展示：
 
-1. MT、ST 两张 OEE 概览，上下排列、各占满一行；每张分别展示该类型的 Overall OEE、Availability、Performance 和 Yield。
+1. MT、ST 两张 OEE 概览，上下排列、各占满一行；每张分别展示该类型的 Overall OEE、Availability、Performance (DUT-On)、Performance (Test Time) 和 Yield。
 2. OEE 周趋势、月趋势、季趋势（含最高/最低点，业务周为周日至周六，年初首个周日之前为 W00）。
 3. OEE 极值明细、与各极值周期对应的机台 OEE 最低 TOP10 表格。
 4. 周、月、季改善措施与责任人清单，每张清单包含 MT/ST 两类。
 
 当前看板是 ID 为 `default` 的看板模块。卡片模板及首次部署的兜底快照保存在 `src/server/dashboard/default/template.ts`，周期、计算、Agent 分析和发布逻辑也在该模块内。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用内置快照（业务数据截至 2026-09-14）。原会话的 JSONL 和产物文件不是运行时依赖。
 
-机台 TOP10 表格按周最低、周最高、月最低、月最高、季最低、季最高排序，周期及周期 OEE 直接沿用极值明细，每行展示该周期 OEE 最低的至多 10 台机台。机台 OEE 使用整期汇总：运行秒数÷（该机台有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×SUM(OUT_QTY)÷SUM(IN_QTY)，区别于周期 OEE 的日类型等权平均。同一机台的 MT/ST 数据合并，按 Availability 累计时长标注主要类型，并列取 MT；按未舍入 OEE 升序排名，并列按机台编号。查询保留完整周期末日的 DUT 数据，缺失或零分母为 NULL，不参与排名；表格提示各周期的机台数量和数据覆盖情况。
+Performance (DUT-On) 为 `SUM(IN_QTY)/SUM(DUT_NUM)`；Performance (Test Time) 按业务日和 MT/ST 分别计算：`TrimmedMean(测试秒数, 0.2)×SUM(TD_Label)/SUM(测试秒数)`。测试秒数是 END_TIME 与 START_TIME 的差；非零有效整数 TOUCHDOWN_INDEX 的 TD_Label 为 1，否则为 NULL。截尾总比例为 0.2%，两端各删除 `floor(n/1000)` 条，仅影响均值；两个总和各自保留全部非空值。小于 1000 条且所有 TD 有效时 Test Time 为 100%。日 OEE 为 Availability×Performance (DUT-On)×Performance (Test Time)×Yield，多日仍等权平均日 OEE；概览五项统一使用该类型 OEE 可计算日。零分母和必要聚合值缺失保持 NULL，不限制结果上限。旧 `performance` 字段仅为 DUT-On 的兼容别名。
+
+机台 TOP10 表格按周最低、周最高、月最低、月最高、季最低、季最高排序，周期及周期 OEE 直接沿用极值明细，每行展示该周期 OEE 最低的至多 10 台机台。机台 OEE 使用整期汇总：运行秒数÷（该机台有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×该机台TD次数)÷SUM(该机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)，区别于周期 OEE 的日类型等权平均。机台 Test Time 复用同日同类型全部合格 DUT 的标准时间，不按机台单独截尾。同一机台的 MT/ST 数据合并，按 Availability 累计时长标注主要类型，并列取 MT；按未舍入 OEE 升序排名，并列按机台编号。查询保留完整周期末日的 DUT 数据，缺失或零分母为 NULL，不参与排名；表格提示各周期的机台数量和数据覆盖情况。
 
 新会话首次展示时锁定当时的默认版本，从 revision 0 开始；首次保存时将其写入该会话的 baseline 和 current，重置会恢复该会话的 baseline。已打开的空会话也保留其初始版本，且仍不创建持久化产物。已有会话可通过对话更新自己的卡片。
 
-MT/ST 概览分别对各自 OEE 可计算业务日的四项指标等权平均，不混合类型，也不将组成项的平均值再次相乘得到 OEE。读取旧版九卡默认快照时保留其余八张卡片及已有的分类 OEE；旧快照未存储的分类组成项显示暂无数据，待每日更新补齐。已有会话的历史看板不做迁移。
+MT/ST 概览分别对各自 OEE 可计算业务日的五项指标等权平均，不混合类型，也不将组成项的平均值再次相乘得到 OEE。读取旧版九卡默认快照时保留其余八张卡片的数据及已有的分类 OEE，并标注旧公式；旧快照未存储的分类组成项显示暂无数据，待每日更新补齐。读取旧三因子默认快照时标注旧公式，Test Time 显示暂无数据，不从旧 OEE 反推；已有会话的历史看板不做迁移。
 
 每次模型请求前，应用会将该会话当前展示的完整看板注入 Agent 上下文，包括图表数值、表格文字、日期、统计口径和警告。首次提问、后续提问、工具更新后的继续回答，以及历史会话恢复或上下文压缩后都能读取最新的会话看板。注入内容仅用于模型请求，不追加到聊天记录，也不触发看板重算或空会话产物创建。Agent 可直接解释看板内容；要求最新数据、重新计算或扩展分析时仍需查询工具。看板读取失败时会记录错误，并明确告知 Agent 当前看板不可用。
 

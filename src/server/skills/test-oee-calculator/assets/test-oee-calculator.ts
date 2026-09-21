@@ -29,6 +29,8 @@ export interface TestOeeSqlExpressions {
   readonly platformPredicate: string;
   readonly kindExpression: string;
   readonly availabilityStateExpression?: string;
+  readonly touchdownLabelExpression?: string;
+  readonly testTimeSecondsExpression?: string;
 }
 
 export interface DefaultTestOeeSql {
@@ -36,6 +38,10 @@ export interface DefaultTestOeeSql {
   readonly endDate: string;
   readonly exclusiveEndDate: string;
   readonly dailyGrain: readonly ["day", "kind"];
+  readonly trimPercent: 0.2;
+  readonly trimFraction: 0.002;
+  readonly trimPercentPerTail: 0.1;
+  readonly trimFractionPerTail: 0.001;
   readonly periodAggregation: "average_of_daily_oee";
   readonly sql: string;
 }
@@ -116,6 +122,10 @@ export const VALID_OEE_LOT_PREFIXES = ["P", "M", "R", "A", "F", "L"] as const;
 export const MAX_RULE_BATCH_SIZE = 200;
 export const MAX_RATIO_ITEMS = 20;
 export const TEST_OEE_DAY_SECONDS = 86_400;
+export const TEST_TIME_TRIM_PERCENT = 0.2;
+export const TEST_TIME_TRIM_FRACTION = 0.002;
+export const TEST_TIME_TRIM_PERCENT_PER_TAIL = 0.1;
+export const TEST_TIME_TRIM_FRACTION_PER_TAIL = 0.001;
 
 /** Excel 平台表中平台名称包含 PCIe 的机台；这些机台不参与 Test OEE。 */
 export const PCIE_PLATFORM_MACHINE_IDS = [
@@ -404,6 +414,10 @@ export function getTestOeeSqlExpressions(
     };
   }
   const machineColumn = sqlColumn("machine_id", tableAlias);
+  const touchdownColumn = sqlColumn("touchdown_index", tableAlias);
+  const trimmedTouchdownColumn = `trim(${touchdownColumn})`;
+  const touchdownDigits = `(CASE WHEN substr(${trimmedTouchdownColumn},1,1) IN ('+','-')
+    THEN substr(${trimmedTouchdownColumn},2) ELSE ${trimmedTouchdownColumn} END)`;
   return {
     source,
     tableAlias: tableAlias ?? null,
@@ -419,13 +433,96 @@ export function getTestOeeSqlExpressions(
       sqlColumn("step_id", tableAlias),
       machineColumn,
     ),
+    touchdownLabelExpression: `CASE
+    WHEN ${touchdownColumn} IS NULL OR ${trimmedTouchdownColumn}='' THEN NULL
+    WHEN ${touchdownDigits}='' OR ${touchdownDigits} GLOB '*[^0-9]*' THEN NULL
+    WHEN CAST(${trimmedTouchdownColumn} AS INTEGER)=0 THEN NULL
+    ELSE 1
+  END`,
+    testTimeSecondsExpression: `CASE
+    WHEN unixepoch(${sqlColumn("start_time", tableAlias)},'subsec') IS NULL
+      OR unixepoch(${sqlColumn("end_time", tableAlias)},'subsec') IS NULL THEN NULL
+    ELSE CAST(
+      unixepoch(${sqlColumn("end_time", tableAlias)},'subsec')
+      - unixepoch(${sqlColumn("start_time", tableAlias)},'subsec') AS REAL
+    )
+  END`,
   };
+}
+
+/** Shared DUT populations: standards include eligible DUT even without matching Availability. */
+export function getTestOeeDutCtes(startDate: string, endDate: string): string {
+  const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
+  return `dut_base AS (
+  SELECT
+    d.id,
+    ${dut.machineExpression} AS machine,
+    ${dut.dayExpression} AS day,
+    ${dut.kindExpression} AS kind,
+    CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
+    CAST(NULLIF(trim(d.out_qty),'') AS REAL) AS output_quantity,
+    CAST(NULLIF(trim(d.dut_num),'') AS REAL) AS socket_quantity,
+    ${dut.touchdownLabelExpression} AS touchdown_label,
+    ${dut.testTimeSecondsExpression} AS test_time_seconds
+  FROM oee_dut_utilization AS d
+  WHERE ${dut.dateRangePredicate}
+    AND ${dut.lotPredicate}
+    AND ${dut.platformPredicate}
+),
+dut_daily_aggregate AS (
+  SELECT
+    day,
+    kind,
+    COUNT(*) AS dut_rows,
+    SUM(input_quantity) AS input_quantity,
+    SUM(output_quantity) AS output_quantity,
+    SUM(socket_quantity) AS socket_quantity,
+    SUM(touchdown_label) AS touchdown_count,
+    SUM(test_time_seconds) AS actual_test_seconds
+  FROM dut_base
+  WHERE kind IN ('MT','ST')
+  GROUP BY day, kind
+),
+duration_ranked AS (
+  SELECT
+    id,
+    day,
+    kind,
+    test_time_seconds,
+    ROW_NUMBER() OVER (
+      PARTITION BY day, kind ORDER BY test_time_seconds, id
+    ) AS low_rank,
+    ROW_NUMBER() OVER (
+      PARTITION BY day, kind ORDER BY test_time_seconds DESC, id DESC
+    ) AS high_rank,
+    COUNT(*) OVER (PARTITION BY day, kind) AS duration_count
+  FROM dut_base
+  WHERE kind IN ('MT','ST') AND test_time_seconds IS NOT NULL
+),
+duration_trimmed AS (
+  SELECT
+    day,
+    kind,
+    MAX(duration_count) AS valid_duration_rows,
+    MAX(CAST(duration_count / 1000 AS INTEGER)) AS trimmed_rows_each_tail,
+    AVG(CASE
+      WHEN low_rank>CAST(duration_count / 1000 AS INTEGER)
+        AND high_rank>CAST(duration_count / 1000 AS INTEGER)
+      THEN test_time_seconds
+    END) AS trimmed_mean_test_seconds
+  FROM duration_ranked
+  GROUP BY day, kind
+)`;
 }
 
 export function getDefaultTestOeeSql(startDate: string, endDate: string): DefaultTestOeeSql {
   const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
-  if (availability.availabilityStateExpression === undefined) {
+  if (
+    availability.availabilityStateExpression === undefined ||
+    dut.touchdownLabelExpression === undefined ||
+    dut.testTimeSecondsExpression === undefined
+  ) {
     throw new TestOeeInputError("默认 Test OEE SQL 表达式不完整");
   }
 
@@ -466,30 +563,7 @@ availability_daily AS (
   WHERE kind IN ('MT','ST')
   GROUP BY day, kind
 ),
-dut_base AS (
-  SELECT
-    ${dut.dayExpression} AS day,
-    ${dut.kindExpression} AS kind,
-    CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
-    CAST(NULLIF(trim(d.out_qty),'') AS REAL) AS output_quantity,
-    CAST(NULLIF(trim(d.dut_num),'') AS REAL) AS socket_quantity
-  FROM oee_dut_utilization AS d
-  WHERE ${dut.dateRangePredicate}
-    AND ${dut.lotPredicate}
-    AND ${dut.platformPredicate}
-),
-dut_daily_aggregate AS (
-  SELECT
-    day,
-    kind,
-    COUNT(*) AS dut_rows,
-    SUM(input_quantity) AS input_quantity,
-    SUM(output_quantity) AS output_quantity,
-    SUM(socket_quantity) AS socket_quantity
-  FROM dut_base
-  WHERE kind IN ('MT','ST')
-  GROUP BY day, kind
-),
+${getTestOeeDutCtes(startDate, endDate)},
 dut_daily AS (
   SELECT
     q.day,
@@ -498,15 +572,26 @@ dut_daily AS (
     q.input_quantity,
     q.output_quantity,
     q.socket_quantity,
+    q.touchdown_count,
+    q.actual_test_seconds,
+    t.valid_duration_rows,
+    t.trimmed_rows_each_tail,
+    t.trimmed_mean_test_seconds,
     CASE
       WHEN q.socket_quantity IS NULL OR q.socket_quantity=0 THEN NULL
       ELSE q.input_quantity / q.socket_quantity
-    END AS performance,
+    END AS dut_on,
+    CASE
+      WHEN q.actual_test_seconds IS NULL OR q.actual_test_seconds=0
+        OR q.touchdown_count IS NULL OR t.trimmed_mean_test_seconds IS NULL THEN NULL
+      ELSE t.trimmed_mean_test_seconds * q.touchdown_count / q.actual_test_seconds
+    END AS test_time_performance,
     CASE
       WHEN q.input_quantity IS NULL OR q.input_quantity=0 THEN NULL
       ELSE q.output_quantity / q.input_quantity
     END AS final_yield
   FROM dut_daily_aggregate AS q
+  LEFT JOIN duration_trimmed AS t ON t.day=q.day AND t.kind=q.kind
 ),
 daily_results AS (
   SELECT
@@ -520,12 +605,19 @@ daily_results AS (
     d.input_quantity,
     d.output_quantity,
     d.socket_quantity,
+    d.touchdown_count,
+    d.actual_test_seconds,
+    d.valid_duration_rows,
+    d.trimmed_rows_each_tail,
+    d.trimmed_mean_test_seconds,
     a.availability,
-    d.performance,
+    d.dut_on,
+    d.test_time_performance,
     d.final_yield,
     CASE
-      WHEN a.availability IS NULL OR d.performance IS NULL OR d.final_yield IS NULL THEN NULL
-      ELSE a.availability * d.performance * d.final_yield
+      WHEN a.availability IS NULL OR d.dut_on IS NULL
+        OR d.test_time_performance IS NULL OR d.final_yield IS NULL THEN NULL
+      ELSE a.availability * d.dut_on * d.test_time_performance * d.final_yield
     END AS daily_test_oee
   FROM availability_daily AS a
   LEFT JOIN dut_daily AS d ON d.day=a.day AND d.kind=a.kind
@@ -541,8 +633,15 @@ SELECT
   r.input_quantity,
   r.output_quantity,
   r.socket_quantity,
+  r.touchdown_count,
+  r.actual_test_seconds,
+  r.valid_duration_rows,
+  r.trimmed_rows_each_tail,
+  r.trimmed_mean_test_seconds,
   r.availability,
-  r.performance,
+  r.dut_on,
+  r.dut_on AS performance,
+  r.test_time_performance,
   r.final_yield,
   r.daily_test_oee,
   COUNT(r.daily_test_oee) OVER (PARTITION BY k.kind) AS calculable_day_count,
@@ -558,6 +657,10 @@ ORDER BY c.day, k.kind`;
     endDate,
     exclusiveEndDate: availability.exclusiveEndDate,
     dailyGrain: ["day", "kind"],
+    trimPercent: TEST_TIME_TRIM_PERCENT,
+    trimFraction: TEST_TIME_TRIM_FRACTION,
+    trimPercentPerTail: TEST_TIME_TRIM_PERCENT_PER_TAIL,
+    trimFractionPerTail: TEST_TIME_TRIM_FRACTION_PER_TAIL,
     periodAggregation: "average_of_daily_oee",
     sql,
   };
@@ -582,6 +685,10 @@ export function getDefaultTestOeeDashboardSql(
   100.0 * AVG(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent,
   100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN availability END)
     AS avg_availability_percent,
+  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN dut_on END)
+    AS avg_dut_on_percent,
+  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN test_time_performance END)
+    AS avg_test_time_percent,
   100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN performance END)
     AS avg_performance_percent,
   100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN final_yield END)
@@ -592,12 +699,20 @@ export function getDefaultTestOeeDashboardSql(
   COUNT(dut_rows) AS dut_day_type_count,
   100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN availability END)
     AS mt_availability_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN dut_on END)
+    AS mt_dut_on_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN test_time_performance END)
+    AS mt_test_time_percent,
   100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN performance END)
     AS mt_performance_percent,
   100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN final_yield END)
     AS mt_yield_percent,
   100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN availability END)
     AS st_availability_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN dut_on END)
+    AS st_dut_on_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN test_time_performance END)
+    AS st_test_time_percent,
   100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN performance END)
     AS st_performance_percent,
   100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN final_yield END)
@@ -615,7 +730,11 @@ FROM ${dailySubquery}`
   day,
   100.0 * MAX(CASE WHEN kind='MT' THEN availability END) AS mt_availability_percent,
   100.0 * MAX(CASE WHEN kind='ST' THEN availability END) AS st_availability_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN dut_on END) AS mt_dut_on_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN test_time_performance END) AS mt_test_time_percent,
   100.0 * MAX(CASE WHEN kind='MT' THEN performance END) AS mt_performance_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN dut_on END) AS st_dut_on_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN test_time_performance END) AS st_test_time_percent,
   100.0 * MAX(CASE WHEN kind='ST' THEN performance END) AS st_performance_percent,
   100.0 * MAX(CASE WHEN kind='MT' THEN final_yield END) AS mt_yield_percent,
   100.0 * MAX(CASE WHEN kind='ST' THEN final_yield END) AS st_yield_percent,

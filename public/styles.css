@@ -197,13 +197,14 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .kpi-content strong::first-letter { color: var(--mint); }
 .kpi-content strong.unavailable { color: #86968f; font-size: 25px; letter-spacing: -.02em; }
 .kpi-content span { margin-top: 6px; color: var(--muted); font-size: 11px; }
-.overview-content { display: grid; grid-template-columns: minmax(190px, 1.25fr) minmax(680px, 5fr); align-items: stretch; min-height: 225px; margin-top: 8px; }
+.overview-content { display: grid; grid-template-columns: minmax(190px, 1.25fr) minmax(440px, 5fr); align-items: stretch; min-height: 225px; margin-top: 8px; }
 .overview-oee { display: flex; flex-direction: column; justify-content: center; padding: 8px 30px 10px 12px; border-right: 1px solid var(--line); }
 .overview-oee span { color: var(--muted); font-size: 12px; }
 .overview-oee strong { margin-top: 8px; color: #f5fff9; font-size: clamp(42px, 4.2vw, 68px); font-weight: 600; letter-spacing: -.065em; text-shadow: 0 0 32px rgb(71 229 177 / 14%); }
 .overview-oee strong.unavailable { color: #86968f; font-size: 26px; letter-spacing: -.02em; }
 .overview-oee small { margin-top: 10px; color: var(--mint); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .14em; }
 .metric-overview .overview-gauges { height: 225px; margin: 0; }
+.metric-overview .overview-four-gauges { height: 390px; }
 .metric-empty { display: grid; place-items: center; min-height: 155px; color: var(--faint); font-size: 14px; }
 .metric-definition { overflow: hidden; margin: 6px 0 0; color: #596f65; font-size: 9px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .metric-warning { position: relative; z-index: 4; margin-top: 5px; color: var(--amber); font-size: 10px; }

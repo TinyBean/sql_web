@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { DashboardRow, DashboardTableWidget } from "../../../shared/dashboard.ts";
 import { addDays, assertDate, type DatePeriod } from "../../database/business-dates.ts";
-import { getTestOeeSqlExpressions, TEST_OEE_DAY_SECONDS } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { getTestOeeSqlExpressions, getTestOeeDutCtes, TEST_OEE_DAY_SECONDS } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { periodLabel } from "./periods.ts";
 
 interface MachineOee {
@@ -14,7 +14,6 @@ interface MachineOee {
 
 function queryMachines(database: DatabaseSync, period: DatePeriod): MachineOee[] {
   const a = getTestOeeSqlExpressions("availability", period.start, period.end, "a");
-  const d = getTestOeeSqlExpressions("dut", period.start, period.end, "d");
   const rows = database.prepare(`WITH
 availability_classified AS (
   SELECT ${a.dayExpression} AS day, ${a.machineExpression} AS machine,
@@ -33,25 +32,29 @@ availability_period AS (
   WHERE kind IN ('MT','ST')
   GROUP BY machine
 ),
-dut_classified AS (
-  SELECT ${d.dayExpression} AS day, ${d.machineExpression} AS machine,
-    ${d.kindExpression} AS kind,
-    CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
-    CAST(NULLIF(trim(d.out_qty),'') AS REAL) AS output_quantity,
-    CAST(NULLIF(trim(d.dut_num),'') AS REAL) AS socket_quantity
-  FROM oee_dut_utilization AS d
-  WHERE ${d.dateRangePredicate} AND ${d.lotPredicate} AND ${d.platformPredicate}
+${getTestOeeDutCtes(period.start, period.end)},
+machine_dut_daily AS (
+  SELECT machine, day, kind,
+    SUM(input_quantity) AS input_quantity, SUM(output_quantity) AS output_quantity,
+    SUM(socket_quantity) AS socket_quantity, SUM(touchdown_label) AS touchdown_count,
+    SUM(test_time_seconds) AS actual_test_seconds
+  FROM dut_base
+  WHERE kind IN ('MT','ST')
+  GROUP BY machine, day, kind
 ),
 dut_period AS (
-  SELECT machine, COUNT(DISTINCT day) AS dut_days,
-    SUM(input_quantity) / NULLIF(SUM(socket_quantity), 0) AS performance,
-    SUM(output_quantity) / NULLIF(SUM(input_quantity), 0) AS final_yield
-  FROM dut_classified
-  WHERE kind IN ('MT','ST')
-  GROUP BY machine
+  SELECT q.machine, COUNT(DISTINCT q.day) AS dut_days,
+    SUM(q.input_quantity) / NULLIF(SUM(q.socket_quantity), 0) AS dut_on,
+    SUM(q.output_quantity) / NULLIF(SUM(q.input_quantity), 0) AS final_yield,
+    CASE WHEN COUNT(t.trimmed_mean_test_seconds) < COUNT(*) THEN NULL
+      ELSE SUM(t.trimmed_mean_test_seconds * q.touchdown_count)
+        / NULLIF(SUM(q.actual_test_seconds), 0) END AS test_time_performance
+  FROM machine_dut_daily AS q
+  LEFT JOIN duration_trimmed AS t ON t.day=q.day AND t.kind=q.kind
+  GROUP BY q.machine
 )
 SELECT a.machine, a.kind, a.availability_days, COALESCE(d.dut_days, 0) AS dut_days,
-  a.availability * d.performance * d.final_yield * 100 AS oee
+  a.availability * d.dut_on * d.test_time_performance * d.final_yield * 100 AS oee
 FROM availability_period AS a
 LEFT JOIN dut_period AS d ON d.machine=a.machine
 ORDER BY oee, a.machine`).all();
@@ -130,7 +133,7 @@ export function buildMachineExtremesTable(
       { key: "top10_machines", label: "TOP10 机台（机台 OEE 最低）" },
     ] },
     format: { unit: "%", precision: 2 },
-    metricDefinition: "与 OEE 极值明细（周/月/季）逐项对应；周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总：运行秒数÷（有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×SUM(OUT_QTY)÷SUM(IN_QTY)×100；MT/ST 合并为一台，按 Availability 累计时长标注主要类型，并列取 MT。按未舍入机台 OEE 升序取最低 10 台，并列按机台编号；不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计，缺日不会补零。",
+    metricDefinition: "与 OEE 极值明细（周/月/季）逐项对应；周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总：运行秒数÷（有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×机台TD次数)÷SUM(机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)×100；标准秒数来自当日该类型全部合格 DUT，含无匹配 Availability 的记录；MT/ST 合并为一台，按 Availability 累计时长标注主要类型，并列取 MT。按未舍入机台 OEE 升序取最低 10 台，并列按机台编号；不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计，缺日不会补零。",
     warnings: [...warnings],
   };
 }

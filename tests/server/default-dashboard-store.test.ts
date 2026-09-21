@@ -43,6 +43,31 @@ test("invalid or missing default files fall back with a diagnostic", (t) => {
   assert.deepEqual(events, ["dashboard.default.fallback", "dashboard.default.invalid", "dashboard.default.invalid"]);
 });
 
+test("three-factor type snapshots keep their published OEE and warn instead of inferring Test Time", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "dashboard-legacy-performance-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "default.json");
+  const current = createDefaultDashboard();
+  const widgets = current.widgets.map((widget) => widget.kind === "overview" ? {
+    ...widget,
+    data: [{ overall_oee_percent: 45, avg_availability_percent: 60, avg_performance_percent: 75, avg_yield_percent: 100 }],
+    encoding: { ...widget.encoding, gauges: [
+      { name: "Availability", column: "avg_availability_percent" },
+      { name: "Performance", column: "avg_performance_percent" },
+      { name: "Yield", column: "avg_yield_percent" },
+    ] },
+  } : widget);
+  writeFileSync(file, JSON.stringify({ ...current, widgets }));
+  const migrated = readDefaultDashboard(file);
+  for (const widget of migrated.widgets.slice(0, 2)) {
+    assert.equal(widget.data[0]!["overall_oee_percent"], 45);
+    assert.equal(widget.data[0]!["avg_dut_on_percent"], 75);
+    assert.equal(widget.data[0]!["avg_test_time_percent"], null);
+    assert.match(widget.metricDefinition, /旧口径 OEE/u);
+  }
+  assert.ok(migrated.widgets.every((widget) => widget.warnings.some((warning) => warning.includes("旧口径快照"))));
+});
+
 test("old defaults split their known type OEE without inventing components or changing existing sessions", (t) => {
   const root = mkdtempSync(path.join(tmpdir(), "dashboard-split-overviews-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -67,10 +92,13 @@ test("old defaults split their known type OEE without inventing components or ch
   assert.equal(migrated.widgets.length, 10);
   assert.equal(migrated.dataAsOf, legacy.dataAsOf);
   assert.deepEqual(migrated.dateRange, legacy.dateRange);
-  assert.deepEqual(migrated.widgets.slice(2), legacy.widgets.slice(1));
+  for (const [index, widget] of migrated.widgets.slice(2).entries()) {
+    assert.deepEqual(widget.data, legacy.widgets[index + 1]!.data);
+    assert.ok(widget.warnings.some((warning) => warning.includes("旧口径快照")));
+  }
   assert.deepEqual(migrated.widgets.slice(0, 2).map((widget) => widget.data[0]), [
-    { overall_oee_percent: 21, avg_availability_percent: null, avg_performance_percent: null, avg_yield_percent: null },
-    { overall_oee_percent: 62, avg_availability_percent: null, avg_performance_percent: null, avg_yield_percent: null },
+    { overall_oee_percent: 21, avg_availability_percent: null, avg_performance_percent: null, avg_dut_on_percent: null, avg_test_time_percent: null, avg_yield_percent: null },
+    { overall_oee_percent: 62, avg_availability_percent: null, avg_performance_percent: null, avg_dut_on_percent: null, avg_test_time_percent: null, avg_yield_percent: null },
   ]);
   assert.ok(migrated.widgets.slice(0, 2).every((widget) => widget.warnings.some((warning) => warning.includes("旧版快照"))));
   assert.equal(readFileSync(file, "utf8"), before, "reading a default never rewrites its snapshot");

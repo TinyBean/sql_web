@@ -23,7 +23,8 @@ function databaseFixture(t: TestContext): DatabaseSync {
     tool_name TEXT, lot_id TEXT, final_state TEXT, step TEXT, date TEXT, time_span INTEGER
   );
   CREATE TABLE oee_dut_utilization (
-    machine_id TEXT, lot_id TEXT, in_qty TEXT, out_qty TEXT, dut_num TEXT, step_id TEXT, date TEXT
+    id INTEGER PRIMARY KEY, machine_id TEXT, lot_id TEXT, in_qty TEXT, out_qty TEXT, dut_num TEXT, step_id TEXT, date TEXT,
+    touchdown_index TEXT DEFAULT '1', start_time TEXT DEFAULT '2026-01-01T00:00:00.000Z', end_time TEXT DEFAULT '2026-01-01T00:00:10.000Z'
   );`);
   return database;
 }
@@ -44,7 +45,7 @@ function addDay(
     if (availability < 1) insert.run(machine, "IDLE", step, date, (1 - availability) * 86_400);
   }
   if (quantities !== null) {
-    database.prepare("INSERT INTO oee_dut_utilization VALUES (?, 'P1', ?, ?, ?, ?, ?)").run(
+    database.prepare("INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,dut_num,step_id,date) VALUES (?, 'P1', ?, ?, ?, ?, ?)").run(
       machine, ...quantities.map(String), step, date,
     );
   }
@@ -104,6 +105,8 @@ test("overview keeps type-specific components on the OEE sample and preserves co
       overall_oee_percent: row[`${prefix}_oee_percent`]!,
       avg_availability_percent: row[`${prefix}_availability_percent`]!,
       avg_performance_percent: row[`${prefix}_performance_percent`]!,
+      avg_dut_on_percent: row[`${prefix}_dut_on_percent`]!,
+      avg_test_time_percent: row[`${prefix}_test_time_percent`]!,
       avg_yield_percent: row[`${prefix}_yield_percent`]!,
     });
   }
@@ -163,13 +166,14 @@ test("one overview SQL snapshot saves two independent type cards without changin
         id: `${prefix}-oee-overview-period`, kind: "overview", size: "wide",
         title: `${prefix.toUpperCase()} · OEE 概览`, subtitle: `${range.start} 至 ${range.end}`,
         format: { unit: "%", precision: 2 },
-        metricDefinition: `${prefix.toUpperCase()} 四项指标均为该类型 OEE 可计算日等权平均`, warnings: [],
+        metricDefinition: `${prefix.toUpperCase()} 五项指标均为该类型 OEE 可计算日等权平均`, warnings: [],
         encoding: {
           value: `${prefix}_oee_percent`, label: "Overall OEE",
           description: `覆盖 ${rows[0]![`${prefix}_calculable_day_count`]}/${rows[0]![`${prefix}_selected_day_count`]} 个可计算业务日`,
           gauges: [
             { name: "Availability", column: `${prefix}_availability_percent` },
-            { name: "Performance", column: `${prefix}_performance_percent` },
+            { name: "Performance (DUT-On)", column: `${prefix}_dut_on_percent` },
+            { name: "Performance (Test Time)", column: `${prefix}_test_time_percent` },
             { name: "Yield", column: `${prefix}_yield_percent` },
           ],
         },
@@ -183,8 +187,8 @@ test("one overview SQL snapshot saves two independent type cards without changin
   assert.equal(saved.revision, baseline.revision + 2);
   assert.deepEqual(saved.widgets.slice(0, baseline.widgets.length), baseline.widgets);
   for (const [prefix, expected] of [
-    ["mt", [30, 50, 80, 75]],
-    ["st", [40, 100, 50, 80]],
+    ["mt", [30, 50, 80, 100, 75]],
+    ["st", [40, 100, 50, 100, 80]],
   ] as const) {
     const card = saved.widgets.find((widget) => widget.id === `${prefix}-oee-overview-period`);
     assert.ok(card?.kind === "overview");
@@ -194,9 +198,10 @@ test("one overview SQL snapshot saves two independent type cards without changin
       [card.encoding.gauges[0]!.column]: expected[1],
       [card.encoding.gauges[1]!.column]: expected[2],
       [card.encoding.gauges[2]!.column]: expected[3],
+      [card.encoding.gauges[3]!.column]: expected[4],
     });
     assert.deepEqual(Object.keys(card.data[0]!), [
-      `${prefix}_oee_percent`, `${prefix}_availability_percent`, `${prefix}_performance_percent`, `${prefix}_yield_percent`,
+      `${prefix}_oee_percent`, `${prefix}_availability_percent`, `${prefix}_dut_on_percent`, `${prefix}_test_time_percent`, `${prefix}_yield_percent`,
     ]);
   }
   store.dispose();

@@ -1,15 +1,13 @@
 import { parseDashboardState, type DashboardState } from "../../../shared/dashboard.ts";
 
-// Based on session 01a0a299-72d4-7826-95ea-f521e796e3fc, revision 19.
-// Nonweekly metrics retain the original snapshots for business days through 2026-09-14.
-// Weekly trends, extrema, machine rankings and the complete-week range were rebuilt
-// on 2026-09-17 using Sunday-Saturday business weeks (%U), from the read-only OEE DB.
+// Rebuilt from the read-only OEE DB through business day 2026-09-14.
+// OEE includes both Performance (DUT-On) and Performance (Test Time).
 // Analysis remains empty until the daily Agent produces a report.
-// No source-session files are needed at runtime; opening a dashboard never recalculates it.
+// Opening a dashboard never recalculates the bundled snapshot.
 const DEFAULT_DASHBOARD: DashboardState = {
   "schemaVersion": 1,
   "revision": 0,
-  "dataAsOf": "2026-09-17T02:08:39.697Z",
+  "dataAsOf": "2026-09-21T02:46:31.430Z",
   "dateRange": {
     "start": "2026-01-01",
     "end": "2026-09-14"
@@ -23,8 +21,10 @@ const DEFAULT_DASHBOARD: DashboardState = {
       "size": "wide",
       "data": [
         {
-          "overall_oee_percent": 51.55133290776901,
+          "overall_oee_percent": 51.326714609342936,
           "avg_availability_percent": 65.9790042584808,
+          "avg_dut_on_percent": 79.4095365161564,
+          "avg_test_time_percent": 99.57282616924962,
           "avg_performance_percent": 79.4095365161564,
           "avg_yield_percent": 98.3704577874588
         }
@@ -39,8 +39,12 @@ const DEFAULT_DASHBOARD: DashboardState = {
             "column": "avg_availability_percent"
           },
           {
-            "name": "Performance",
-            "column": "avg_performance_percent"
+            "name": "Performance (DUT-On)",
+            "column": "avg_dut_on_percent"
+          },
+          {
+            "name": "Performance (Test Time)",
+            "column": "avg_test_time_percent"
           },
           {
             "name": "Yield",
@@ -52,9 +56,9 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "MT Overall OEE = AVG(MT 日 Test OEE)×100；日 Test OEE = Availability×Performance×Yield。四项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "metricDefinition": "MT Overall OEE = AVG(MT 日 Test OEE)×100；日 Test OEE = Availability×Performance (DUT-On)×Performance (Test Time)×Yield。五项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
       "warnings": [
-        "MT 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，四项指标仅使用 OEE 可计算日"
+        "MT 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，五项指标仅使用 OEE 可计算日"
       ]
     },
     {
@@ -65,8 +69,10 @@ const DEFAULT_DASHBOARD: DashboardState = {
       "size": "wide",
       "data": [
         {
-          "overall_oee_percent": 61.705900449088816,
+          "overall_oee_percent": 60.79130275921476,
           "avg_availability_percent": 75.78892046162244,
+          "avg_dut_on_percent": 82.15021201649581,
+          "avg_test_time_percent": 98.5522897465314,
           "avg_performance_percent": 82.15021201649581,
           "avg_yield_percent": 99.0799770086894
         }
@@ -81,8 +87,12 @@ const DEFAULT_DASHBOARD: DashboardState = {
             "column": "avg_availability_percent"
           },
           {
-            "name": "Performance",
-            "column": "avg_performance_percent"
+            "name": "Performance (DUT-On)",
+            "column": "avg_dut_on_percent"
+          },
+          {
+            "name": "Performance (Test Time)",
+            "column": "avg_test_time_percent"
           },
           {
             "name": "Yield",
@@ -94,9 +104,9 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "ST Overall OEE = AVG(ST 日 Test OEE)×100；日 Test OEE = Availability×Performance×Yield。四项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "metricDefinition": "ST Overall OEE = AVG(ST 日 Test OEE)×100；日 Test OEE = Availability×Performance (DUT-On)×Performance (Test Time)×Yield。五项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
       "warnings": [
-        "ST 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，四项指标仅使用 OEE 可计算日"
+        "ST 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，五项指标仅使用 OEE 可计算日"
       ]
     },
     {
@@ -114,217 +124,217 @@ const DEFAULT_DASHBOARD: DashboardState = {
         },
         {
           "period_label": "2026-W01",
-          "oee_percent": 47.13,
+          "oee_percent": 47.06,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W02",
-          "oee_percent": 56.91,
+          "oee_percent": 56.74,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W03",
-          "oee_percent": 56.32,
+          "oee_percent": 56.23,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W04",
-          "oee_percent": 54.84,
+          "oee_percent": 54.63,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W05",
-          "oee_percent": 54.98,
+          "oee_percent": 54.8,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W06",
-          "oee_percent": 59.47,
+          "oee_percent": 59.38,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W07",
-          "oee_percent": 50.96,
+          "oee_percent": 50.94,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W08",
-          "oee_percent": 49.72,
+          "oee_percent": 49.59,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W09",
-          "oee_percent": 55.54,
+          "oee_percent": 55.25,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W10",
-          "oee_percent": 54.17,
+          "oee_percent": 53.46,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W11",
-          "oee_percent": 57.45,
+          "oee_percent": 56.54,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W12",
-          "oee_percent": 55.41,
+          "oee_percent": 54.72,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W13",
-          "oee_percent": 52.73,
+          "oee_percent": 52.01,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W14",
-          "oee_percent": 58.73,
+          "oee_percent": 58.23,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W15",
-          "oee_percent": 59.44,
+          "oee_percent": 58.57,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W16",
-          "oee_percent": 61.41,
+          "oee_percent": 60.6,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W17",
-          "oee_percent": 58.82,
+          "oee_percent": 58.3,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W18",
-          "oee_percent": 53.55,
+          "oee_percent": 52.87,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W19",
-          "oee_percent": 55.2,
+          "oee_percent": 54.52,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W20",
-          "oee_percent": 57.51,
+          "oee_percent": 56.7,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W21",
-          "oee_percent": 63.72,
-          "max_point": 63.72,
+          "oee_percent": 62.95,
+          "max_point": 62.95,
           "min_point": null
         },
         {
           "period_label": "2026-W22",
-          "oee_percent": 62.94,
+          "oee_percent": 62.2,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W23",
-          "oee_percent": 60.55,
+          "oee_percent": 59.57,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W24",
-          "oee_percent": 59.11,
+          "oee_percent": 58.14,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W25",
-          "oee_percent": 55.64,
+          "oee_percent": 54.98,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W26",
-          "oee_percent": 57.39,
+          "oee_percent": 56.81,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W27",
-          "oee_percent": 54.64,
+          "oee_percent": 54.36,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W28",
-          "oee_percent": 57.79,
+          "oee_percent": 56.95,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W29",
-          "oee_percent": 58.38,
+          "oee_percent": 57.56,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W30",
-          "oee_percent": 60.96,
+          "oee_percent": 59.77,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W31",
-          "oee_percent": 58.91,
+          "oee_percent": 58.37,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W32",
-          "oee_percent": 57.84,
+          "oee_percent": 57.05,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W33",
-          "oee_percent": 58.64,
+          "oee_percent": 57.65,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W34",
-          "oee_percent": 61.06,
+          "oee_percent": 60.51,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W35",
-          "oee_percent": 56.76,
+          "oee_percent": 55.99,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-W36",
-          "oee_percent": 55.61,
+          "oee_percent": 54.94,
           "max_point": null,
           "min_point": null
         },
@@ -367,60 +377,60 @@ const DEFAULT_DASHBOARD: DashboardState = {
       "id": "oee-trend-monthly-2026",
       "kind": "line",
       "title": "OEE 月趋势（2026 年至今）",
-      "subtitle": "日 OEE 等权平均，2026-01 至 2026-09（9 月为部分月）",
+      "subtitle": "2026-01-01 至 2026-09-14 · MT/ST 日 OEE 等权平均",
       "size": "wide",
       "data": [
         {
           "period_label": "2026-01",
-          "oee_percent": 52.4,
+          "oee_percent": 52.39,
           "max_point": null,
-          "min_point": 52.4
+          "min_point": 52.39
         },
         {
           "period_label": "2026-02",
-          "oee_percent": 53.9,
+          "oee_percent": 53.68,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-03",
-          "oee_percent": 55.86,
+          "oee_percent": 55.15,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-04",
-          "oee_percent": 58.85,
+          "oee_percent": 58.1,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-05",
-          "oee_percent": 57.57,
+          "oee_percent": 56.85,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-06",
-          "oee_percent": 58.97,
+          "oee_percent": 58.12,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-07",
-          "oee_percent": 57.58,
+          "oee_percent": 56.87,
           "max_point": null,
           "min_point": null
         },
         {
           "period_label": "2026-08",
-          "oee_percent": 59.04,
-          "max_point": 59.04,
+          "oee_percent": 58.26,
+          "max_point": 58.26,
           "min_point": null
         },
         {
           "period_label": "2026-09",
-          "oee_percent": 56.04,
+          "oee_percent": 55.08,
           "max_point": null,
           "min_point": null
         }
@@ -446,34 +456,34 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "月 OEE = 该月内可计算的 MT/ST 日 OEE 等权平均×100；最高/最低点仅在可计算月份中取值。最高 2026-08（59.04%），最低 2026-01（52.40%）",
+      "metricDefinition": "按月聚合可计算的 MT/ST 日 OEE 并等权平均；极值按未舍入值比较，并列取最早期间",
       "warnings": [
-        "部分月份存在缺数据日类型（如 4/5/6/7/8/9 月），平均仅覆盖可计算日",
-        "2026-09 仅含 09-01 至 09-14，为部分月数据"
+        "可计算日类型 490/514；缺 Availability 24 个、缺 DUT 24 个；缺失或零分母结果为 NULL，平均仅使用可计算值",
+        "部分月：2026-09；与完整周期比较时需注意覆盖天数"
       ]
     },
     {
       "id": "oee-trend-quarterly-2026",
       "kind": "line",
       "title": "OEE 季趋势（2026 年至今）",
-      "subtitle": "日 OEE 等权平均，Q3 为截至 09-14 的部分季度",
+      "subtitle": "2026-01-01 至 2026-09-14 · MT/ST 日 OEE 等权平均",
       "size": "wide",
       "data": [
         {
           "period_label": "2026-Q1",
-          "oee_percent": 54.06,
+          "oee_percent": 53.74,
           "max_point": null,
-          "min_point": 54.06
+          "min_point": 53.74
         },
         {
           "period_label": "2026-Q2",
-          "oee_percent": 58.44,
-          "max_point": 58.44,
+          "oee_percent": 57.67,
+          "max_point": 57.67,
           "min_point": null
         },
         {
           "period_label": "2026-Q3",
-          "oee_percent": 57.95,
+          "oee_percent": 57.07,
           "max_point": null,
           "min_point": null
         }
@@ -499,26 +509,28 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "季 OEE = 该季度内可计算的 MT/ST 日 OEE 等权平均×100；最高/最低点仅在可计算季度中取值。最高 2026-Q2（58.44%），最低 2026-Q1（54.06%）",
+      "metricDefinition": "按季聚合可计算的 MT/ST 日 OEE 并等权平均；极值按未舍入值比较，并列取最早期间",
       "warnings": [
-        "Q2、Q3 存在缺数据日类型（Q2 172/182、Q3 132/152 可计算），平均仅覆盖可计算日",
-        "Q3 仅含 07-01 至 09-14，为部分季度数据"
+        "可计算日类型 490/514；缺 Availability 24 个、缺 DUT 24 个；缺失或零分母结果为 NULL，平均仅使用可计算值",
+        "部分季：2026-Q3；与完整周期比较时需注意覆盖天数"
       ]
     },
     {
       "id": "oee-extremes-table-2026",
       "kind": "table",
       "title": "OEE 极值明细（周/月/季）",
-      "subtitle": "各粒度 OEE 最高/最低点及其三组成项，用于定位拖累因素",
+      "subtitle": "2026-01-01 至 2026-09-14 · 并列极值取最早期间；NULL 不参与排名",
       "size": "medium",
       "data": [
         {
           "grain": "周",
           "period_label": "2026-W21",
           "point_type": "最高",
-          "oee_percent": 63.72,
+          "oee_percent": 62.95,
           "availability_percent": 77.9,
           "performance_percent": 82.25,
+          "dut_on_percent": 82.25,
+          "test_time_percent": 98.85,
           "yield_percent": 99.32,
           "calculable_day_type_count": 14
         },
@@ -529,6 +541,8 @@ const DEFAULT_DASHBOARD: DashboardState = {
           "oee_percent": 40.46,
           "availability_percent": 51.98,
           "performance_percent": 79.65,
+          "dut_on_percent": 79.65,
+          "test_time_percent": 100,
           "yield_percent": 98.27,
           "calculable_day_type_count": 6
         },
@@ -536,40 +550,48 @@ const DEFAULT_DASHBOARD: DashboardState = {
           "grain": "月",
           "period_label": "2026-08",
           "point_type": "最高",
-          "oee_percent": 59.04,
+          "oee_percent": 58.26,
           "availability_percent": 73.1,
-          "performance_percent": 81.88,
-          "yield_percent": 98.61,
+          "performance_percent": 81.89,
+          "dut_on_percent": 81.89,
+          "test_time_percent": 98.8,
+          "yield_percent": 98.43,
           "calculable_day_type_count": 54
         },
         {
           "grain": "月",
           "period_label": "2026-01",
           "point_type": "最低",
-          "oee_percent": 52.4,
+          "oee_percent": 52.39,
           "availability_percent": 67.76,
-          "performance_percent": 78.51,
-          "yield_percent": 98.34,
+          "performance_percent": 78.7,
+          "dut_on_percent": 78.7,
+          "test_time_percent": 99.78,
+          "yield_percent": 98.33,
           "calculable_day_type_count": 62
         },
         {
           "grain": "季",
           "period_label": "2026-Q2",
           "point_type": "最高",
-          "oee_percent": 58.44,
+          "oee_percent": 57.67,
           "availability_percent": 72.37,
-          "performance_percent": 81.51,
-          "yield_percent": 98.86,
+          "performance_percent": 81.47,
+          "dut_on_percent": 81.47,
+          "test_time_percent": 98.79,
+          "yield_percent": 98.89,
           "calculable_day_type_count": 172
         },
         {
           "grain": "季",
           "period_label": "2026-Q1",
           "point_type": "最低",
-          "oee_percent": 54.06,
+          "oee_percent": 53.74,
           "availability_percent": 68.83,
-          "performance_percent": 79.5,
-          "yield_percent": 98.66,
+          "performance_percent": 79.52,
+          "dut_on_percent": 79.52,
+          "test_time_percent": 99.48,
+          "yield_percent": 98.61,
           "calculable_day_type_count": 180
         }
       ],
@@ -596,8 +618,12 @@ const DEFAULT_DASHBOARD: DashboardState = {
             "label": "Availability %"
           },
           {
-            "key": "performance_percent",
-            "label": "Performance %"
+            "key": "dut_on_percent",
+            "label": "Performance (DUT-On) %"
+          },
+          {
+            "key": "test_time_percent",
+            "label": "Performance (Test Time) %"
           },
           {
             "key": "yield_percent",
@@ -613,10 +639,9 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "周/月/季三个粒度各自 OEE 最高与最低期间及其三组成项（均为该期间可计算日 OEE 等权平均，百分数值）；极值仅在可计算期间内比较",
+      "metricDefinition": "周/月/季的 MT/ST 日 OEE 等权平均极值；四个组成项与 OEE 均使用同一期间 OEE 可计算日类型的等权平均值",
       "warnings": [
-        "周粒度最低点 2026-W00 仅 3 天（01-01~01-03），Availability 为 51.98%；与完整业务周比较时需注意覆盖天数",
-        "月粒度最低点 2026-01 同样受月初低 Availability 影响"
+        "可计算日类型 490/514；缺 Availability 24 个、缺 DUT 24 个；缺失或零分母结果为 NULL，平均仅使用可计算值"
       ]
     },
     {
@@ -631,42 +656,42 @@ const DEFAULT_DASHBOARD: DashboardState = {
           "point_type": "最低",
           "period_label": "2026-W00",
           "oee_percent": 40.46,
-          "top10_machines": "1.ADH069(MT 1.01%)、2.ADH172(ST 3.63%)、3.ADH074(MT 6.79%)、4.ADH190(ST 9.20%)、5.ADH179(ST 10.24%)、6.ADH173(ST 12.53%)、7.ADH180(ST 13.89%)、8.ADH020(MT 13.96%)、9.ADH084(MT 17.87%)、10.ADH016(MT 18.12%)"
+          "top10_machines": "1.ADH172(ST 0.34%)、2.ADH069(MT 1.57%)、3.ADH171(ST 4.67%)、4.ADH173(ST 4.98%)、5.ADH043(MT 5.37%)、6.ADH066(MT 5.58%)、7.ADH031(MT 6.03%)、8.ADH074(MT 6.44%)、9.ADH124(MT 7.11%)、10.ADH179(ST 8.71%)"
         },
         {
           "grain": "周",
           "point_type": "最高",
           "period_label": "2026-W21",
-          "oee_percent": 63.72,
-          "top10_machines": "1.ADH203(MT 0.84%)、2.ADH005(MT 22.98%)、3.ADH194(ST 25.13%)、4.ADH036(MT 25.63%)、5.ADH162(ST 25.65%)、6.ADH024(MT 31.35%)、7.ADH085(MT 31.45%)、8.ADH071(MT 32.28%)、9.ADH201(MT 32.80%)、10.ADH124(MT 33.63%)"
+          "oee_percent": 62.95,
+          "top10_machines": "1.ADH203(MT 0.26%)、2.ADH194(ST 2.09%)、3.ADH188(ST 3.69%)、4.ADH200(ST 4.34%)、5.ADH196(ST 4.64%)、6.ADH172(ST 5.12%)、7.ADH189(ST 5.14%)、8.ADH191(ST 5.27%)、9.ADH192(ST 5.47%)、10.ADH174(ST 5.59%)"
         },
         {
           "grain": "月",
           "point_type": "最低",
           "period_label": "2026-01",
-          "oee_percent": 52.4,
-          "top10_machines": "1.ADH153(ST 1.10%)、2.ADH162(ST 6.44%)、3.ADH170(ST 6.72%)、4.ADH005(MT 10.53%)、5.ADH147(ST 14.07%)、6.ADH149(ST 21.54%)、7.ADH109(MT 23.70%)、8.ADH091(MT 25.01%)、9.ADH045(MT 25.13%)、10.ADH101(MT 25.38%)"
+          "oee_percent": 52.39,
+          "top10_machines": "1.ADH153(ST 1.27%)、2.ADH170(ST 4.32%)、3.ADH005(MT 4.93%)、4.ADH149(ST 5.14%)、5.ADH037(MT 7.08%)、6.ADH162(ST 7.39%)、7.ADH169(ST 8.59%)、8.ADH026(MT 8.73%)、9.ADH198(ST 8.97%)、10.ADH143(MT 9.21%)"
         },
         {
           "grain": "月",
           "point_type": "最高",
           "period_label": "2026-08",
-          "oee_percent": 59.04,
-          "top10_machines": "1.ADH186(ST 10.43%)、2.ADH182(MT 14.79%)、3.ADH125(ST 17.95%)、4.ADH203(MT 20.16%)、5.ADH204(MT 20.79%)、6.ADH108(MT 27.09%)、7.ADH137(MT 28.94%)、8.ADH076(MT 28.96%)、9.ADH179(ST 29.01%)、10.ADH188(ST 31.59%)"
+          "oee_percent": 58.26,
+          "top10_machines": "1.ADH179(ST 3.07%)、2.ADH153(ST 4.27%)、3.ADH194(ST 4.91%)、4.ADH200(ST 5.05%)、5.ADH199(ST 5.19%)、6.ADH173(ST 5.25%)、7.ADH175(ST 5.41%)、8.ADH192(ST 5.75%)、9.ADH174(ST 5.82%)、10.ADH198(ST 6.26%)"
         },
         {
           "grain": "季",
           "point_type": "最低",
           "period_label": "2026-Q1",
-          "oee_percent": 54.06,
-          "top10_machines": "1.ADH005(MT 15.43%)、2.ADH141(MT 24.62%)、3.ADH109(MT 27.07%)、4.ADH113(ST 27.95%)、5.ADH065(MT 32.89%)、6.ADH047(MT 34.95%)、7.ADH017(MT 35.27%)、8.ADH089(MT 36.27%)、9.ADH101(MT 36.60%)、10.ADH045(MT 36.61%)"
+          "oee_percent": 53.74,
+          "top10_machines": "1.ADH037(MT 7.08%)、2.ADH005(MT 7.35%)、3.ADH201(MT 9.48%)、4.ADH026(MT 9.83%)、5.ADH046(MT 11.08%)、6.ADH199(ST 11.48%)、7.ADH175(ST 11.89%)、8.ADH194(ST 12.37%)、9.ADH066(MT 12.55%)、10.ADH171(ST 13.43%)"
         },
         {
           "grain": "季",
           "point_type": "最高",
           "period_label": "2026-Q2",
-          "oee_percent": 58.44,
-          "top10_machines": "1.ADH017(MT 25.51%)、2.ADH005(MT 33.39%)、3.ADH203(MT 36.75%)、4.ADH204(MT 37.10%)、5.ADH049(MT 38.26%)、6.ADH162(ST 40.95%)、7.ADH043(MT 41.30%)、8.ADH123(MT 41.88%)、9.ADH023(MT 41.90%)、10.ADH053(MT 41.93%)"
+          "oee_percent": 57.67,
+          "top10_machines": "1.ADH179(ST 5.28%)、2.ADH175(ST 5.92%)、3.ADH194(ST 7.02%)、4.ADH155(ST 7.24%)、5.ADH199(ST 7.72%)、6.ADH172(ST 7.76%)、7.ADH196(ST 7.94%)、8.ADH195(ST 8.12%)、9.ADH197(ST 8.36%)、10.ADH174(ST 9.46%)"
         }
       ],
       "encoding": {
@@ -697,16 +722,15 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "与 OEE 极值明细（周/月/季）逐项对应；周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总：运行秒数÷（有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×SUM(OUT_QTY)÷SUM(IN_QTY)×100；MT/ST 合并为一台，按 Availability 累计时长标注主要类型，并列取 MT。按未舍入机台 OEE 升序取最低 10 台，并列按机台编号；不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计，缺日不会补零。",
+      "metricDefinition": "与 OEE 极值明细（周/月/季）逐项对应；周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总：运行秒数÷（有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×机台TD次数)÷SUM(机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)×100；标准秒数来自当日该类型全部合格 DUT，含无匹配 Availability 的记录；MT/ST 合并为一台，按 Availability 累计时长标注主要类型，并列取 MT。按未舍入机台 OEE 升序取最低 10 台，并列按机台编号；不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计，缺日不会补零。",
       "warnings": [
-        "周粒度最低点 2026-W00 仅 3 天（01-01~01-03），Availability 为 51.98%；与完整业务周比较时需注意覆盖天数",
-        "月粒度最低点 2026-01 同样受月初低 Availability 影响",
-        "月 2026-01（2026-01-01 至 2026-01-31）：可计算机台 146/148，展示 10 台；入榜机台 Availability 覆盖 1–21/31 天，DUT 覆盖 1–16/31 天；缺失或零分母为 NULL，不参与排名",
+        "可计算日类型 490/514；缺 Availability 24 个、缺 DUT 24 个；缺失或零分母结果为 NULL，平均仅使用可计算值",
+        "周 2026-W00（2026-01-01 至 2026-01-03）：可计算机台 93/101，展示 10 台；入榜机台 Availability 覆盖 1–3/3 天，DUT 覆盖 1–2/3 天；缺失或零分母为 NULL，不参与排名",
+        "周 2026-W21（2026-05-24 至 2026-05-30）：可计算机台 149/149，展示 10 台；入榜机台 Availability 覆盖 1–7/7 天，DUT 覆盖 1–7/7 天；缺失或零分母为 NULL，不参与排名",
+        "月 2026-01（2026-01-01 至 2026-01-31）：可计算机台 146/148，展示 10 台；入榜机台 Availability 覆盖 1–26/31 天，DUT 覆盖 1–24/31 天；缺失或零分母为 NULL，不参与排名",
         "月 2026-08（2026-08-01 至 2026-08-31）：可计算机台 150/150，展示 10 台；入榜机台 Availability 覆盖 3–27/31 天，DUT 覆盖 2–29/31 天；缺失或零分母为 NULL，不参与排名",
-        "季 2026-Q1（2026-01-01 至 2026-03-31）：可计算机台 149/149，展示 10 台；入榜机台 Availability 覆盖 25–82/90 天，DUT 覆盖 20–75/90 天；缺失或零分母为 NULL，不参与排名",
-        "季 2026-Q2（2026-04-01 至 2026-06-30）：可计算机台 151/151，展示 10 台；入榜机台 Availability 覆盖 35–86/91 天，DUT 覆盖 28–88/91 天；缺失或零分母为 NULL，不参与排名",
-        "周 2026-W00（2026-01-01 至 2026-01-03）：可计算机台 93/101，展示 10 台；入榜机台 Availability 覆盖 1–3/3 天，DUT 覆盖 1–3/3 天；缺失或零分母为 NULL，不参与排名",
-        "周 2026-W21（2026-05-24 至 2026-05-30）：可计算机台 149/149，展示 10 台；入榜机台 Availability 覆盖 1–7/7 天，DUT 覆盖 1–7/7 天；缺失或零分母为 NULL，不参与排名"
+        "季 2026-Q1（2026-01-01 至 2026-03-31）：可计算机台 149/149，展示 10 台；入榜机台 Availability 覆盖 26–89/90 天，DUT 覆盖 20–81/90 天；缺失或零分母为 NULL，不参与排名",
+        "季 2026-Q2（2026-04-01 至 2026-06-30）：可计算机台 151/151，展示 10 台；入榜机台 Availability 覆盖 76–84/91 天，DUT 覆盖 72–85/91 天；缺失或零分母为 NULL，不参与排名"
       ]
     },
     {
@@ -758,7 +782,7 @@ const DEFAULT_DASHBOARD: DashboardState = {
       "id": "improvement-actions-month-2026",
       "kind": "table",
       "title": "改善措施与责任人 · 月（2026-09）",
-      "subtitle": "临时 Agent 分析尚未生成",
+      "subtitle": "月累计 · 2026-09-01 至 2026-09-14 · 临时 Agent 分析",
       "size": "medium",
       "data": [],
       "encoding": {
@@ -793,17 +817,19 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "",
         "precision": 1
       },
-      "metricDefinition": "问题、优先级、改善措施及建议责任职能由每日临时 Agent 根据查询证据生成；无法直接量化的损失小时为 NULL",
+      "metricDefinition": "2026-09-01 至 2026-09-14 的问题、优先级、措施与责任职能由临时 Agent 根据查询证据生成；损失小时仅引用本期实测记录，无法直接量化时为 NULL",
       "warnings": [
-        "本次分析暂不可用：内置快照未包含临时 Agent 报告",
-        "责任人列为职能建议，需管理层确认后指派到人"
+        "可计算日类型 26/28；缺 Availability 2 个、缺 DUT 2 个；缺失或零分母结果为 NULL，平均仅使用可计算值",
+        "本次分析暂不可用：尚未生成临时 Agent 报告",
+        "责任人列为职能建议，需管理层确认后指派到人",
+        "本期为截至 2026-09-14 的部分月，损失小时不可与完整周期直接对比"
       ]
     },
     {
       "id": "improvement-actions-quarter-2026",
       "kind": "table",
       "title": "改善措施与责任人 · 季（2026-Q3）",
-      "subtitle": "临时 Agent 分析尚未生成",
+      "subtitle": "季累计 · 2026-07-01 至 2026-09-14 · 临时 Agent 分析",
       "size": "medium",
       "data": [],
       "encoding": {
@@ -838,10 +864,12 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "",
         "precision": 1
       },
-      "metricDefinition": "问题、优先级、改善措施及建议责任职能由每日临时 Agent 根据查询证据生成；无法直接量化的损失小时为 NULL",
+      "metricDefinition": "2026-07-01 至 2026-09-14 的问题、优先级、措施与责任职能由临时 Agent 根据查询证据生成；损失小时仅引用本期实测记录，无法直接量化时为 NULL",
       "warnings": [
-        "本次分析暂不可用：内置快照未包含临时 Agent 报告",
-        "责任人列为职能建议，需管理层确认后指派到人"
+        "可计算日类型 138/152；缺 Availability 14 个、缺 DUT 14 个；缺失或零分母结果为 NULL，平均仅使用可计算值",
+        "本次分析暂不可用：尚未生成临时 Agent 报告",
+        "责任人列为职能建议，需管理层确认后指派到人",
+        "本期为截至 2026-09-14 的部分季，损失小时不可与完整周期直接对比"
       ]
     }
   ]

@@ -243,19 +243,19 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("preserves nonweekly metrics and layout with refreshed Sunday-week fallback data", (t) => {
+test("bundles recalculated four-factor metrics with Sunday-week fallback data", (t) => {
   const { dashboard } = fixture(t);
   const state = dashboard.loadOrInitialize(SESSION_A);
-  assert.equal(state.dataAsOf, "2026-09-17T02:08:39.697Z");
+  assert.equal(state.dataAsOf, "2026-09-21T02:46:31.430Z");
   assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-09-14" });
   assert.deepEqual(state.widgets.map((widget) => widget.size), [
     "wide", "wide", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
   ]);
   const overview = state.widgets[0];
   assert.ok(overview?.kind === "overview");
-  assert.equal(overview.data[0]?.["overall_oee_percent"], 51.55133290776901);
+  assert.equal(overview.data[0]?.["overall_oee_percent"], 51.326714609342936);
   assert.equal(overview.encoding.label, "Overall OEE");
-  assert.equal(overview.encoding.gauges.length, 3);
+  assert.equal(overview.encoding.gauges.length, 4);
 
   const trends = state.widgets.slice(2, 5);
   assert.deepEqual(trends.map((widget) => widget.data.length), [38, 9, 3]);
@@ -270,7 +270,7 @@ test("preserves nonweekly metrics and layout with refreshed Sunday-week fallback
   assert.equal(trends[0]?.data[0]?.["period_label"], "2026-W00");
   assert.equal(trends[0]?.data.at(-1)?.["period_label"], "2026-W37");
   assert.ok(trends[0]?.warnings.some((warning) => warning.includes("周日至周六")));
-  assert.equal(trends[0]?.data.find((row) => row["period_label"] === "2026-W36")?.["oee_percent"], 55.61);
+  assert.equal(trends[0]?.data.find((row) => row["period_label"] === "2026-W36")?.["oee_percent"], 54.94);
   assert.equal(state.widgets[5]?.data.length, 6);
   const machines = state.widgets[6]!;
   assert.equal(machines.kind, "table");

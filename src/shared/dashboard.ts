@@ -4,7 +4,7 @@ export const DASHBOARD_SCHEMA_VERSION = 1 as const;
 export const MAX_DASHBOARD_WIDGETS = 12;
 export const MAX_DASHBOARD_ROWS_PER_WIDGET = 2_000;
 export const MAX_DASHBOARD_SERIES = 6;
-export const MAX_DASHBOARD_TABLE_COLUMNS = 8;
+export const MAX_DASHBOARD_TABLE_COLUMNS = 9;
 export const MAX_DASHBOARD_FILE_BYTES = 2 * 1024 * 1024;
 export const DASHBOARD_WIDGET_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 

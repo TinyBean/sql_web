@@ -160,9 +160,11 @@ export function buildDefaultDashboardInTransaction(
       extremeRows.push({
         grain, period_label: period.label, point_type: pointType,
         oee_percent: percentage(average(period.rows, "daily_test_oee")),
-        availability_percent: percentage(average(period.rows, "availability")),
-        performance_percent: percentage(average(period.rows, "performance")),
-        yield_percent: percentage(average(period.rows, "final_yield")),
+        availability_percent: percentage(average(calculable(period.rows), "availability")),
+        performance_percent: percentage(average(calculable(period.rows), "dut_on")),
+        dut_on_percent: percentage(average(calculable(period.rows), "dut_on")),
+        test_time_percent: percentage(average(calculable(period.rows), "test_time_performance")),
+        yield_percent: percentage(average(calculable(period.rows), "final_yield")),
         calculable_day_type_count: calculable(period.rows).length,
       });
     }
@@ -170,7 +172,7 @@ export function buildDefaultDashboardInTransaction(
   replace("oee-extremes-table-2026", {
     subtitle: rangeText + " · 并列极值取最早期间；NULL 不参与排名",
     data: extremeRows, warnings: commonWarnings,
-    metricDefinition: "周/月/季的 MT/ST 日 OEE 等权平均极值；组成项为同一期间各自可计算日类型的平均值",
+    metricDefinition: "周/月/季的 MT/ST 日 OEE 等权平均极值；四个组成项与 OEE 均使用同一期间 OEE 可计算日类型的等权平均值",
   });
   replace("mt-st-components-2026", buildMachineExtremesTable(database, extremeRows, periods.trend, commonWarnings));
   for (const [key, grain, period] of [

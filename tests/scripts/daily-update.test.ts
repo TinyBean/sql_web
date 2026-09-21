@@ -36,7 +36,7 @@ function seed(database: DatabaseSync, date: string, kind = "MT", sockets = 20): 
     "INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)",
   ).run(kind + "-01", "P-LOT", "Test(Normal)", step, date, 43_200);
   database.prepare(
-    "INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date) VALUES(?,?,?,?,?,?,?,?)",
+    "INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date,touchdown_index,start_time,end_time) VALUES(?,?,?,?,?,?,?,?,'1','2026-01-01T00:00:00.000Z','2026-01-01T00:00:10.000Z')",
   ).run(kind + "-01", "P-LOT", "10", "8", "1st", String(sockets), step, date);
 }
 
@@ -187,8 +187,8 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
   writer.close();
   const state = buildDefaultDashboard(config.databasePath, "2026-01-02");
   assert.deepEqual(state.widgets.slice(0, 2).map((widget) => widget.data[0]), [
-    { overall_oee_percent: 20, avg_availability_percent: 50, avg_performance_percent: 50, avg_yield_percent: 80 },
-    { overall_oee_percent: 10, avg_availability_percent: 50, avg_performance_percent: 25, avg_yield_percent: 80 },
+    { overall_oee_percent: 20, avg_availability_percent: 50, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
+    { overall_oee_percent: 10, avg_availability_percent: 50, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
   ]);
 });
 

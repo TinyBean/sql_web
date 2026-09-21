@@ -192,6 +192,8 @@ function donutOption(widget: DashboardDonutWidget): Record<string, unknown> {
 function overviewOption(widget: DashboardOverviewWidget): Record<string, unknown> {
   const row = widget.data[0];
   const gauges = widget.encoding.gauges;
+  const columns = gauges.length === 4 ? 2 : gauges.length;
+  const rows = Math.ceil(gauges.length / columns);
   return {
     ...commonChartOption(widget),
     tooltip: { show: false },
@@ -202,8 +204,8 @@ function overviewOption(widget: DashboardOverviewWidget): Record<string, unknown
       return {
         name: gauge.name,
         type: "gauge",
-        center: [`${((index + 0.5) / gauges.length) * 100}%`, "51%"],
-        radius: "72%",
+        center: [`${((index % columns + 0.5) / columns) * 100}%`, rows > 1 ? `${(Math.floor(index / columns) + 0.5) / rows * 100 - 3}%` : "51%"],
+        radius: rows > 1 ? "36%" : "72%",
         min: minimum,
         max: maximum,
         startAngle: 210,
@@ -245,7 +247,7 @@ function overviewOption(widget: DashboardOverviewWidget): Record<string, unknown
             ? "—"
             : (displayValue: number) => `${displayValue.toFixed(1)}${widget.format.unit}`,
         },
-        data: [{ value: value ?? 0, name: gauge.name }],
+        data: [{ value: value ?? 0, name: gauge.name.replace(/^Performance \((.+)\)$/u, "Performance\n($1)") }],
       };
     }),
   };
@@ -444,6 +446,7 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
 
     chartHost = document.createElement("div");
     chartHost.className = "chart-host overview-gauges";
+    if (widget.encoding.gauges.length === 4) chartHost.classList.add("overview-four-gauges");
     chartHost.setAttribute("role", "img");
     chartHost.setAttribute(
       "aria-label",

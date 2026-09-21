@@ -1,8 +1,10 @@
 # Test OEE 数据库
 
 这是 Test OEE Skill 使用的 SQLite 数据库。Word 中的
-`R_OEE_MT_TOP_AVAILABILITY` 对应本地表 `oee_availability`；Performance (DUT-On)、Performance (Test Time) 和 Yield
+`R_OEE_MT_TOP_AVAILABILITY` 对应本地表 `oee_availability`，用于 Availability 和 Idle；Performance (DUT-On)、Performance (Test Time) 和 Yield
 使用本地表 `oee_dut_utilization`。
+
+Idle 的分子来自原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和可用秒数分母沿用 Availability。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
 
 ## 数据库结构
 

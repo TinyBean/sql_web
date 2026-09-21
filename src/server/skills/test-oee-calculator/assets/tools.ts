@@ -21,9 +21,9 @@ function jsonResult(value: unknown) {
 export function createTools(): ToolDefinition[] {
   const getDefaultSqlTool = defineTool({
     name: "get_default_sql",
-    label: "获取默认 Test OEE SQL",
+    label: "获取默认 Test OEE / Effective OEE SQL",
     description:
-      "生成完整的默认 Test OEE SQLite 查询。查询排除平台名称包含 PCIe 的机台，在业务日+MT/ST 粒度分别汇总 Availability、Performance (DUT-On)、Performance (Test Time) 和 Yield，以 Availability 为主左连接 DUT，四项相乘得到日 OEE，再等权平均日 OEE 得到多日结果。工具只返回 SQL，不连接数据库。",
+      "生成完整的默认 Test OEE 和 Effective OEE SQLite 查询。查询排除平台名称包含 PCIe 的机台，在业务日+MT/ST 粒度汇总 Availability、Idle、Performance (DUT-On)、Performance (Test Time) 和 Yield，以 Availability 为主左连接 DUT。Idle 累计原始 final_state 中包含大写子串 IDLE 的所有状态秒数，沿用 Availability 的过滤和分母。Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；分别用 Availability 或 Effective Availability 乘两个 Performance 因子及 Yield 得到日 Test OEE / Effective OEE，再各自等权平均可计算日得到多日结果及独立覆盖计数。工具只返回 SQL，不连接数据库。",
     executionMode: "sequential",
     parameters: Type.Object({
       start_date: Type.String({
@@ -45,9 +45,9 @@ export function createTools(): ToolDefinition[] {
 
   const getDefaultDashboardSqlTool = defineTool({
     name: "get_default_dashboard_sql",
-    label: "获取默认 Test OEE 看板 SQL",
+    label: "获取默认 Test OEE / Effective OEE 看板 SQL",
     description:
-      "生成默认 Test OEE 看板所需的确定性 SQLite 查询，直接复用标准逐日 SQL。overview 返回恰好一行，包含合并及 MT/ST 各自的五项指标和覆盖计数。分类概览的 OEE、Availability、Performance (DUT-On)、Performance (Test Time)、Yield 必须全部绑定同一 mt_ 或 st_ 前缀的 _percent 字段，五项仅平均该类型 OEE 可计算日；avg_*_percent 是 MT/ST 合并均值，只用于合并概览。分类覆盖使用同前缀的 calculable_day_count、selected_day_count、availability_day_count、dut_day_count，不能从合并计数推算。trends 返回逐业务日的 MT/ST 宽表，按需要选择视图。DUT-On 绑定 {prefix}_dut_on_percent，Test Time 绑定 {prefix}_test_time_percent；旧 {prefix}_performance_percent 仅为 DUT-On 别名。所有 _percent 列都是百分数值（例如 56.65 表示 56.65%），可直接配合 Dashboard 的 % unit，禁止再次乘以 100。工具只返回 SQL，不连接数据库。",
+      "生成 Test OEE 和 Effective OEE 看板的确定性 SQLite 查询，复用标准逐日 SQL。overview 返回一行合并及 MT/ST 分类指标和覆盖计数。Test OEE 使用原 oee、availability、dut_on、test_time、yield 字段，旧 performance 仅为 DUT-On 别名；Effective OEE 使用 effective_oee、effective_availability、effective_dut_on、effective_test_time、effective_yield 及辅助 idle 字段，后者均只平均 Effective OEE 可计算日，不能借用原 Test OEE 组成项均值。分类指标须全部绑定同一 mt_ 或 st_ 前缀的 _percent 字段；合并主值为 overall_oee_percent / overall_effective_oee_percent，合并组成项为 avg_*_percent。分类覆盖分别用 {type}_calculable_day_count / {type}_effective_calculable_day_count；合并覆盖分别用 calculable_day_type_count / effective_calculable_day_type_count，不能推算分类覆盖；selected、availability、dut 覆盖计数复用原字段。trends 返回逐业务日 MT/ST 宽表，新增 idle、effective_availability 和 effective_oee；组成项展示自身可计算值，保留缺失值。所有 _percent 列已乘 100（56.65 表示 56.65%），可直接配合 % unit，禁止再次缩放。工具只返回 SQL，不连接数据库。",
     executionMode: "sequential",
     parameters: Type.Object({
       start_date: Type.String({
@@ -59,7 +59,7 @@ export function createTools(): ToolDefinition[] {
         pattern: "^\\d{4}-\\d{2}-\\d{2}$",
       }),
       view: Type.Union([Type.Literal("overview"), Type.Literal("trends")], {
-        description: "overview 用于单行概览组件；trends 用于四个组成项及 OEE 的 MT/ST 日趋势。",
+        description: "overview 用于单行概览；trends 用于 Test OEE、Effective OEE 及组成项的 MT/ST 日趋势。",
       }),
     }),
     async execute(_toolCallId, params, signal) {
@@ -78,7 +78,7 @@ export function createTools(): ToolDefinition[] {
     name: "get_sql_expressions",
     label: "获取 Test OEE SQL 规则",
     description:
-      "返回 Test OEE 固定关键规则和闭区间业务日范围对应的 SQLite 表达式，供自定义 execute_sql 原样复用，包括 LOT、PCIe 平台排除、MT/ST、Availability 状态，以及 DUT 的 TD_Label 和测试秒数。date 是 08:30 至次日 08:30 的业务日标签；工具不连接数据库，也不固定聚合方式或最终公式。",
+      "返回 Test OEE / Effective OEE 固定规则和闭区间业务日范围对应的 SQLite 表达式，供自定义 execute_sql 原样复用，包括 LOT、PCIe 平台排除、MT/ST、Availability 状态和原始 final_state 包含 IDLE 的 idlePredicate，以及 DUT 的 TD_Label 和测试秒数。idlePredicate 仅在 availability 来源返回，区分大小写并包含 IDLE_NoWIP、IDLE_WaitARV、IDLE_NoTask 等变体，不使用派生状态。date 是 08:30 至次日 08:30 的业务日标签；工具不连接数据库，也不固定聚合方式或最终公式。",
     executionMode: "sequential",
     parameters: Type.Object({
       source: Type.Union([Type.Literal("availability"), Type.Literal("dut")], {

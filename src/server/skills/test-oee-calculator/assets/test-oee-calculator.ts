@@ -29,6 +29,7 @@ export interface TestOeeSqlExpressions {
   readonly platformPredicate: string;
   readonly kindExpression: string;
   readonly availabilityStateExpression?: string;
+  readonly idlePredicate?: string;
   readonly touchdownLabelExpression?: string;
   readonly testTimeSecondsExpression?: string;
 }
@@ -411,6 +412,7 @@ export function getTestOeeSqlExpressions(
         sqlColumn("final_state", tableAlias),
         lotIdColumn,
       ),
+      idlePredicate: `instr(${sqlColumn("final_state", tableAlias)},'IDLE')>0`,
     };
   }
   const machineColumn = sqlColumn("machine_id", tableAlias);
@@ -520,6 +522,7 @@ export function getDefaultTestOeeSql(startDate: string, endDate: string): Defaul
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
   if (
     availability.availabilityStateExpression === undefined ||
+    availability.idlePredicate === undefined ||
     dut.touchdownLabelExpression === undefined ||
     dut.testTimeSecondsExpression === undefined
   ) {
@@ -539,6 +542,7 @@ availability_classified AS (
     ${availability.machineExpression} AS machine,
     ${availability.kindExpression} AS kind,
     ${availability.availabilityStateExpression} AS state_group,
+    ${availability.idlePredicate} AS is_idle,
     CAST(a.time_span AS REAL) AS state_seconds
   FROM oee_availability AS a
   WHERE ${availability.dateRangePredicate}
@@ -553,15 +557,31 @@ availability_daily AS (
     COUNT(DISTINCT machine) AS machine_count,
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
       AS machine_running_seconds,
+    SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
     COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS} AS available_seconds,
     CASE
       WHEN COUNT(DISTINCT machine)=0 THEN NULL
       ELSE SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
         / (COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS}.0)
-    END AS availability
+    END AS availability,
+    CASE
+      WHEN COUNT(DISTINCT machine)=0 THEN NULL
+      ELSE SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END)
+        / (COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS}.0)
+    END AS idle
   FROM availability_classified
   WHERE kind IN ('MT','ST')
   GROUP BY day, kind
+),
+availability_effective AS (
+  SELECT
+    *,
+    CASE
+      WHEN availability IS NULL OR idle IS NULL
+        OR (1 + (1 - idle - availability))=0 THEN NULL
+      ELSE availability + idle / (1 + (1 - idle - availability))
+    END AS effective_availability
+  FROM availability_daily
 ),
 ${getTestOeeDutCtes(startDate, endDate)},
 dut_daily AS (
@@ -600,6 +620,7 @@ daily_results AS (
     a.availability_rows,
     a.machine_count,
     a.machine_running_seconds,
+    a.idle_seconds,
     a.available_seconds,
     d.dut_rows,
     d.input_quantity,
@@ -611,6 +632,8 @@ daily_results AS (
     d.trimmed_rows_each_tail,
     d.trimmed_mean_test_seconds,
     a.availability,
+    a.idle,
+    a.effective_availability,
     d.dut_on,
     d.test_time_performance,
     d.final_yield,
@@ -618,8 +641,13 @@ daily_results AS (
       WHEN a.availability IS NULL OR d.dut_on IS NULL
         OR d.test_time_performance IS NULL OR d.final_yield IS NULL THEN NULL
       ELSE a.availability * d.dut_on * d.test_time_performance * d.final_yield
-    END AS daily_test_oee
-  FROM availability_daily AS a
+    END AS daily_test_oee,
+    CASE
+      WHEN a.effective_availability IS NULL OR d.dut_on IS NULL
+        OR d.test_time_performance IS NULL OR d.final_yield IS NULL THEN NULL
+      ELSE a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield
+    END AS daily_effective_oee
+  FROM availability_effective AS a
   LEFT JOIN dut_daily AS d ON d.day=a.day AND d.kind=a.kind
 )
 SELECT
@@ -628,6 +656,7 @@ SELECT
   COALESCE(r.availability_rows,0) AS availability_rows,
   COALESCE(r.machine_count,0) AS machine_count,
   r.machine_running_seconds,
+  r.idle_seconds,
   r.available_seconds,
   r.dut_rows,
   r.input_quantity,
@@ -639,6 +668,8 @@ SELECT
   r.trimmed_rows_each_tail,
   r.trimmed_mean_test_seconds,
   r.availability,
+  r.idle,
+  r.effective_availability,
   r.dut_on,
   r.dut_on AS performance,
   r.test_time_performance,
@@ -646,7 +677,10 @@ SELECT
   r.daily_test_oee,
   COUNT(r.daily_test_oee) OVER (PARTITION BY k.kind) AS calculable_day_count,
   COUNT(*) OVER (PARTITION BY k.kind) AS selected_day_count,
-  AVG(r.daily_test_oee) OVER (PARTITION BY k.kind) AS period_test_oee
+  AVG(r.daily_test_oee) OVER (PARTITION BY k.kind) AS period_test_oee,
+  r.daily_effective_oee,
+  COUNT(r.daily_effective_oee) OVER (PARTITION BY k.kind) AS effective_calculable_day_count,
+  AVG(r.daily_effective_oee) OVER (PARTITION BY k.kind) AS period_effective_oee
 FROM calendar AS c
 CROSS JOIN kinds AS k
 LEFT JOIN daily_results AS r ON r.day=c.day AND r.kind=k.kind
@@ -724,7 +758,43 @@ export function getDefaultTestOeeDashboardSql(
   COUNT(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_calculable_day_count,
   COUNT(CASE WHEN kind='ST' THEN 1 END) AS st_selected_day_count,
   COUNT(CASE WHEN kind='ST' AND availability_rows>0 THEN 1 END) AS st_availability_day_count,
-  COUNT(CASE WHEN kind='ST' THEN dut_rows END) AS st_dut_day_count
+  COUNT(CASE WHEN kind='ST' THEN dut_rows END) AS st_dut_day_count,
+  100.0 * AVG(daily_effective_oee) AS overall_effective_oee_percent,
+  100.0 * AVG(CASE WHEN kind='MT' THEN daily_effective_oee END) AS mt_effective_oee_percent,
+  100.0 * AVG(CASE WHEN kind='ST' THEN daily_effective_oee END) AS st_effective_oee_percent,
+  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN idle END)
+    AS avg_idle_percent,
+  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN effective_availability END)
+    AS avg_effective_availability_percent,
+  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN dut_on END)
+    AS avg_effective_dut_on_percent,
+  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN test_time_performance END)
+    AS avg_effective_test_time_percent,
+  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN final_yield END)
+    AS avg_effective_yield_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN idle END)
+    AS mt_idle_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN effective_availability END)
+    AS mt_effective_availability_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN dut_on END)
+    AS mt_effective_dut_on_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN test_time_performance END)
+    AS mt_effective_test_time_percent,
+  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN final_yield END)
+    AS mt_effective_yield_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN idle END)
+    AS st_idle_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN effective_availability END)
+    AS st_effective_availability_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN dut_on END)
+    AS st_effective_dut_on_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN test_time_performance END)
+    AS st_effective_test_time_percent,
+  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN final_yield END)
+    AS st_effective_yield_percent,
+  COUNT(daily_effective_oee) AS effective_calculable_day_type_count,
+  COUNT(CASE WHEN kind='MT' THEN daily_effective_oee END) AS mt_effective_calculable_day_count,
+  COUNT(CASE WHEN kind='ST' THEN daily_effective_oee END) AS st_effective_calculable_day_count
 FROM ${dailySubquery}`
     : `SELECT
   day,
@@ -739,7 +809,13 @@ FROM ${dailySubquery}`
   100.0 * MAX(CASE WHEN kind='MT' THEN final_yield END) AS mt_yield_percent,
   100.0 * MAX(CASE WHEN kind='ST' THEN final_yield END) AS st_yield_percent,
   100.0 * MAX(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_oee_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent
+  100.0 * MAX(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN idle END) AS mt_idle_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN idle END) AS st_idle_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN effective_availability END) AS mt_effective_availability_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN effective_availability END) AS st_effective_availability_percent,
+  100.0 * MAX(CASE WHEN kind='MT' THEN daily_effective_oee END) AS mt_effective_oee_percent,
+  100.0 * MAX(CASE WHEN kind='ST' THEN daily_effective_oee END) AS st_effective_oee_percent
 FROM ${dailySubquery}
 GROUP BY day
 ORDER BY day`;

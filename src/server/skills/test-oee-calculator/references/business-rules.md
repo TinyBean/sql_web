@@ -85,11 +85,19 @@ Performance (Test Time) = TrimmedMean(Time_Span, 0.2) × SUM(TD_Label) / SUM(Tim
 Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 
 日 Test OEE = Availability × Performance (DUT-On) × Performance (Test Time) × Yield
+
+Idle = SUM(原始 FINAL_STATE 中包含 'IDLE' 的 time_span) / (机台数 × 86400)
+
+Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))
+
+日 Effective OEE = Effective Availability × Performance (DUT-On) × Performance (Test Time) × Yield
 ```
 
 其中：
 
 - 机台数从经过日期、LOT、PCIe 和 MT/ST 规则过滤后的全部 Availability 记录计算，不要求机台出现 `Machine_Running`。某台机即使当天全是 loss，也必须计入分母。
+- Idle 沿用 Availability 的全部过滤、日类型粒度和机台分母，累加原始 `final_state` 中包含大写子串 `IDLE` 的所有状态秒数，使用 `instr(final_state,'IDLE')>0`，区分大小写且不限子串位置；包含 `IDLE_NoWIP`、`IDLE_WaitARV`、`IDLE_NoTask(...)` 等变体，不使用派生 `state_group`。有效 Availability 记录中没有任何包含 `IDLE` 的状态时，`idle_seconds` 和 `idle` 为 0；没有有效 Availability 记录时为 `NULL`。
+- Effective Availability 的分母 `1 + (1 - Idle - Availability)` 为 0 或必要输入缺失时，Effective Availability 和日 Effective OEE 为 `NULL`，不影响原 Test OEE。分母为负时照公式计算，不封顶、不修正源值。
 - `Time_Span` 来自 DUT 的 `END_TIME - START_TIME`，单位为秒，使用 `unixepoch(..., 'subsec')` 保留小数秒。时间戳为空或无法解析时为 `NULL`。
 - `TD_Label` 对去除首尾空白后的非零十进制整数文本（允许单个正负号）取 1；空、非法文本和零取 `NULL`。
 - `TrimmedMean(Time_Span, 0.2)` 总共截去 0.2%，两端各 0.1%。对当天该类型非空时间样本 n，按秒数、事实表 id 排序，每端删除 `floor(n / 1000)` 行；边界同值不整组删除。
@@ -103,13 +111,16 @@ Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 日 Test OEE = 当天该 MT/ST 类型的四个汇总组成项相乘
 
 多日 Test OEE = AVG(范围内可计算的日 Test OEE)
+
+多日 Effective OEE = AVG(范围内可计算的日 Effective OEE)
 ```
 
-先在日类型粒度汇总各组成项的分子和分母，再计算比率并相乘。多日结果对可计算的业务日等权平均；不要把整个多日范围的原始分子分母一次汇总后相乘，也不要用机台数或产量给日结果加权。
+先在日类型粒度汇总各组成项的分子和分母，再计算比率并相乘。两种多日结果分别对自身可计算的业务日等权平均；不要把整个多日范围的原始分子分母一次汇总后相乘，也不要用机台数或产量给日结果加权。`period_test_oee` 与 `period_effective_oee` 在每日行重复展示同类型多日值，不得再次求和或平均。
 
 ### 数值与展示单位
 
 - 默认逐日 SQL 的 `availability`、`dut_on`、`test_time_performance`、`final_yield`、`daily_test_oee` 和 `period_test_oee` 均为原始比率（1 表示 100%，不限制上下界）。
+- 新增 `idle`、`effective_availability`、`daily_effective_oee` 和 `period_effective_oee` 也为原始比率；`idle_seconds` 是秒数，不是百分比。
 - 指标解释和界面显示使用 `Performance (DUT-On)` 与 `Performance (Test Time)`。旧 `performance` 及 `*_performance_percent` 仅为 DUT-On 的兼容别名，不能充当两项的乘积。
 - 默认看板 SQL 中以 `_percent` 结尾的列为百分数值（percentage points），已经乘以 100；例如 `56.65` 表示 `56.65%`。
 - Dashboard 的 `format.unit: "%"` 只追加单位，不会把 `0.5665` 自动换算为 `56.65`。不得把默认逐日 SQL 的比率列直接映射到 `%` 看板。
@@ -146,6 +157,26 @@ Yield = SUM(OUT_QTY) / SUM(IN_QTY)
 
 OEE 保持 `AVG(日 Availability × 日 Performance (DUT-On) × 日 Performance (Test Time) × 日 Yield)`，不要求等于四个平均系数的乘积。MT/ST 系数可能真实相同，不能仅按数值相同判错；应核对分类字段及其计算样本。
 
+### Effective OEE 概览字段映射
+
+同一 `overview` 快照同时提供 Effective OEE。原 Test OEE 字段及其计算样本保持不变。Effective OEE 的主值分别使用 `mt_effective_oee_percent`、`st_effective_oee_percent` 和合并的 `overall_effective_oee_percent`。
+
+以下 `{p}` 为 `mt`、`st` 或合并的 `avg`，同一卡片必须保持前缀一致：
+
+| 指标 | 字段 |
+|---|---|
+| Idle | `{p}_idle_percent` |
+| Effective Availability | `{p}_effective_availability_percent` |
+| Performance (DUT-On) | `{p}_effective_dut_on_percent` |
+| Performance (Test Time) | `{p}_effective_test_time_percent` |
+| Yield | `{p}_effective_yield_percent` |
+
+四个乘积组成项映射到 `encoding.gauges[].column`；Idle 是用于解释 Effective Availability 的辅助指标，不额外乘入 OEE。所有这些概览字段仅平均对应类型或合并范围中 **日 Effective OEE 非 NULL** 的行。Performance 和 Yield 的日公式没有改变，独立字段用于保证平均样本一致；不能借用原 Test OEE 概览的组成项均值。
+
+分类覆盖使用 `{mt|st}_effective_calculable_day_count`，合并覆盖使用 `effective_calculable_day_type_count`。日期、Availability 和 DUT 覆盖计数复用原字段。新分母为零时，Effective OEE 覆盖可能少于 Test OEE；覆盖不足须明确说明。
+
+`trends` 提供 `{mt|st}_idle_percent`、`{mt|st}_effective_availability_percent` 和 `{mt|st}_effective_oee_percent`；逐日 Idle 和 Effective Availability 展示其自身可计算值，不因缺少 DUT 隐藏，日 Effective OEE 仍要求所有乘积组成项有效。所有 `_percent` 值已乘 100。缺少新增字段的历史快照需要重新查询，不能补零；新增指标不会自动修改默认看板、机台排名或历史快照。
+
 ## 日期过滤与数据覆盖
 
 两张事实表的 `date` 是 ISO 业务日标签。所有查询必须原样使用工具为本次范围返回的日期谓词；该谓词用日期前缀表达闭区间并包含结束业务日。
@@ -156,10 +187,12 @@ OEE 保持 `AVG(日 Availability × 日 Performance (DUT-On) × 日 Performance 
 
 - `availability_rows`：当天该类型的有效 Availability 记录数。
 - `machine_count`：Availability 分母采用的不重复机台数。
+- `idle_seconds` / `idle`：原始状态包含 `IDLE` 的累计秒数及其占 `available_seconds` 的比率。
 - `dut_rows`：当天该类型的有效 DUT 记录数；为 `NULL` 表示 Availability 日类型没有匹配 DUT 日类型。
 - `touchdown_count`、`actual_test_seconds`、`trimmed_mean_test_seconds`：Test Time 的 TD 次数、实际测试总秒数、截尾标准秒数。
 - `valid_duration_rows`、`trimmed_rows_each_tail`：有效时间样本数及每端截去的样本数。
 - `calculable_day_count` / `selected_day_count`：多日平均实际使用的业务日数与所选业务日数。
+- `effective_calculable_day_count`：该类型日 Effective OEE 非 NULL 的业务日数；`period_effective_oee` 只平均这些日。
 
 任何计数不足都必须在回答中说明。无数据的业务日结果保持 `NULL`，多日 `AVG` 不把它当作 0；同时必须明确警告平均值只覆盖了哪些可计算业务日。不得把“查询范围正确”和“数据覆盖完整”混为一谈。
 

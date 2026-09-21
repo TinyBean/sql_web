@@ -34,6 +34,38 @@ test("loads the selected model from the project environment file", (t) => {
   assert.equal(config.defaultDashboardPath, path.join(config.projectRoot, ".data", "current-dashboard.json"));
   assert.equal(config.codeInterpreter.pythonPath, "/usr/local/bin/python3");
   assert.equal(config.codeInterpreter.bwrapPath, "/usr/bin/bwrap");
+  assert.equal(config.email, null);
+});
+
+test("loads SMTP configuration preserving the quoted sender local part", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-mail-config-"));
+  const envPath = path.join(directory, ".env");
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(envPath, [
+    "SQL_WEB_PROVIDER=test", "SQL_WEB_MODEL=test",
+    "SQL_WEB_SMTP_HOST=10.71.68.150", "SQL_WEB_SMTP_PORT=25",
+    `SQL_WEB_MAIL_FROM_ADDRESS='"JV OEE Agent"@sdsscn.com'`,
+    "SQL_WEB_MAIL_FROM_NAME=JV OEE Agent",
+  ].join("\n"));
+  assert.deepEqual(loadConfig(loadProjectEnvironment(envPath, {})).email, {
+    host: "10.71.68.150", port: 25,
+    fromAddress: '"JV OEE Agent"@sdsscn.com', fromName: "JV OEE Agent",
+  });
+});
+
+test("rejects incomplete or invalid SMTP configuration", () => {
+  const model = { SQL_WEB_PROVIDER: "test", SQL_WEB_MODEL: "test" };
+  for (const partial of [{ SQL_WEB_SMTP_HOST: "10.71.68.150" }, { SQL_WEB_SMTP_PORT: "25" }, { SQL_WEB_MAIL_FROM_NAME: "Agent" }]) {
+    assert.throws(() => loadConfig({ ...model, ...partial }), /启用邮件工具必须同时配置/u);
+  }
+  const valid = { ...model, SQL_WEB_SMTP_HOST: "10.71.68.150", SQL_WEB_MAIL_FROM_ADDRESS: '"JV OEE Agent"@sdsscn.com', SQL_WEB_MAIL_FROM_NAME: "JV OEE Agent" };
+  assert.equal(loadConfig(valid).email?.port, 25);
+  for (const invalid of [
+    { SQL_WEB_SMTP_PORT: "70000" }, { SQL_WEB_SMTP_PORT: "NaN" },
+    { SQL_WEB_MAIL_FROM_ADDRESS: "JV OEE Agent@sdsscn.com" },
+    { SQL_WEB_MAIL_FROM_NAME: "Agent\nBcc: victim@example.com" },
+    { SQL_WEB_SMTP_HOST: "smtp://10.71.68.150" },
+  ]) assert.throws(() => loadConfig({ ...valid, ...invalid }));
 });
 
 test("requires both model fields", () => {

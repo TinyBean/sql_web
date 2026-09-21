@@ -3,6 +3,7 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 import { fileURLToPath } from "node:url";
 import type { ModelSelection } from "../shared/contracts.ts";
+import { validateEmailConfig, type EmailConfig } from "./email.ts";
 
 export interface AppEnvironment {
   readonly HOST?: string | undefined;
@@ -16,6 +17,10 @@ export interface AppEnvironment {
   readonly SQL_WEB_PRLIMIT_PATH?: string | undefined;
   readonly SQL_WEB_PROVIDER?: string | undefined;
   readonly SQL_WEB_MODEL?: string | undefined;
+  readonly SQL_WEB_SMTP_HOST?: string | undefined;
+  readonly SQL_WEB_SMTP_PORT?: string | undefined;
+  readonly SQL_WEB_MAIL_FROM_ADDRESS?: string | undefined;
+  readonly SQL_WEB_MAIL_FROM_NAME?: string | undefined;
 }
 
 export interface AppConfig {
@@ -30,6 +35,7 @@ export interface AppConfig {
   readonly agentDir: string;
   readonly logDir: string;
   readonly model: ModelSelection;
+  readonly email: EmailConfig | null;
   readonly codeInterpreter: {
     readonly pythonPath: string;
     readonly bwrapPath: string;
@@ -72,6 +78,10 @@ export function loadProjectEnvironment(
       SQL_WEB_PYTHON_PATH: target["SQL_WEB_PYTHON_PATH"],
       SQL_WEB_BWRAP_PATH: target["SQL_WEB_BWRAP_PATH"],
       SQL_WEB_PRLIMIT_PATH: target["SQL_WEB_PRLIMIT_PATH"],
+      SQL_WEB_SMTP_HOST: target["SQL_WEB_SMTP_HOST"],
+      SQL_WEB_SMTP_PORT: target["SQL_WEB_SMTP_PORT"],
+      SQL_WEB_MAIL_FROM_ADDRESS: target["SQL_WEB_MAIL_FROM_ADDRESS"],
+      SQL_WEB_MAIL_FROM_NAME: target["SQL_WEB_MAIL_FROM_NAME"],
       // The model must come from this project's .env, never from inherited shell state.
       SQL_WEB_PROVIDER: values["SQL_WEB_PROVIDER"],
       SQL_WEB_MODEL: values["SQL_WEB_MODEL"],
@@ -105,10 +115,28 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     agentDir: path.join(PROJECT_ROOT, ".data", "agent"),
     logDir: path.join(PROJECT_ROOT, ".data", "logs"),
     model: { provider, model },
+    email: loadEmailConfig(env),
     codeInterpreter: {
       pythonPath: path.resolve(env.SQL_WEB_PYTHON_PATH?.trim() || "/usr/bin/python3"),
       bwrapPath: path.resolve(env.SQL_WEB_BWRAP_PATH?.trim() || "/usr/bin/bwrap"),
       prlimitPath: path.resolve(env.SQL_WEB_PRLIMIT_PATH?.trim() || "/usr/bin/prlimit"),
     },
   };
+}
+
+function loadEmailConfig(env: AppEnvironment): EmailConfig | null {
+  const values = [env.SQL_WEB_SMTP_HOST, env.SQL_WEB_SMTP_PORT, env.SQL_WEB_MAIL_FROM_ADDRESS, env.SQL_WEB_MAIL_FROM_NAME];
+  if (values.every((value) => !value?.trim())) return null;
+  const host = env.SQL_WEB_SMTP_HOST?.trim();
+  const fromAddress = env.SQL_WEB_MAIL_FROM_ADDRESS;
+  const fromName = env.SQL_WEB_MAIL_FROM_NAME;
+  if (!host || !fromAddress?.trim() || !fromName?.trim()) {
+    throw new Error("启用邮件工具必须同时配置 SQL_WEB_SMTP_HOST、SQL_WEB_MAIL_FROM_ADDRESS 和 SQL_WEB_MAIL_FROM_NAME");
+  }
+  return validateEmailConfig({
+    host,
+    port: Number(env.SQL_WEB_SMTP_PORT?.trim() || "25"),
+    fromAddress,
+    fromName,
+  });
 }

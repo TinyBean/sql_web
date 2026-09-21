@@ -28,6 +28,7 @@ export const ALL_AGENT_TOOL_NAMES = [
   ...BASE_AGENT_TOOL_NAMES,
   ...DASHBOARD_AGENT_TOOL_NAMES,
   "code_interpreter",
+  "send_email",
 ] as const satisfies
   readonly AgentToolName[];
 

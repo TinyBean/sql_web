@@ -34,6 +34,8 @@ import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
 import { extractCodeInterpreterImages } from "../tool/code-interpreter-images.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
+import { createEmailTool, EMAIL_AGENT_RULES, EMAIL_TOOL_NAME } from "../tool/email-tools.ts";
+import type { EmailConfig } from "../email.ts";
 import { SessionDashboardStore } from "../dashboard/session-store.ts";
 import type { InitialDashboardProvider } from "../dashboard/definition.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
@@ -58,6 +60,7 @@ export interface AgentSessionStoreOptions {
   readonly artifacts: ArtifactStore;
   readonly loadInitialDashboard: InitialDashboardProvider;
   readonly codeInterpreter: CodeInterpreterRuntime;
+  readonly email?: EmailConfig | null;
   readonly logger?: AgentProcessLogger;
 }
 
@@ -100,7 +103,7 @@ export class SessionBusyError extends Error {
   }
 }
 
-function buildSystemPrompt(codeInterpreterAvailable: boolean): string {
+function buildSystemPrompt(codeInterpreterAvailable: boolean, emailAvailable: boolean): string {
   const codeInterpreterRules = codeInterpreterAvailable
     ? `
 16. 少量查询结果优先使用 execute_sql。优先让 SQLite 在同一条查询中完成过滤、聚合、比率和乘积;不要把数据库查询结果复制到其他工具参数或代码数据字面量中。
@@ -130,7 +133,7 @@ Dashboard 使用说明:
 12. 更新同一主题时复用已有稳定组件 ID,只有新分析才创建新 ID。date_range 必须填写查询实际覆盖范围,metric_definition 必须说明口径,数据缺失或不可计算条件写入 warnings。
 13. 每次 update_dashboard 都使用最近一次 get_dashboard 返回的 revision。出现 revision 冲突时重新读取看板并只重试一次。只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset。
 14. 解释当前看板、纯口径解释、定义说明、SQL 失败、快照被截断或结果无法合理可视化时不得修改看板;不要为了调用工具而创建无意义组件。
-15. OEE 查询继续遵循 Test OEE Skill 中的日期、LOT、MT/ST 与 Machine_Running 口径。${codeInterpreterRules}`;
+15. OEE 查询继续遵循 Test OEE Skill 中的日期、LOT、MT/ST 与 Machine_Running 口径。${codeInterpreterRules}${emailAvailable ? EMAIL_AGENT_RULES : ""}`;
 }
 
 async function createLockedResourceLoader(
@@ -507,6 +510,7 @@ export class AgentSessionStore {
   readonly #artifacts: ArtifactStore;
   readonly #dashboard: SessionDashboardStore;
   readonly #codeInterpreter: CodeInterpreterRuntime;
+  readonly #email: EmailConfig | null;
   readonly #toolNames: readonly AgentToolName[];
   readonly #skillCatalog: AgentSkillCatalog;
   readonly #sessions = new Map<string, AgentSession>();
@@ -518,7 +522,7 @@ export class AgentSessionStore {
   readonly #activeRequestIds = new Map<string, string>();
 
   private constructor(
-    { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, logger }:
+    { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, email, logger }:
       AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
     skillCatalog: AgentSkillCatalog,
@@ -531,7 +535,8 @@ export class AgentSessionStore {
     this.#artifacts = artifacts;
     this.#dashboard = new SessionDashboardStore(artifacts, loadInitialDashboard);
     this.#codeInterpreter = codeInterpreter;
-    this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter, true)];
+    this.#email = email ?? null;
+    this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter, true), ...(this.#email ? [EMAIL_TOOL_NAME] : [])];
     this.#skillCatalog = skillCatalog;
     this.#modelRuntime = modelRuntime;
     this.#logger = logger ?? NOOP_LOGGER;
@@ -815,15 +820,15 @@ export class AgentSessionStore {
         usedGeneratedImageIds.add(image.id);
       }
     }
-    const tools = createAgentTools(
+    const tools = [...createAgentTools(
       this.#database,
       artifacts,
       this.#codeInterpreter,
       usedGeneratedImageIds,
       { dashboard: this.#dashboard, sessionId: sessionManager.getSessionId() },
-    );
+    ), ...(this.#email ? [createEmailTool(this.#email, this.#logger, sessionManager.getSessionId())] : [])];
     const resourceLoader = await createLockedResourceLoader(
-      buildSystemPrompt(this.#codeInterpreter.status.available),
+      buildSystemPrompt(this.#codeInterpreter.status.available, this.#email !== null),
       this.#skillCatalog,
       this.#cwd,
       this.#agentDir,

@@ -350,8 +350,33 @@ npm test
 | `API_PWD` | 未配置 | OEE API HTTP Basic 密码，必须与 `API_USER` 同时配置 |
 | `SQL_WEB_PROVIDER` | 必填 | 模型提供方 |
 | `SQL_WEB_MODEL` | 必填 | 模型 ID |
+| `SQL_WEB_SMTP_HOST` | 未配置 | 邮件 SMTP 主机；未配置邮件时不注册 `send_email` |
+| `SQL_WEB_SMTP_PORT` | `25` | SMTP 端口；使用无需认证的内网中继，支持服务器提供的 STARTTLS |
+| `SQL_WEB_MAIL_FROM_ADDRESS` | 未配置 | 固定发件地址，必须与 SMTP 主机和显示名称同时配置 |
+| `SQL_WEB_MAIL_FROM_NAME` | 未配置 | 固定发件显示名称 |
 
 服务只从项目内 `.data/agent/` 加载模型配置和凭据，不读取用户主目录中的全局 Pi 配置。
+
+## Agent 邮件工具
+
+聊天 Agent 在用户明确要求发送邮件、且收件邮箱和内容明确时可调用 `send_email`，无需重复确认。只有责任人姓名或职能时先索取邮箱，不猜测地址。工具在新建和恢复的聊天会话中可用，不依赖 Python；每日分析 Agent 不注册此工具。
+
+当前内网配置在项目 `.env` 中填写如下；`.env.example` 提供注释示例，其他部署不配置邮件即可保持关闭。修改后重启网站服务。
+
+```dotenv
+SQL_WEB_SMTP_HOST=10.71.68.150
+SQL_WEB_SMTP_PORT=25
+SQL_WEB_MAIL_FROM_ADDRESS='"JV OEE Agent"@sdsscn.com'
+SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
+```
+
+外层单引号用于保留邮箱本地部分的双引号和空格。发件地址同时用于邮件头和 SMTP 信封；不设置 `Reply-To`，回复仍发往原发件地址。SMTP 接受发信不代表该地址已有收件邮箱。
+
+工具接口：`send_email({ to: string[], subject: string, text: string, html?: string })`。收件人最多 50 个，数组每项为一个邮箱地址；主题最多 200 字符，每种正文最多 500,000 字符。必须提供纯文本正文，HTML 可用于中文段落、列表及表格，表格中的信息也应写入纯文本版本。HTML 仅保留基础排版及表格，不接受图片、脚本、外部资源或自定义 CSS；工具不支持附件、抄送、收信或覆盖发件配置。
+
+结果包含 `messageId`、`accepted`、`rejected`、`response`、`errorCode` 和 `status`：`accepted` 表示 SMTP 接受全部收件人，`partial` 表示部分接受，`failed` 表示未被接受，`unknown` 表示连接中断或取消后无法确定是否已被接受。SMTP 接受仅表示进入投递流程，实际送达需收件端确认。连接最长等待 10 秒，每次调用总时限 30 秒，取消会关闭本次 SMTP 连接；工具不自动重试，结果未知时应先核实收件情况，部分接受时不要向已接受地址重复发送。
+
+运行日志 `email.completed` 仅记录会话及工具调用 ID、状态、耗时、收件人数和错误代码，不记录邮件正文、收件地址或完整 SMTP 会话。邮件参数和工具结果与其他工具一样保存在会话历史中。未配置时服务正常启动；配置不完整或发件地址无效时启动报错。
 
 ## 安全边界
 

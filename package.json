@@ -34,10 +34,13 @@
     "dompurify": "^3.4.14",
     "echarts": "6.1.0",
     "marked": "^18.0.11",
+    "nodemailer": "^10.0.10",
+    "sanitize-html": "^2.17.7",
     "typebox": "1.3.7"
   },
   "devDependencies": {
     "@types/node": "22.19.19",
+    "@types/sanitize-html": "^2.16.1",
     "linkedom": "^0.18.13",
     "tsx": "4.22.4",
     "typescript": "6.0.3"

@@ -118,6 +118,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset/u);
   assert.doesNotMatch(piSession.systemPrompt, /code_interpreter\.input_json/u);
   assert.doesNotMatch(piSession.systemPrompt, /SimHei|matplotlib_chinese_font|chinese_font/u);
+  assert.equal(piSession.getToolDefinition("send_email"), undefined);
+  assert.doesNotMatch(piSession.systemPrompt, /邮件使用说明/u);
 
   const codeInterpreterDefinition = piSession.getToolDefinition("code_interpreter");
   assert.equal(codeInterpreterDefinition, undefined);
@@ -292,8 +294,18 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     sessionDir: path.join(directory, "sessions"),
     agentDir,
     model: { provider: "test-provider", model: "test-model" },
+    email: { host: "127.0.0.1", port: 25, fromAddress: '"JV OEE Agent"@sdsscn.com', fromName: "JV OEE Agent" },
   });
   const restoredSession = await restoredStore.get(created.id);
+  assert.ok(restoredStore.status().tools.includes("send_email"));
+  assert.ok(restoredSession.getActiveToolNames().includes("send_email"));
+  assert.ok(restoredSession.getToolDefinition("send_email"));
+  assert.match(restoredSession.systemPrompt, /直接调用 send_email，不重复要求确认/u);
+  assert.match(restoredSession.systemPrompt, /禁止推测邮箱地址/u);
+  assert.ok((await restoredStore.getSerialized(created.id)).tools.includes("send_email"));
+  const emailSession = await restoredStore.create();
+  assert.ok(emailSession.tools.includes("send_email"));
+  assert.equal(emailSession.tools.includes("code_interpreter"), false);
   assert.equal(
     restoredSession.getActiveToolNames().includes("test_oee_calculator__get_sql_expressions"),
     true,

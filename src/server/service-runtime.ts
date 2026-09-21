@@ -75,6 +75,7 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
       agentDir: config.agentDir,
       loadInitialDashboard: () => dashboards.loadInitial(),
       model: config.model,
+      email: config.email,
       logger,
     });
   },

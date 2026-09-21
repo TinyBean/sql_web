@@ -60,6 +60,7 @@ function fixtureConfig(directory: string): AppConfig {
     agentDir: path.join(directory, "agent"),
     logDir: path.join(directory, "logs"),
     model: { provider: "test", model: "test" },
+    email: null,
     codeInterpreter: {
       pythonPath: "/usr/bin/python3",
       bwrapPath: "/usr/bin/bwrap",

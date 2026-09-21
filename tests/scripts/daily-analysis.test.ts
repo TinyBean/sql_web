@@ -203,12 +203,12 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   item.evidence_ids.push(loss.id);
   item.loss_reference = { evidence_id: loss.id, row_index: 0 };
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
-  assert.equal(analyzed.widgets[7]?.data[0]?.["loss_hours"], 2.5);
-  assert.equal(analyzed.widgets[7]?.data[1]?.["loss_hours"], null);
-  assert.match(String(analyzed.widgets[7]?.data[0]?.["suggested_owner"]), /工艺工程/u);
+  assert.equal(analyzed.widgets[9]?.data[0]?.["loss_hours"], 2.5);
+  assert.equal(analyzed.widgets[9]?.data[1]?.["loss_hours"], null);
+  assert.match(String(analyzed.widgets[9]?.data[0]?.["suggested_owner"]), /工艺工程/u);
   const original = createDefaultDashboard();
   assert.deepEqual(analyzed.widgets.map((w) => [w.id, w.size]), original.widgets.map((w) => [w.id, w.size]));
-  for (const widget of analyzed.widgets.slice(7)) {
+  for (const widget of analyzed.widgets.slice(9)) {
     assert.equal(widget.kind, "table");
     if (widget.kind !== "table") continue;
     assert.deepEqual(widget.encoding.columns, [
@@ -274,7 +274,7 @@ test("reports require readable business text while preserving structured audit r
   }
   report.periods[0]!.groups[0]!.items[0]!.measure = "下周复查各机台损失时长，以每个有数据业务日的平均损失小时进行比较。";
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
-  assert.equal(analyzed.widgets[7]?.data[0]?.["measure"], report.periods[0]!.groups[0]!.items[0]!.measure);
+  assert.equal(analyzed.widgets[9]?.data[0]?.["measure"], report.periods[0]!.groups[0]!.items[0]!.measure);
 });
 
 test("unavailable models publish new metrics and empty analysis, without creating website sessions", { timeout: 30_000 }, async (t) => {
@@ -283,8 +283,8 @@ test("unavailable models publish new metrics and empty analysis, without creatin
     generate: generateAnalyzedDashboard,
     publish(_file, state) {
       assert.equal(state.dateRange?.end, "2026-01-12");
-      assert.ok(Math.abs(Number(state.widgets[0]?.data[0]?.["overall_oee_percent"]) - 100 / 6) < 1e-10);
-      for (const widget of state.widgets.slice(7)) {
+      assert.ok(Math.abs(Number(state.widgets[1]?.data[0]?.["overall_oee_percent"]) - 100 / 6) < 1e-10);
+      for (const widget of state.widgets.slice(9)) {
         assert.deepEqual(widget.data, []);
         assert.ok(widget.warnings.some((warning) => warning.includes("本次分析暂不可用")));
       }
@@ -319,7 +319,7 @@ test("parent terminates a blocked child after base delivery and waits for proces
   assert.equal(result.analysisStatus, "timed_out");
   const pid = Number(readFileSync(path.join(result.analysisArtifactDir, "pid"), "utf8"));
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-  assert.ok(result.state.widgets.slice(7).every((widget) => widget.data.length === 0));
+  assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
 });
 
 test("invalid timeout settings fail early", (t) => {
@@ -345,8 +345,8 @@ test("empty current periods and missing minima retain nulls and require explicit
     group.no_findings_reason = "本期无可计算指标，缺少可验证的改善依据";
   }
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
-  assert.equal(analyzed.widgets[0]?.data[0]?.["overall_oee_percent"], null);
-  assert.ok(analyzed.widgets.slice(7).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
+  assert.equal(analyzed.widgets[1]?.data[0]?.["overall_oee_percent"], null);
+  assert.ok(analyzed.widgets.slice(9).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
 });
 
 async function mockModel(t: TestContext, directory: string, responder: (body: Record<string, unknown>) => unknown,
@@ -455,15 +455,15 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
   assert.equal(rejected, true);
   assert.ok(turn >= 7, "requires review, inspection of merged updates, and confirmation after the last correction");
   assert.ok(JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "report.json"), "utf8")).verification);
-  assert.match(String(result.state.widgets[7]?.data[0]?.["issue"]), /Conversion/u);
-  assert.equal(result.state.widgets[7]?.data[0]?.["loss_hours"], 2.5);
-  assert.equal(result.state.widgets[8]?.data[0]?.["loss_hours"], 7.5);
+  assert.match(String(result.state.widgets[9]?.data[0]?.["issue"]), /Conversion/u);
+  assert.equal(result.state.widgets[9]?.data[0]?.["loss_hours"], 2.5);
+  assert.equal(result.state.widgets[10]?.data[0]?.["loss_hours"], 7.5);
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
   assert.match(events, /read 仅允许/u);
   assert.match(events, /只读/u);
   assert.match(events, /最低点/u);
   assert.match(events, /业务用户可理解/u);
-  assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(7)), /\bq\d+\b|第\s*0\s*行/u);
+  assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(9)), /\bq\d+\b|第\s*0\s*行/u);
   assert.doesNotMatch(events, /must not be readable/u);
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
   const writer = new DatabaseSync(config.databasePath);
@@ -527,7 +527,7 @@ test("tool budget includes malformed calls and terminates at sixty without a rep
   assert.match(result.analysisReason ?? "", /60 次/u);
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(events.filter((event) => event.type === "tool_call").length, 60);
-  assert.ok(result.state.widgets.slice(7).every((widget) => widget.data.length === 0));
+  assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
 });
 
 

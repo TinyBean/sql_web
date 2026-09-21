@@ -101,6 +101,16 @@ test("overview keeps type-specific components on the OEE sample and preserves co
   const daily = query(database, getDefaultTestOeeSql(range.start, range.end).sql);
   for (const card of buildTypeOverviews(daily, range)) {
     const prefix = card.id.startsWith("mt-") ? "mt" : "st";
+    if (card.encoding.label === "Effective OEE") {
+      assertValues(card.data[0]!, {
+        overall_effective_oee_percent: row[`${prefix}_effective_oee_percent`]!,
+        avg_effective_availability_percent: row[`${prefix}_effective_availability_percent`]!,
+        avg_effective_dut_on_percent: row[`${prefix}_effective_dut_on_percent`]!,
+        avg_effective_test_time_percent: row[`${prefix}_effective_test_time_percent`]!,
+        avg_effective_yield_percent: row[`${prefix}_effective_yield_percent`]!,
+      });
+      continue;
+    }
     assertValues(card.data[0]!, {
       overall_oee_percent: row[`${prefix}_oee_percent`]!,
       avg_availability_percent: row[`${prefix}_availability_percent`]!,

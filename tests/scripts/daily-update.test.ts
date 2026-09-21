@@ -119,29 +119,29 @@ test("generates ten live cards using canonical calculations, stable extrema, and
   assert.deepEqual(state.widgets.map((widget) => [widget.id, widget.size]), createDefaultDashboard().widgets.map((widget) => [widget.id, widget.size]));
   assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-01-08" });
   assert.equal(state.dataAsOf, "2026-01-09T01:00:00.000Z");
-  const overview = state.widgets[0]!;
+  const overview = state.widgets[1]!;
   assert.ok(overview.kind === "overview");
   assert.equal(overview.data[0]?.["overall_oee_percent"], 20);
   assert.match(overview.encoding.description ?? "", /2\/8/u);
   assert.ok(overview.warnings.some((warning) => warning.includes("NULL")));
-  const weekly = state.widgets[2]!;
+  const weekly = state.widgets[4]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
     ["2026-W00", 20, 20, 20], ["2026-W01", 20, null, null],
   ]);
-  assert.equal(state.widgets[5]?.data.length, 6);
-  const machines = state.widgets[6]!;
+  assert.equal(state.widgets[7]?.data.length, 6);
+  const machines = state.widgets[8]!;
   assert.equal(machines.kind, "table");
   assert.deepEqual(machines.data.map((row) => [row["grain"], row["point_type"]]), [
     ["周", "最低"], ["周", "最高"], ["月", "最低"], ["月", "最高"], ["季", "最低"], ["季", "最高"],
   ]);
   for (const row of machines.data) {
-    const extreme: DashboardRow | undefined = state.widgets[5]!.data.find((item) =>
+    const extreme: DashboardRow | undefined = state.widgets[7]!.data.find((item) =>
       item["grain"] === row["grain"] && item["point_type"] === row["point_type"]);
     assert.equal(row["period_label"], extreme?.["period_label"]);
     assert.equal(row["oee_percent"], extreme?.["oee_percent"]);
     assert.match(String(row["top10_machines"]), /^1\.ST-01\(ST 20\.00%\)、2\.MT-01\(MT /u);
   }
-  const actions = state.widgets[7]!;
+  const actions = state.widgets[9]!;
   assert.deepEqual(actions.data, []);
   assert.ok(actions.warnings.some((warning) => warning.includes("本次分析暂不可用")));
   assert.match(actions.subtitle ?? "", /2025-12-28 至 2026-01-03/u);
@@ -158,24 +158,24 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
   writer.close();
 
   const state = buildDefaultDashboard(config.databasePath, "2026-01-11");
-  const weekly = state.widgets[2]!;
+  const weekly = state.widgets[4]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
     ["2026-W00", 20, null, null], ["2026-W01", 25, 25, null], ["2026-W02", 5, null, 5],
   ]);
   assert.equal(weekly.warnings.find((warning) => warning.startsWith("部分周：")),
     "部分周：2026-W00、2026-W02；与完整周期比较时需注意覆盖天数");
   assert.match(weekly.metricDefinition, /周日至周六/u);
-  const extremes = state.widgets[5]!.data.filter((row) => row["grain"] === "周");
+  const extremes = state.widgets[7]!.data.filter((row) => row["grain"] === "周");
   assert.deepEqual(extremes.map((row) => [row["point_type"], row["period_label"], row["oee_percent"]]), [
     ["最高", "2026-W01", 25], ["最低", "2026-W02", 5],
   ]);
-  const machines = state.widgets[6]!;
+  const machines = state.widgets[8]!;
   assert.deepEqual(machines.data.filter((row) => row["grain"] === "周").map((row) => [
     row["period_label"], row["top10_machines"],
   ]), [["2026-W02", "1.MT-01(MT 5.00%)"], ["2026-W01", "1.MT-01(MT 16.00%)"]]);
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W01（2026-01-04 至 2026-01-10）")));
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
-  assert.match(state.widgets[7]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
+  assert.match(state.widgets[9]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
 });
 
 test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable days", (t) => {
@@ -186,7 +186,7 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
   seed(writer, "2026-01-02", "MT", 0);
   writer.close();
   const state = buildDefaultDashboard(config.databasePath, "2026-01-02");
-  assert.deepEqual(state.widgets.slice(0, 2).map((widget) => widget.data[0]), [
+  assert.deepEqual(state.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").map((widget) => widget.data[0]), [
     { overall_oee_percent: 20, avg_availability_percent: 50, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
     { overall_oee_percent: 10, avg_availability_percent: 50, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
   ]);
@@ -195,17 +195,17 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
 test("empty and cross-year dashboards contain null metrics and accurate period warnings", (t) => {
   const { config } = fixture(t);
   const empty = buildDefaultDashboard(config.databasePath, "2027-01-01");
-  assert.equal(empty.widgets.length, 10);
-  assert.equal(empty.widgets[0]?.data[0]?.["overall_oee_percent"], null);
-  assert.equal(empty.widgets[5]?.data.length, 0);
-  assert.equal(empty.widgets[6]?.kind, "table");
-  assert.deepEqual(empty.widgets[6]?.data, []);
+  assert.equal(empty.widgets.length, 12);
+  assert.equal(empty.widgets[1]?.data[0]?.["overall_oee_percent"], null);
   assert.equal(empty.widgets[7]?.data.length, 0);
-  assert.ok(empty.widgets[0]?.warnings.some((warning) => warning.includes("2027-01-01")));
-  assert.equal(empty.widgets[2]?.data[0]?.["period_label"], "2027-W00");
-  assert.match(empty.widgets[7]!.subtitle, /2026-12-20 至 2026-12-26/u);
-  assert.match(empty.widgets[2]!.title, /2027/u);
-  assert.match(empty.widgets[8]!.warnings.join(" "), /部分月/u);
+  assert.equal(empty.widgets[8]?.kind, "table");
+  assert.deepEqual(empty.widgets[8]?.data, []);
+  assert.equal(empty.widgets[9]?.data.length, 0);
+  assert.ok(empty.widgets[1]?.warnings.some((warning) => warning.includes("2027-01-01")));
+  assert.equal(empty.widgets[4]?.data[0]?.["period_label"], "2027-W00");
+  assert.match(empty.widgets[9]!.subtitle, /2026-12-20 至 2026-12-26/u);
+  assert.match(empty.widgets[4]!.title, /2027/u);
+  assert.match(empty.widgets[10]!.warnings.join(" "), /部分月/u);
 });
 
 function result(status: SyncResult["status"], dataset: "availability" | "dut_utilization"): SyncResult {
@@ -239,7 +239,7 @@ test("hard sync failures preserve the published default and still attempt the ot
   assert.equal(readFileSync(config.defaultDashboardPath, "utf8"), "old snapshot");
 });
 
-test("sync warnings publish all ten cards with data coverage warnings", async (t) => {
+test("sync warnings publish all twelve cards with data coverage warnings", async (t) => {
   const { config } = fixture(t);
   let published = false;
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
@@ -249,8 +249,8 @@ test("sync warnings publish all ten cards with data coverage warnings", async (t
     },
     publish(filePath, state) {
       assert.equal(filePath, config.defaultDashboardPath);
-      assert.equal(state.widgets.length, 10);
-      assert.ok(state.widgets[0]?.warnings.some((warning) => warning.includes("同步存在")));
+      assert.equal(state.widgets.length, 12);
+      assert.ok(state.widgets[1]?.warnings.some((warning) => warning.includes("同步存在")));
       published = true;
     },
   })]);

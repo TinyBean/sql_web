@@ -8,7 +8,7 @@ function validateDefault(state: DashboardState): void {
   const expected = createDefaultDashboard().widgets.map((widget) => widget.id);
   if (state.widgets.length !== expected.length ||
       state.widgets.some((widget, index) => widget.id !== expected[index])) {
-    throw new Error("默认看板必须包含固定顺序的 10 张卡片");
+    throw new Error("默认看板必须包含固定顺序的 12 张卡片");
   }
 }
 
@@ -16,6 +16,10 @@ export function readDefaultDashboard(filePath?: string, logger?: Pick<AppLogger,
   if (!filePath) return createDefaultDashboard();
   try {
     const snapshot = readDashboardSnapshot(filePath);
+    if (snapshot.widgets.length === 12) {
+      validateDefault(snapshot);
+      return snapshot;
+    }
     const oldPerformance = snapshot.widgets.some((widget) => widget.kind === "overview" &&
       !Object.hasOwn(widget.data[0] ?? {}, "avg_test_time_percent"));
     const widgets = [...snapshot.widgets];
@@ -25,6 +29,7 @@ export function readDefaultDashboard(filePath?: string, logger?: Pick<AppLogger,
       // Old defaults contain per-type OEE but only combined component averages.
       // Preserve the other eight cards; never present combined averages as MT/ST.
       const overviews = buildTypeOverviews([], { start: snapshot.dateRange.start, end: snapshot.dateRange.end })
+        .filter((overview) => overview.encoding.label === "Test OEE")
         .map((overview, index) => {
           const kind = index === 0 ? "MT" : "ST";
           const value = legacy.data[0]?.[kind.toLowerCase() + "_oee_percent"];
@@ -66,6 +71,22 @@ export function readDefaultDashboard(filePath?: string, logger?: Pick<AppLogger,
           ] },
         } : updated;
       }
+    }
+    if (widgets[0]?.id === "mt-oee-overview" && widgets[1]?.id === "st-oee-overview" &&
+        snapshot.dateRange.start && snapshot.dateRange.end) {
+      const range = { start: snapshot.dateRange.start, end: snapshot.dateRange.end };
+      const effective = buildTypeOverviews([], range)
+        .filter((overview) => overview.encoding.label === "Effective OEE")
+        .map((overview) => ({ ...overview,
+          encoding: { ...overview.encoding, description: "旧版快照未保存 Effective OEE，待每日更新补齐" },
+          warnings: ["旧版快照未保存 Effective OEE 及其组成项，暂无数据，待每日更新补齐"],
+        }));
+      const tests = widgets.slice(0, 2).map((widget, index) => {
+        if (widget.kind !== "overview") throw new Error("默认看板概览类型无效");
+        return { ...widget, size: "medium" as const, title: `${index === 0 ? "MT" : "ST"} · Test OEE`,
+          encoding: { ...widget.encoding, label: "Test OEE" } };
+      });
+      widgets.splice(0, 2, effective[0]!, tests[0]!, effective[1]!, tests[1]!);
     }
     const state = { ...snapshot, widgets };
     validateDefault(state);

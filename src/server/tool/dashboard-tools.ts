@@ -5,6 +5,7 @@ import { Value } from "typebox/value";
 import {
   MAX_DASHBOARD_SERIES,
   MAX_DASHBOARD_TABLE_COLUMNS,
+  MAX_DASHBOARD_WIDGETS,
   type DashboardState,
 } from "../../shared/dashboard.ts";
 import {
@@ -135,7 +136,7 @@ const revision = Type.Union([
     description: "A decimal revision string is accepted for OpenAI-compatible servers that stringify tool arguments.",
   }),
 ]);
-const widgetIds = Type.Array(widgetId, { minItems: 1, maxItems: 12 });
+const widgetIds = Type.Array(widgetId, { minItems: 1, maxItems: MAX_DASHBOARD_WIDGETS });
 const updateParameters = Type.Object({
   action: Type.Union([
     Type.Literal("upsert"),

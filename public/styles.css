@@ -205,6 +205,11 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .overview-oee small { margin-top: 10px; color: var(--mint); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .14em; }
 .metric-overview .overview-gauges { height: 225px; margin: 0; }
 .metric-overview .overview-four-gauges { height: 390px; }
+.metric-overview.metric-size-medium .overview-content { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+.metric-overview.metric-size-medium .overview-oee { min-width: 0; padding: 8px 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+.metric-overview.metric-size-medium .overview-oee strong { font-size: 32px; line-height: 1.2; letter-spacing: -.02em; }
+.metric-overview.metric-size-medium .overview-oee strong.unavailable { font-size: 24px; }
+.metric-overview.metric-size-medium .overview-oee small { font-size: 12px; line-height: 1.5; letter-spacing: normal; overflow-wrap: anywhere; }
 .metric-empty { display: grid; place-items: center; min-height: 155px; color: var(--faint); font-size: 14px; }
 .metric-definition { overflow: hidden; margin: 6px 0 0; color: #596f65; font-size: 9px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .metric-warning { position: relative; z-index: 4; margin-top: 5px; color: var(--amber); font-size: 10px; }

@@ -247,7 +247,9 @@ function overviewOption(widget: DashboardOverviewWidget): Record<string, unknown
             ? "—"
             : (displayValue: number) => `${displayValue.toFixed(1)}${widget.format.unit}`,
         },
-        data: [{ value: value ?? 0, name: gauge.name.replace(/^Performance \((.+)\)$/u, "Performance\n($1)") }],
+        data: [{ value: value ?? 0, name: gauge.name
+          .replace(/^Performance \((.+)\)$/u, "Performance\n($1)")
+          .replace(/^Effective Availability$/u, "Effective\nAvailability") }],
       };
     }),
   };

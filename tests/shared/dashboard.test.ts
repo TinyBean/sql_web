@@ -51,6 +51,9 @@ test("rejects duplicate widgets and dashboard data limits", () => {
     DashboardValidationError,
   );
   const line = base.widgets[2] as Record<string, unknown>;
+  const fourteen = Array.from({ length: 14 }, (_, index) => ({ ...line, id: `line-${index}` }));
+  assert.equal(parseDashboardState({ ...base, widgets: fourteen }).widgets.length, 14);
+  assert.throws(() => parseDashboardState({ ...base, widgets: [...fourteen, { ...line, id: "line-14" }] }), /14/u);
   assert.throws(
     () => parseDashboardState({
       ...base,

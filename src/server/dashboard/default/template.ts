@@ -1,7 +1,7 @@
 import { parseDashboardState, type DashboardState } from "../../../shared/dashboard.ts";
 
 // Rebuilt from the read-only OEE DB through business day 2026-09-14.
-// OEE includes both Performance (DUT-On) and Performance (Test Time).
+// Test and Effective OEE include both Performance (DUT-On) and Performance (Test Time).
 // Analysis remains empty until the daily Agent produces a report.
 // Opening a dashboard never recalculates the bundled snapshot.
 const DEFAULT_DASHBOARD: DashboardState = {
@@ -14,11 +14,58 @@ const DEFAULT_DASHBOARD: DashboardState = {
   },
   "widgets": [
     {
+      "id": "mt-effective-oee-overview",
+      "kind": "overview",
+      "title": "MT · Effective OEE",
+      "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
+      "size": "medium",
+      "data": [
+        {
+          "overall_effective_oee_percent": 53.03943099524749,
+          "avg_effective_availability_percent": 68.17735984017317,
+          "avg_effective_dut_on_percent": 79.4095365161564,
+          "avg_effective_test_time_percent": 99.57282616924962,
+          "avg_effective_yield_percent": 98.3704577874588
+        }
+      ],
+      "encoding": {
+        "value": "overall_effective_oee_percent",
+        "label": "Effective OEE",
+        "description": "MT 日 Effective OEE 等权平均；覆盖 245/257 个可计算业务日",
+        "gauges": [
+          {
+            "name": "Effective Availability",
+            "column": "avg_effective_availability_percent"
+          },
+          {
+            "name": "Performance (DUT-On)",
+            "column": "avg_effective_dut_on_percent"
+          },
+          {
+            "name": "Performance (Test Time)",
+            "column": "avg_effective_test_time_percent"
+          },
+          {
+            "name": "Yield",
+            "column": "avg_effective_yield_percent"
+          }
+        ]
+      },
+      "format": {
+        "unit": "%",
+        "precision": 2
+      },
+      "metricDefinition": "MT Effective OEE = AVG(MT 日 Effective OEE)×100；日 Effective OEE = Effective Availability×Performance (DUT-On)×Performance (Test Time)×Yield。Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))。五项指标分别对该类型 Effective OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "warnings": [
+        "MT Effective OEE 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，五项指标仅使用 Effective OEE 可计算日"
+      ]
+    },
+    {
       "id": "mt-oee-overview",
       "kind": "overview",
-      "title": "MT · OEE 概览",
+      "title": "MT · Test OEE",
       "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
-      "size": "wide",
+      "size": "medium",
       "data": [
         {
           "overall_oee_percent": 51.326714609342936,
@@ -31,7 +78,7 @@ const DEFAULT_DASHBOARD: DashboardState = {
       ],
       "encoding": {
         "value": "overall_oee_percent",
-        "label": "Overall OEE",
+        "label": "Test OEE",
         "description": "MT 日 OEE 等权平均；覆盖 245/257 个可计算业务日",
         "gauges": [
           {
@@ -56,17 +103,64 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "MT Overall OEE = AVG(MT 日 Test OEE)×100；日 Test OEE = Availability×Performance (DUT-On)×Performance (Test Time)×Yield。五项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "metricDefinition": "MT Test OEE = AVG(MT 日 Test OEE)×100；日 Test OEE = Availability×Performance (DUT-On)×Performance (Test Time)×Yield。五项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
       "warnings": [
         "MT 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，五项指标仅使用 OEE 可计算日"
       ]
     },
     {
+      "id": "st-effective-oee-overview",
+      "kind": "overview",
+      "title": "ST · Effective OEE",
+      "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
+      "size": "medium",
+      "data": [
+        {
+          "overall_effective_oee_percent": 62.27373391488916,
+          "avg_effective_availability_percent": 77.63693196142621,
+          "avg_effective_dut_on_percent": 82.15021201649581,
+          "avg_effective_test_time_percent": 98.5522897465314,
+          "avg_effective_yield_percent": 99.0799770086894
+        }
+      ],
+      "encoding": {
+        "value": "overall_effective_oee_percent",
+        "label": "Effective OEE",
+        "description": "ST 日 Effective OEE 等权平均；覆盖 245/257 个可计算业务日",
+        "gauges": [
+          {
+            "name": "Effective Availability",
+            "column": "avg_effective_availability_percent"
+          },
+          {
+            "name": "Performance (DUT-On)",
+            "column": "avg_effective_dut_on_percent"
+          },
+          {
+            "name": "Performance (Test Time)",
+            "column": "avg_effective_test_time_percent"
+          },
+          {
+            "name": "Yield",
+            "column": "avg_effective_yield_percent"
+          }
+        ]
+      },
+      "format": {
+        "unit": "%",
+        "precision": 2
+      },
+      "metricDefinition": "ST Effective OEE = AVG(ST 日 Effective OEE)×100；日 Effective OEE = Effective Availability×Performance (DUT-On)×Performance (Test Time)×Yield。Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))。五项指标分别对该类型 Effective OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "warnings": [
+        "ST Effective OEE 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，五项指标仅使用 Effective OEE 可计算日"
+      ]
+    },
+    {
       "id": "st-oee-overview",
       "kind": "overview",
-      "title": "ST · OEE 概览",
+      "title": "ST · Test OEE",
       "subtitle": "业务日 2026-01-01 至 2026-09-14（每天 08:30 至次日 08:30）",
-      "size": "wide",
+      "size": "medium",
       "data": [
         {
           "overall_oee_percent": 60.79130275921476,
@@ -79,7 +173,7 @@ const DEFAULT_DASHBOARD: DashboardState = {
       ],
       "encoding": {
         "value": "overall_oee_percent",
-        "label": "Overall OEE",
+        "label": "Test OEE",
         "description": "ST 日 OEE 等权平均；覆盖 245/257 个可计算业务日",
         "gauges": [
           {
@@ -104,7 +198,7 @@ const DEFAULT_DASHBOARD: DashboardState = {
         "unit": "%",
         "precision": 2
       },
-      "metricDefinition": "ST Overall OEE = AVG(ST 日 Test OEE)×100；日 Test OEE = Availability×Performance (DUT-On)×Performance (Test Time)×Yield。五项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
+      "metricDefinition": "ST Test OEE = AVG(ST 日 Test OEE)×100；日 Test OEE = Availability×Performance (DUT-On)×Performance (Test Time)×Yield。五项指标分别对该类型 OEE 可计算日等权平均；OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则，缺失或零分母保持 NULL。",
       "warnings": [
         "ST 可计算业务日 245/257；缺 Availability 12 天、缺 DUT 12 天；缺失或零分母为 NULL，五项指标仅使用 OEE 可计算日"
       ]

@@ -48,7 +48,7 @@ test("three-factor type snapshots keep their published OEE and warn instead of i
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, "default.json");
   const current = createDefaultDashboard();
-  const widgets = current.widgets.map((widget) => widget.kind === "overview" ? {
+  const widgets = current.widgets.filter((widget) => !widget.id.includes("effective")).map((widget) => widget.kind === "overview" ? {
     ...widget,
     data: [{ overall_oee_percent: 45, avg_availability_percent: 60, avg_performance_percent: 75, avg_yield_percent: 100 }],
     encoding: { ...widget.encoding, gauges: [
@@ -59,13 +59,13 @@ test("three-factor type snapshots keep their published OEE and warn instead of i
   } : widget);
   writeFileSync(file, JSON.stringify({ ...current, widgets }));
   const migrated = readDefaultDashboard(file);
-  for (const widget of migrated.widgets.slice(0, 2)) {
+  for (const widget of migrated.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview")) {
     assert.equal(widget.data[0]!["overall_oee_percent"], 45);
     assert.equal(widget.data[0]!["avg_dut_on_percent"], 75);
     assert.equal(widget.data[0]!["avg_test_time_percent"], null);
     assert.match(widget.metricDefinition, /旧口径 OEE/u);
   }
-  assert.ok(migrated.widgets.every((widget) => widget.warnings.some((warning) => warning.includes("旧口径快照"))));
+  assert.ok(migrated.widgets.filter((widget) => !widget.id.includes("effective")).every((widget) => widget.warnings.some((warning) => warning.includes("旧口径快照"))));
 });
 
 test("old defaults split their known type OEE without inventing components or changing existing sessions", (t) => {
@@ -73,7 +73,7 @@ test("old defaults split their known type OEE without inventing components or ch
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, "default.json");
   const current = createDefaultDashboard();
-  const mt = current.widgets[0]!;
+  const mt = current.widgets[1]!;
   assert.ok(mt.kind === "overview");
   const legacy = {
     ...current, dataAsOf: "2026-09-16T01:00:00.000Z",
@@ -81,7 +81,7 @@ test("old defaults split their known type OEE without inventing components or ch
       ...mt, id: "overall-oee-overview", title: "Overall OEE",
       data: [{ overall_oee_percent: 41, mt_oee_percent: 21, st_oee_percent: 62,
         avg_availability_percent: 87, avg_performance_percent: 88, avg_yield_percent: 89 }],
-    }, ...current.widgets.slice(2)],
+    }, ...current.widgets.slice(4)],
   };
   const artifacts = new ArtifactStore(path.join(root, "artifacts"));
   const sessions = new SessionDashboardStore(artifacts, () => legacy);
@@ -89,18 +89,18 @@ test("old defaults split their known type OEE without inventing components or ch
   writeFileSync(file, JSON.stringify(legacy));
   const before = readFileSync(file, "utf8");
   const migrated = readDefaultDashboard(file);
-  assert.equal(migrated.widgets.length, 10);
+  assert.equal(migrated.widgets.length, 12);
   assert.equal(migrated.dataAsOf, legacy.dataAsOf);
   assert.deepEqual(migrated.dateRange, legacy.dateRange);
-  for (const [index, widget] of migrated.widgets.slice(2).entries()) {
+  for (const [index, widget] of migrated.widgets.slice(4).entries()) {
     assert.deepEqual(widget.data, legacy.widgets[index + 1]!.data);
     assert.ok(widget.warnings.some((warning) => warning.includes("旧口径快照")));
   }
-  assert.deepEqual(migrated.widgets.slice(0, 2).map((widget) => widget.data[0]), [
+  assert.deepEqual(migrated.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").map((widget) => widget.data[0]), [
     { overall_oee_percent: 21, avg_availability_percent: null, avg_performance_percent: null, avg_dut_on_percent: null, avg_test_time_percent: null, avg_yield_percent: null },
     { overall_oee_percent: 62, avg_availability_percent: null, avg_performance_percent: null, avg_dut_on_percent: null, avg_test_time_percent: null, avg_yield_percent: null },
   ]);
-  assert.ok(migrated.widgets.slice(0, 2).every((widget) => widget.warnings.some((warning) => warning.includes("旧版快照"))));
+  assert.ok(migrated.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").every((widget) => widget.warnings.some((warning) => warning.includes("旧版快照"))));
   assert.equal(readFileSync(file, "utf8"), before, "reading a default never rewrites its snapshot");
   const reopened = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
   assert.deepEqual(reopened.loadOrInitialize("existing"), pinned);
@@ -125,4 +125,34 @@ test("publication validates before writing and cleans temporary files after rena
   assert.throws(() => writeDefaultDashboard(directoryTarget, state));
   assert.equal(readFileSync(file, "utf8"), original);
   assert.deepEqual(readdirSync(root).sort(), ["blocked", "default.json"]);
+});
+
+test("ten-card snapshots gain empty effective overviews without changing published data or reading twice differently", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "dashboard-effective-migration-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "default.json");
+  const current = createDefaultDashboard();
+  const legacy = { ...current, widgets: current.widgets.filter((widget) => !widget.id.includes("effective"))
+    .map((widget) => widget.kind === "overview" ? { ...widget, size: "wide" as const,
+      title: widget.title.replace("Test OEE", "OEE 概览"), encoding: { ...widget.encoding, label: "Overall OEE" } } : widget) };
+  writeFileSync(file, JSON.stringify(legacy));
+  const before = readFileSync(file, "utf8");
+  const migrated = readDefaultDashboard(file);
+  assert.deepEqual(migrated.widgets.map((widget) => widget.id), current.widgets.map((widget) => widget.id));
+  assert.deepEqual(migrated.widgets.slice(4), legacy.widgets.slice(2));
+  assert.deepEqual(migrated.dateRange, legacy.dateRange);
+  assert.equal(migrated.dataAsOf, legacy.dataAsOf);
+  for (const id of ["mt", "st"]) {
+    const effective = migrated.widgets.find((widget) => widget.id === `${id}-effective-oee-overview`)!;
+    assert.ok(Object.values(effective.data[0]!).every((value) => value === null));
+    assert.ok(effective.warnings.some((warning) => warning.includes("待每日更新补齐")));
+    const original = migrated.widgets.find((widget) => widget.id === `${id}-oee-overview`)!;
+    assert.deepEqual(original.data, legacy.widgets.find((widget) => widget.id === original.id)!.data);
+    assert.equal(original.size, "medium");
+    assert.ok(!original.warnings.some((warning) => warning.includes("旧口径")));
+  }
+  assert.equal(readFileSync(file, "utf8"), before);
+  writeDefaultDashboard(file, migrated);
+  assert.deepEqual(readDefaultDashboard(file), migrated);
+  assert.deepEqual(readDefaultDashboard(file), migrated);
 });

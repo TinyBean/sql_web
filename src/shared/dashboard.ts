@@ -1,7 +1,7 @@
 import type { JsonValue } from "./contracts.ts";
 
 export const DASHBOARD_SCHEMA_VERSION = 1 as const;
-export const MAX_DASHBOARD_WIDGETS = 12;
+export const MAX_DASHBOARD_WIDGETS = 14;
 export const MAX_DASHBOARD_ROWS_PER_WIDGET = 2_000;
 export const MAX_DASHBOARD_SERIES = 6;
 export const MAX_DASHBOARD_TABLE_COLUMNS = 9;

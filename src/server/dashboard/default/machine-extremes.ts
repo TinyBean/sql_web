@@ -3,6 +3,7 @@ import type { DashboardRow, DashboardTableWidget } from "../../../shared/dashboa
 import { addDays, assertDate, type DatePeriod } from "../../database/business-dates.ts";
 import { getTestOeeSqlExpressions, getTestOeeDutCtes, TEST_OEE_DAY_SECONDS } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { periodLabel } from "./periods.ts";
+import { createMachineExtremesTemplate } from "./template.ts";
 
 interface MachineOee {
   readonly machine: string;
@@ -121,19 +122,8 @@ export function buildMachineExtremesTable(
     }
   }
   return {
-    id: "mt-st-components-2026", kind: "table", size: "wide",
-    title: "OEE 机台 TOP10（周/月/季）· 极值单项对应",
+    ...createMachineExtremesTemplate(),
     subtitle: "与 OEE 极值明细逐项对应的机台 TOP10 list",
-    data,
-    encoding: { columns: [
-      { key: "grain", label: "粒度" },
-      { key: "point_type", label: "极值" },
-      { key: "period_label", label: "周期" },
-      { key: "oee_percent", label: "周期OEE%" },
-      { key: "top10_machines", label: "TOP10 机台（机台 OEE 最低）" },
-    ] },
-    format: { unit: "%", precision: 2 },
-    metricDefinition: "与 OEE 极值明细（周/月/季）逐项对应；周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总：运行秒数÷（有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×机台TD次数)÷SUM(机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)×100；标准秒数来自当日该类型全部合格 DUT，含无匹配 Availability 的记录；MT/ST 合并为一台，按 Availability 累计时长标注主要类型，并列取 MT。按未舍入机台 OEE 升序取最低 10 台，并列按机台编号；不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计，缺日不会补零。",
-    warnings: [...warnings],
+    data, warnings: [...warnings],
   };
 }

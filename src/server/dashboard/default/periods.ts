@@ -1,4 +1,8 @@
-import { assertDate, latestCompleteWeek, type DatePeriod } from "../../database/business-dates.ts";
+import { addDays, assertDate, latestCompleteWeek, type DatePeriod } from "../../database/business-dates.ts";
+
+export const PERIOD_KEYS = ["week", "month", "quarter"] as const;
+export type PeriodKey = typeof PERIOD_KEYS[number];
+export const PERIOD_GRAINS = { week: "周", month: "月", quarter: "季" } as const;
 
 export interface DashboardPeriods {
   readonly year: string;
@@ -40,4 +44,14 @@ export function periodLabel(day: string, grain: "周" | "月" | "季"): string {
   if (grain === "周") return weekLabel(day);
   if (grain === "月") return day.slice(0, 7);
   return day.slice(0, 4) + "-Q" + Math.ceil(Number(day.slice(5, 7)) / 3);
+}
+
+export function isPartialPeriod(period: DatePeriod, grain: "周" | "月" | "季"): boolean {
+  const start = new Date(period.start + "T00:00:00.000Z");
+  const nextDay = addDays(period.end, 1);
+  if (grain === "周") return start.getUTCDay() !== 0 ||
+    (Date.parse(nextDay) - Date.parse(period.start)) / 86_400_000 !== 7;
+  if (grain === "月") return period.start.slice(8) !== "01" || nextDay.slice(8) !== "01";
+  return !["01-01", "04-01", "07-01", "10-01"].includes(period.start.slice(5)) ||
+    !["01-01", "04-01", "07-01", "10-01"].includes(nextDay.slice(5));
 }

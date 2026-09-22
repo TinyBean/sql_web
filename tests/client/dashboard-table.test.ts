@@ -181,8 +181,15 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   assert.equal(card("tall").querySelectorAll("tbody tr").length, 2000);
 
   const defaults = createDefaultDashboard();
-  const machineTable = defaults.widgets.find((widget) => widget.id === "mt-st-components-2026")!;
-  assert.equal(machineTable.kind, "table");
+  const template = defaults.widgets.find((widget) => widget.id === "mt-st-components-2026")!;
+  assert.equal(template.kind, "table");
+  renderer.render({ ...defaults, widgets: [template] });
+  assert.match(card(template.id).textContent ?? "", /等待每日任务/u);
+  assert.equal(card(template.id).querySelectorAll("tbody tr").length, 0);
+  const machineTable = { ...template, data: ["周", "月", "季"].flatMap((grain) => ["最低", "最高"].map((point_type) => ({
+    grain, point_type, period_label: "测试周期", oee_percent: 42,
+    top10_machines: Array.from({ length: 10 }, (_, index) => `${index + 1}.MT-${index + 1}(MT 42.00%)`).join("、"),
+  }))) };
   state = { ...defaults, widgets: [machineTable] };
   renderer.render(state);
   const machineCard = card(machineTable.id);

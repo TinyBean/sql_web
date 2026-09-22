@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 草稿与增量复核 | `analysis/drafts.ts`、`analysis/report.ts`、`analysis/agent.ts` | 完整报告校验、原始证据和最终 `report.json` 格式 |
 | 确定性损失展示 | `tool/loss-output.ts`、`tool/loss-tools.ts`、`analysis/evidence.ts` | 完整冻结快照、原始行索引、自主 SQL/Python 调查 |
-| 耗时观测与对照 | `analysis/metrics.ts`、`analysis/run.ts`、`scripts/benchmark-daily-analysis.ts` | 模型和业务计算参数、超时降级行为 |
+| 耗时观测与对照 | `analysis/metrics.ts`、`default/run.ts`、`scripts/benchmark-daily-analysis.ts` | 模型和业务计算参数、超时降级行为 |
 
 三部分采用独立模块；回退时分别恢复对应模块及 Agent 中的接入点。观测和评估可独立保留。已有 `report.json` 的消费者无需迁移。
 

@@ -1,7 +1,11 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { parseDashboardState, type DashboardRow, type DashboardState } from "../../../../shared/dashboard.ts";
-import { PERIOD_KEYS, type AnalysisContext, type Evidence, type PeriodKey } from "./evidence.ts";
+import { type AnalysisContext, type Evidence } from "./evidence.ts";
+import { PERIOD_KEYS, type PeriodKey } from "../periods.ts";
+import { createAnalysisTemplate } from "../template.ts";
+
+const ANALYSIS_KEYS = new Map(PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
 const readableDescription = "面向业务用户的中文说明，用实际日期、指标和数据来源解释结论，不含 q11 等内部证据编号、查询行号、工具名或字段名。";
 const text = Type.String({ minLength: 1, maxLength: 1800, description: readableDescription });
@@ -137,7 +141,7 @@ export function applyAnalysisReport(
   state: DashboardState, result: ReturnType<typeof validateAnalysisReport>,
 ): DashboardState {
   return parseDashboardState({ ...state, widgets: state.widgets.map((widget) => {
-    const key = PERIOD_KEYS.find((key) => widget.id === "improvement-actions-" + key + "-2026");
+    const key = ANALYSIS_KEYS.get(widget.id);
     if (!key) return widget;
     const report = result.report.periods.find((period) => period.period === key)!;
     return {
@@ -153,7 +157,7 @@ export function applyAnalysisReport(
 
 export function analysisUnavailable(state: DashboardState, reason: string): DashboardState {
   return parseDashboardState({ ...state, widgets: state.widgets.map((widget) => {
-    if (!widget.id.startsWith("improvement-actions-")) return widget;
+    if (!ANALYSIS_KEYS.has(widget.id)) return widget;
     return {
       ...widget, data: [], warnings: [
         ...widget.warnings.filter((warning) => !warning.startsWith("本次分析暂不可用")),

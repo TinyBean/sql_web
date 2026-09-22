@@ -8,6 +8,7 @@ import { loadDataCommandConfig } from "./database/data-command-config.ts";
 import { assertDate } from "../src/server/database/business-dates.ts";
 import { readAnalysisEvents, summarizeAnalysisEvents } from "../src/server/dashboard/default/analysis/metrics.ts";
 import type { AppLogger } from "../src/server/logger.ts";
+import type { generateDefaultDashboard } from "../src/server/dashboard/default/run.ts";
 
 const { values } = parseArgs({ options: {
   "baseline-root": { type: "string" }, "candidate-root": { type: "string", default: process.cwd() },
@@ -52,11 +53,12 @@ const now = new Date(); // Identical dashboard timestamps avoid irrelevant basel
 for (let pair = 1; pair <= pairs; pair += 1) {
   for (const variant of pair % 2 ? ["baseline", "candidate"] : ["candidate", "baseline"]) {
     const root = variant === "baseline" ? baselineRoot : candidateRoot;
-    const { generateAnalyzedDashboard } = await import(pathToFileURL(path.join(root,
-      "src/server/dashboard/default/analysis/run.ts")).href) as typeof import("../src/server/dashboard/default/analysis/run.ts");
+    const generate = variant === "baseline"
+      ? (await import(pathToFileURL(path.join(root, "src/server/dashboard/default/analysis/run.ts")).href)).generateAnalyzedDashboard as typeof generateDefaultDashboard
+      : (await import(pathToFileURL(path.join(root, "src/server/dashboard/default/run.ts")).href)).generateDefaultDashboard as typeof generateDefaultDashboard;
     const runId = variant + "-" + pair;
     console.log(JSON.stringify({ event: "benchmark.started", runId, at: new Date().toISOString() }));
-    const result = await generateAnalyzedDashboard({ databasePath, analysis: {
+    const result = await generate({ databasePath, analysis: {
       ...config.analysis, cwd: root, artifactDir: path.join(outputDir, "runs"),
     } }, throughDate, now, [], logger, runId);
     const runDir = result.analysisArtifactDir;

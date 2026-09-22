@@ -246,17 +246,19 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
     const effective = index % 2 === 0;
     const card = grid.querySelector(`[data-widget-id='${widget.id}']`)!;
     assert.equal(card.querySelector(".overview-oee span")?.textContent, effective ? "Effective OEE" : "Test OEE");
-    assert.equal(card.querySelector(".overview-oee strong")?.textContent,
-      Number(widget.data[0]?.[widget.encoding.value]).toFixed(2) + "%");
-    const series = option["series"] as Array<{ name: string; center: string[]; data: Array<{ value: number; name: string }> }>;
+    assert.equal(card.querySelector(".overview-oee strong")?.textContent, "无法计算");
+    assert.ok(card.querySelector(".overview-oee strong.unavailable"));
+    assert.match(card.textContent ?? "", /等待每日任务/u);
+    const series = option["series"] as Array<{ name: string; center: string[]; data: Array<{ value: number; name: string }>;
+      pointer: { show: boolean }; detail: { formatter: string } }>;
+    assert.ok(series.every((gauge) => !gauge.pointer.show && gauge.detail.formatter === "—"));
     assert.deepEqual(series.map((gauge) => gauge.name), [effective ? "Effective Availability" : "Availability", "Performance (DUT-On)", "Performance (Test Time)", "Yield"]);
     assert.equal(series[0]!.data[0]!.name, effective ? "Effective\nAvailability" : "Availability");
     assert.ok(card.querySelector(".overview-four-gauges"));
     assert.deepEqual(series.map((gauge) => gauge.center), [["25%", "22%"], ["75%", "22%"], ["25%", "72%"], ["75%", "72%"]]);
     assert.equal(series[1]!.data[0]!.name, "Performance\n(DUT-On)");
     assert.equal(series[2]!.data[0]!.name, "Performance\n(Test Time)");
-    assert.deepEqual(series.map((gauge) => gauge.data[0]?.value),
-      widget.encoding.gauges.map((gauge) => widget.data[0]?.[gauge.column]));
+    assert.deepEqual(series.map((gauge) => gauge.data[0]?.value), [0, 0, 0, 0]);
   }
   renderer.render({ ...dashboard(2), widgets: [] });
   assert.equal(disposed, 7);

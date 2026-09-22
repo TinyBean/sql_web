@@ -48,7 +48,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   });
   assert.equal(codeInterpreter.status.available, false);
   const store = await AgentSessionStore.open({
-    loadInitialDashboard: createDefaultDashboard,
+    loadInitialDashboard: () => createDefaultDashboard(),
     database,
     artifacts,
     codeInterpreter,
@@ -298,7 +298,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     projectRoot: directory,
   });
   const restoredStore = await AgentSessionStore.open({
-    loadInitialDashboard: createDefaultDashboard,
+    loadInitialDashboard: () => createDefaultDashboard(),
     database,
     artifacts,
     codeInterpreter: restoredRuntime,
@@ -413,7 +413,7 @@ test("forwards explicit Skill syntax as ordinary prompt text", async (t) => {
     projectRoot: directory,
   });
   const store = await AgentSessionStore.open({
-    loadInitialDashboard: createDefaultDashboard,
+    loadInitialDashboard: () => createDefaultDashboard(),
     database,
     artifacts,
     codeInterpreter,

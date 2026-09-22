@@ -36,8 +36,7 @@ import { extractCodeInterpreterImages } from "../tool/code-interpreter-images.ts
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
 import { createEmailTool, EMAIL_AGENT_RULES, EMAIL_TOOL_NAME } from "../tool/email-tools.ts";
 import type { EmailConfig } from "../email.ts";
-import { SessionDashboardStore } from "../dashboard/session-store.ts";
-import type { InitialDashboardProvider } from "../dashboard/definition.ts";
+import { SessionDashboardStore, type InitialDashboardProvider } from "./session-dashboard.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import { createGeneratedTextReviewExtension } from "./generated-text-review.ts";
 import { createDashboardContextExtension } from "./dashboard-context.ts";

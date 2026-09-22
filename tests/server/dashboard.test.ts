@@ -1,5 +1,4 @@
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import type { DashboardRow } from "../../src/shared/dashboard.ts";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +10,7 @@ import {
   DashboardInputError,
   SessionDashboardStore,
   type DashboardWidgetRequest,
-} from "../../src/server/dashboard/session-store.ts";
+} from "../../src/server/agent/session-dashboard.ts";
 import { createDashboardTools } from "../../src/server/tool/dashboard-tools.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 
@@ -45,7 +44,7 @@ function fixture(t: TestContext): {
   return {
     directory,
     artifacts,
-    dashboard: new SessionDashboardStore(artifacts, createDefaultDashboard),
+    dashboard: new SessionDashboardStore(artifacts, () => createDefaultDashboard(new Date("2026-09-22T01:00:00Z"))),
   };
 }
 
@@ -103,7 +102,7 @@ test("initializes and restores the pinned twelve-card dashboard per session", (t
   assert.deepEqual(first.widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
   assert.equal(first.widgets.every((widget) => widget.warnings.length > 0), true);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_A), first);
-  assert.deepEqual(new SessionDashboardStore(artifacts, createDefaultDashboard).loadOrInitialize(SESSION_A), first);
+  assert.deepEqual(new SessionDashboardStore(artifacts, () => createDefaultDashboard()).loadOrInitialize(SESSION_A), first);
 
   const document = JSON.parse(
     readFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), "utf8"),
@@ -245,58 +244,30 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("bundles recalculated four-factor metrics with Sunday-week fallback data", (t) => {
-  const { dashboard } = fixture(t);
-  const state = dashboard.loadOrInitialize(SESSION_A);
-  assert.equal(state.dataAsOf, "2026-09-21T02:46:31.430Z");
-  assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-09-14" });
+test("empty templates retain the twelve-card layout and isolate each snapshot", () => {
+  const now = new Date("2026-09-22T01:00:00.000Z");
+  const state = createDefaultDashboard(now);
+  assert.equal(state.dataAsOf, now.toISOString());
+  assert.deepEqual(state.dateRange, { start: null, end: null });
+  assert.deepEqual(state.widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
   assert.deepEqual(state.widgets.map((widget) => widget.size), [
     "medium", "medium", "medium", "medium", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
   ]);
-  const overview = state.widgets[1];
-  assert.ok(overview?.kind === "overview");
-  assert.equal(overview.data[0]?.["overall_oee_percent"], 51.326714609342936);
-  assert.equal(overview.encoding.label, "Test OEE");
-  assert.equal(overview.encoding.gauges.length, 4);
-
-  const trends = state.widgets.slice(4, 7);
-  assert.deepEqual(trends.map((widget) => widget.data.length), [38, 9, 3]);
-  for (const trend of trends) {
-    assert.ok(trend.kind === "line");
-    assert.deepEqual(trend.encoding.series.map((series) => series.column), [
-      "oee_percent", "max_point", "min_point",
-    ]);
-    assert.equal(trend.data.filter((row) => row["max_point"] !== null).length, 1);
-    assert.equal(trend.data.filter((row) => row["min_point"] !== null).length, 1);
+  for (const widget of state.widgets) {
+    assert.ok(widget.warnings.some((warning) => warning.includes("等待每日任务")));
+    assert.doesNotMatch(widget.title + widget.subtitle + widget.metricDefinition, /2026-/u);
+    if (widget.kind === "overview") {
+      assert.ok(Object.values(widget.data[0]!).every((value) => value === null));
+      assert.equal(widget.encoding.gauges.length, 4);
+    } else {
+      assert.deepEqual(widget.data, []);
+    }
   }
-  assert.equal(trends[0]?.data[0]?.["period_label"], "2026-W00");
-  assert.equal(trends[0]?.data.at(-1)?.["period_label"], "2026-W37");
-  assert.ok(trends[0]?.warnings.some((warning) => warning.includes("周日至周六")));
-  assert.equal(trends[0]?.data.find((row) => row["period_label"] === "2026-W36")?.["oee_percent"], 54.94);
-  assert.equal(state.widgets[7]?.data.length, 6);
-  const machines = state.widgets[8]!;
-  assert.equal(machines.kind, "table");
-  assert.equal(machines.title, "OEE 机台 TOP10（周/月/季）· 极值单项对应");
-  assert.equal(machines.data.length, 6);
-  for (const row of machines.data) {
-    const original: DashboardRow | undefined = state.widgets[7]!.data.find((item) =>
-      item["grain"] === row["grain"] && item["point_type"] === row["point_type"]);
-    assert.equal(row["period_label"], original?.["period_label"]);
-    assert.equal(row["oee_percent"], original?.["oee_percent"]);
-  }
-  const actions = state.widgets.slice(9);
-  assert.deepEqual(actions.map((widget) => widget.title), [
-    "改善措施与责任人 · 周（2026-W36）",
-    "改善措施与责任人 · 月（2026-09）",
-    "改善措施与责任人 · 季（2026-Q3）",
-  ]);
-  assert.match(actions[0]!.subtitle, /2026-09-06 至 2026-09-12/u);
-  for (const action of actions) {
-    assert.equal(action.kind, "table");
-    assert.deepEqual(action.data, []);
-    assert.ok(action.warnings.some((warning) => warning.includes("本次分析暂不可用")));
-    assert.ok(action.warnings.some((warning) => warning.includes("责任人列为职能建议")));
-  }
+  const independent = createDefaultDashboard(now);
+  Reflect.set(state.widgets[0]!.data[0]!, "overall_effective_oee_percent", 99);
+  Reflect.set(state.widgets[0]!.format, "precision", 0);
+  assert.deepEqual(createDefaultDashboard(now), independent);
+  assert.equal(createDefaultDashboard(new Date("2026-09-23T01:00:00Z")).dataAsOf, "2026-09-23T01:00:00.000Z");
 });
 
 test("an edit before initialization uses the pinned baseline and reset restores it", (t) => {
@@ -308,9 +279,10 @@ test("an edit before initialization uses the pinned baseline and reset restores 
     widgetId: "oee-trend-weekly-2026",
   }).dashboard;
   assert.equal(edited.widgets.length, 11);
-  const restarted = new SessionDashboardStore(artifacts, createDefaultDashboard);
+  const later = new Date("2026-09-23T01:00:00Z");
+  const restarted = new SessionDashboardStore(artifacts, () => createDefaultDashboard(later));
   assert.deepEqual(restarted.loadOrPreview(SESSION_A), edited);
-  assert.deepEqual(restarted.loadOrInitialize(SESSION_B), preview);
+  assert.deepEqual(restarted.loadOrInitialize(SESSION_B), { ...preview, dataAsOf: later.toISOString() });
   const reset = restarted.apply(SESSION_A, { action: "reset", baseRevision: 1 }).dashboard;
   assert.deepEqual(reset, { ...preview, revision: 2 });
 });
@@ -325,7 +297,7 @@ test("keeps existing saved dashboards and their reset baseline", (t) => {
     baseline,
     current,
   }));
-  const restarted = new SessionDashboardStore(artifacts, createDefaultDashboard);
+  const restarted = new SessionDashboardStore(artifacts, () => createDefaultDashboard());
   assert.deepEqual(restarted.loadOrPreview(SESSION_A), current);
   assert.deepEqual(restarted.loadOrInitialize(SESSION_A), current);
   assert.deepEqual(

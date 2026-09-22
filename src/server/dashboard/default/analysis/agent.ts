@@ -7,7 +7,8 @@ import { assertModelInLocalCatalog } from "../../../agent/local-model-catalog.ts
 import { loadAgentSkillCatalog } from "../../../agent/skill-catalog.ts";
 import { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
 import type { DefaultDashboardAnalysisConfig } from "../config.ts";
-import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext, type Evidence } from "./evidence.ts";
+import { AnalysisEvidence, type AnalysisContext, type Evidence } from "./evidence.ts";
+import { PERIOD_KEYS } from "../periods.ts";
 import { AnalysisReportSchema, parseAnalysisReport, validateAnalysisReport } from "./report.ts";
 import { analysisBudget } from "./budget.ts";
 import { createAnalysisTools } from "./tools.ts";

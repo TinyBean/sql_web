@@ -8,7 +8,7 @@ import type { WebDatabasePort, WebSessionPort } from "./http-server.ts";
 import type { AppLogger } from "./logger.ts";
 import { ArtifactStore } from "./tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "./tool/code-interpreter.ts";
-import { createDashboardRegistry } from "./dashboard/registered.ts";
+import { createDashboardRegistry } from "./dashboard/index.ts";
 
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 

@@ -7,7 +7,7 @@ import test, { type TestContext } from "node:test";
 import type { DashboardRow } from "../../src/shared/dashboard.ts";
 import { buildTypeOverviews } from "../../src/server/dashboard/default/overviews.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import { SessionDashboardStore } from "../../src/server/dashboard/session-store.ts";
+import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import {
   getDefaultTestOeeDashboardSql,
   getDefaultTestOeeSql,
@@ -161,7 +161,7 @@ test("one overview SQL snapshot saves two independent type cards without changin
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const sessionId = "test-oee-overview-session";
   const artifacts = new ArtifactStore(directory);
-  const store = new SessionDashboardStore(artifacts, createDefaultDashboard);
+  const store = new SessionDashboardStore(artifacts, () => createDefaultDashboard());
   const baseline = store.loadOrInitialize(sessionId);
   const snapshot = artifacts.forSession(sessionId).createDataSnapshot("type-overviews", (fileDescriptor) => {
     writeSync(fileDescriptor, JSON.stringify({ columns, rows, rowCount: 1, truncated: false }));
@@ -193,7 +193,7 @@ test("one overview SQL snapshot saves two independent type cards without changin
   }
 
   // Reload from disk so this checks the persisted mapping and values, not only the apply result.
-  const saved = new SessionDashboardStore(artifacts, createDefaultDashboard).loadOrPreview(sessionId);
+  const saved = new SessionDashboardStore(artifacts, () => createDefaultDashboard()).loadOrPreview(sessionId);
   assert.equal(saved.revision, baseline.revision + 2);
   assert.deepEqual(saved.widgets.slice(0, baseline.widgets.length), baseline.widgets);
   for (const [prefix, expected] of [

@@ -13,7 +13,7 @@ import {
   SessionDashboardStore,
   type DashboardCommand,
   type DashboardWidgetRequest,
-} from "../dashboard/session-store.ts";
+} from "../agent/session-dashboard.ts";
 
 export const DASHBOARD_AGENT_TOOL_NAMES = ["get_dashboard", "update_dashboard"] as const;
 

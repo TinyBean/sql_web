@@ -7,23 +7,24 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
-import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
+import { AnalysisEvidence, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
+import { PERIOD_KEYS } from "../../src/server/dashboard/default/periods.ts";
 import { applyAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
 import { analysisBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
 import { createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/tools.ts";
 import { SessionArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
-import { generateAnalyzedDashboard } from "../../src/server/dashboard/default/analysis/run.ts";
-import { buildDefaultDashboardInTransaction } from "../../src/server/dashboard/default/build.ts";
+import { generateDefaultDashboard } from "../../src/server/dashboard/default/run.ts";
+import { calculatedDashboard } from "../helpers/calculated-dashboard.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
-import { defaultDashboardOutput } from "../../scripts/scheduling/daily-output.ts";
-import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
+import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
+import type { DashboardState } from "../../src/shared/dashboard.ts";
 
 import { AnalysisDrafts } from "../../src/server/dashboard/default/analysis/drafts.ts";
 import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.ts";
@@ -31,6 +32,13 @@ import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.t
 import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
 
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
+
+function assertNumericCardsUnchanged(state: DashboardState, runDir: string): void {
+  const base = JSON.parse(readFileSync(path.join(runDir, "base-dashboard.json"), "utf8")) as DashboardState;
+  assert.deepEqual(state.widgets.slice(0, 9), base.widgets.slice(0, 9));
+  assert.equal(state.dataAsOf, base.dataAsOf);
+  assert.deepEqual(state.dateRange, base.dateRange);
+}
 
 function fixture(t: TestContext, timeoutMs = 20_000) {
   const directory = mkdtempSync(path.join(tmpdir(), "daily-analysis-"));
@@ -86,7 +94,7 @@ test("daily queries reuse shared tools and freeze complete evidence without copy
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
   database.exec("BEGIN");
-  const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
+  const base = calculatedDashboard(database, "2026-01-12");
   const artifacts = new SessionArtifactStore(directory, "test-snapshots");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-12");
@@ -147,7 +155,7 @@ test("stringified report structures are decoded before strict validation without
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
   const evidence = new AnalysisEvidence(database);
-  const context = evidence.context(buildDefaultDashboardInTransaction(database, "2026-01-12"), "2026-01-12");
+  const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
   const report = reportFor(context);
   assert.deepEqual(parseAnalysisReport({ periods: JSON.stringify(report.periods) }), report);
   const nested = { periods: report.periods.map((period) => ({ ...period, groups: JSON.stringify(period.groups) })) };
@@ -181,7 +189,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
   database.exec("BEGIN");
-  const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
+  const base = calculatedDashboard(database, "2026-01-12");
   const artifacts = new SessionArtifactStore(directory, "test-snapshots");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-12");
@@ -204,6 +212,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   item.evidence_ids.push(loss.id);
   item.loss_reference = { evidence_id: loss.id, row_index: 0 };
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
+  assert.deepEqual(analyzed.widgets.slice(0, 9), base.widgets.slice(0, 9));
   assert.equal(analyzed.widgets[9]?.data[0]?.["loss_hours"], 2.5);
   assert.equal(analyzed.widgets[9]?.data[1]?.["loss_hours"], null);
   assert.match(String(analyzed.widgets[9]?.data[0]?.["suggested_owner"]), /工艺工程/u);
@@ -264,7 +273,7 @@ test("reports require readable business text while preserving structured audit r
   const { config, connections } = fixture(t);
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
-  const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
+  const base = calculatedDashboard(database, "2026-01-12");
   const evidence = new AnalysisEvidence(database);
   const context = evidence.context(base, "2026-01-12");
   const report = reportFor(context);
@@ -302,9 +311,11 @@ test("reports require readable business text while preserving structured audit r
 
 test("unavailable models publish new metrics and empty analysis, without creating website sessions", { timeout: 30_000 }, async (t) => {
   const { config } = fixture(t);
+  let published: DashboardState | undefined;
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
-    generate: generateAnalyzedDashboard,
+    generate: generateDefaultDashboard,
     publish(_file, state) {
+      published = state;
       assert.equal(state.dateRange?.end, "2026-01-12");
       assert.ok(Math.abs(Number(state.widgets[1]?.data[0]?.["overall_oee_percent"]) - 100 / 6) < 1e-10);
       for (const widget of state.widgets.slice(9)) {
@@ -318,14 +329,18 @@ test("unavailable models publish new metrics and empty analysis, without creatin
       async sync() { return { runId: "test", status: "completed", datasets: [] }; }, close() {},
     }),
   });
-  const outcome = { ...result, ...defaultDashboardOutput(result.dashboards) };
-  assert.equal(outcome.status, "completed_with_warnings", JSON.stringify(outcome));
-  assert.equal(outcome.analysisStatus, "failed");
+  assert.equal(result.status, "completed_with_warnings", JSON.stringify(result));
+  const outcome = result.dashboards[0]!;
+  assert.equal(outcome.details?.["analysisStatus"], "failed");
   assert.equal(outcome.published, true);
-  assert.match(outcome.analysisReason ?? "", /模型列表/u);
+  assert.match(outcome.reason ?? "", /模型列表/u);
   assert.ok(!readdirSync(path.join(config.analysis.cwd, ".data")).includes("sessions"));
-  const saved = JSON.parse(readFileSync(path.join(outcome.analysisArtifactDir!, "run.json"), "utf8"));
+  const artifactDir = outcome.details?.["analysisArtifactDir"];
+  assert.equal(typeof artifactDir, "string");
+  const saved = JSON.parse(readFileSync(path.join(artifactDir as string, "run.json"), "utf8"));
   assert.equal(saved.status, "failed");
+  assert.ok(published);
+  assertNumericCardsUnchanged(published, artifactDir as string);
 });
 
 test("parent terminates a blocked child after base delivery and waits for process exit", { timeout: 10_000 }, async (t) => {
@@ -338,8 +353,9 @@ test("parent terminates a blocked child after base delivery and waits for proces
       writeFileSync(request.runDir + '/pid', String(process.pid));
       process.send({type:'base', state: JSON.parse(readFileSync(request.config.cwd + '/base.json','utf8'))}, () => { while(true) {} });
     });`);
-  const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "timeout-test", pathToFileURL(worker));
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "timeout-test", pathToFileURL(worker));
   assert.equal(result.analysisStatus, "timed_out");
+  assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
   const pid = Number(readFileSync(path.join(result.analysisArtifactDir, "pid"), "utf8"));
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
@@ -357,7 +373,7 @@ test("empty current periods and missing minima retain nulls and require explicit
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
   database.exec("BEGIN");
-  const base = buildDefaultDashboardInTransaction(database, "2027-01-01");
+  const base = calculatedDashboard(database, "2027-01-01");
   const evidence = new AnalysisEvidence(database);
   const context = evidence.context(base, "2027-01-01");
   assert.equal(context.comparisons.week.minimum.range, undefined);
@@ -476,8 +492,9 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
     return [toolCall(0, "submit_analysis", { ...report, periods: JSON.stringify(report.periods) })];
   });
   writeFileSync(path.join(directory, "outside.txt"), "must not be readable");
-  const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
   assert.equal(rejected, true);
   assert.ok(turn >= 7, "requires review, inspection of merged updates, and confirmation after the last correction");
   assert.ok(JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "report.json"), "utf8")).verification);
@@ -534,7 +551,7 @@ test("ephemeral analysis compacts context and restores snapshot references and d
     }
     return [toolCall(0, "submit_analysis", report)];
   }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000, tokenUsageRequest: 2 });
-  const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "compaction-test");
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "compaction-test");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assert.ok(summaries >= 1, "SDK must actually invoke compaction, not merely enable its setting");
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
@@ -548,7 +565,7 @@ test("ephemeral analysis compacts context and restores snapshot references and d
 test("tool budget includes malformed calls and terminates at sixty without a report", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
   await mockModel(t, directory, () => Array.from({ length: 65 }, (_, index) => toolCall(index, "execute_sql", { invalid: true })));
-  const result = await generateAnalyzedDashboard(config, "2026-01-12", new Date(), [], logger, "budget-test");
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "budget-test");
   assert.equal(result.analysisStatus, "failed");
   assert.match(result.analysisReason ?? "", /60 次/u);
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -562,7 +579,7 @@ test("draft updates preserve validated evidence, reject conflicts and keep the o
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
   const evidence = new AnalysisEvidence(database);
-  const context = evidence.context(buildDefaultDashboardInTransaction(database, "2026-01-12"), "2026-01-12");
+  const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
   const drafts = new AnalysisDrafts(context, evidence.records);
   assert.throws(() => drafts.finalize({ draft_id: "missing", verification: "已核实", updates: [] }, 2), /尚无/u);
   const original = reportFor(context);

@@ -7,17 +7,14 @@ import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
-import type { DashboardDefinition, DashboardUpdateContext, DashboardUpdateOutcome } from "../../src/server/dashboard/definition.ts";
-import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
-import { createDashboardRegistry } from "../../src/server/dashboard/registered.ts";
-import { planDashboardUpdates } from "../../src/server/dashboard/update-runner.ts";
+import type { DashboardDefinition, DashboardUpdateContext, DashboardUpdateOutcome } from "../../src/server/dashboard/index.ts";
+import { DashboardRegistry, createDashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
 import { readDashboardSnapshot, writeDashboardSnapshot } from "../../src/server/dashboard/snapshot-store.ts";
 import { dailyUpdatePlan, type DailyDatabaseDependencies } from "../../scripts/database/daily-update.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { outcomeExitCode } from "../../scripts/database/oee-data-store.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
-import { defaultDashboardOutput } from "../../scripts/scheduling/daily-output.ts";
 
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
 const now = new Date("2026-09-15T01:00:00.000Z");
@@ -31,9 +28,9 @@ function fixture(t: TestContext) {
   return { directory, config: loadDataCommandConfig(directory, {}) };
 }
 
-function module(id: string, run?: (context: DashboardUpdateContext) => Promise<DashboardUpdateOutcome>): DashboardDefinition {
+function module(id: string, update?: (context: DashboardUpdateContext) => Promise<DashboardUpdateOutcome>): DashboardDefinition {
   return { id, loadInitial() { assert.fail("scheduled updates must not read session templates"); },
-    ...(run ? { update: { plan: () => ({ action: "run", reason: null }), run } } : {}) };
+    ...(update ? { update } : {}) };
 }
 
 function database(calls: string[], warnings = false): DailyDatabaseDependencies {
@@ -49,7 +46,7 @@ function database(calls: string[], warnings = false): DailyDatabaseDependencies 
   } };
 }
 
-test("one database sync precedes serial independent publications; planning and publication failures do not stop later boards", async (t) => {
+test("one database sync precedes serial independent publications; update and publication failures do not stop later boards", async (t) => {
   const { directory, config } = fixture(t);
   const calls: string[] = [];
   const file = (id: string) => path.join(directory, id + ".json");
@@ -61,6 +58,8 @@ test("one database sync precedes serial independent publications; planning and p
     assert.equal(context.throughDate, plan.throughDate);
     assert.equal(context.runId, "run-test");
     assert.equal(context.syncWarnings.length, 2);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    calls.push(id + "-published");
     writeDashboardSnapshot(file(id), snapshot);
     return { status: "completed", published: true, dataAsOf: snapshot.dataAsOf, reason: null };
   });
@@ -71,18 +70,16 @@ test("one database sync precedes serial independent publications; planning and p
       writeDashboardSnapshot(file("invalid"), { ...snapshot, revision: 1 });
       assert.fail("validation should reject publication");
     }),
-    { id: "bad-plan", loadInitial: () => snapshot, update: {
-      plan() { throw new Error("invalid strategy"); }, async run() { assert.fail("invalid plan must not execute"); },
-    } },
-    { id: "weekly", loadInitial: () => snapshot, update: {
-      plan(context) { assert.equal(context.syncWarnings.length, 2); return { action: "skip", reason: "本周无需更新" }; },
-      async run() { assert.fail("skipped strategy must not execute"); },
-    } },
+    module("broken", async () => { throw new Error("update failed"); }),
+    module("weekly", async (context) => {
+      assert.equal(context.syncWarnings.length, 2);
+      return { status: "skipped", published: false, dataAsOf: null, reason: "本周无需更新" };
+    }),
     module("static"),
     success("last"),
   ]);
   const result = await runDailyUpdate(config, plan, registry, logger, database(calls, true), "run-test");
-  assert.deepEqual(calls, ["open", "availability", "dut_utilization", "close", "first", "invalid", "last"]);
+  assert.deepEqual(calls, ["open", "availability", "dut_utilization", "close", "first", "first-published", "invalid", "last", "last-published"]);
   assert.deepEqual(result.dashboards.map((item) => item.status), ["completed", "failed", "failed", "skipped", "skipped", "completed"]);
   assert.equal(result.database.status, "completed_with_warnings");
   assert.equal(outcomeExitCode(result.status), 1);
@@ -92,9 +89,11 @@ test("one database sync precedes serial independent publications; planning and p
   assert.equal(result.dashboards[3]?.reason, "本周无需更新");
 });
 
-test("empty registries and static-only registries still update the database and finish successfully", async (t) => {
+test("empty, static-only and self-skipping registries still update the database and finish successfully", async (t) => {
   const { config } = fixture(t);
-  for (const definitions of [[], [module("static")]]) {
+  for (const definitions of [[], [module("static")], [module("weekly", async () => ({
+    status: "skipped", published: false, dataAsOf: null, reason: "本周无需更新",
+  }))]]) {
     const calls: string[] = [];
     const result = await runDailyUpdate(config, plan, new DashboardRegistry(definitions), logger, database(calls));
     assert.deepEqual(calls, ["open", "availability", "dut_utilization", "close"]);
@@ -107,9 +106,7 @@ test("database open, sync, reported, and close failures skip every strategy", as
   const { config } = fixture(t);
   for (const failure of ["open", "sync", "reported", "close"]) {
     const calls: string[] = [];
-    const registry = new DashboardRegistry([{ id: "default", loadInitial: () => snapshot, update: {
-      plan() { assert.fail("must not plan after sync failure"); }, async run() { assert.fail("must not update"); },
-    } }]);
+    const registry = new DashboardRegistry([module("default", async () => { assert.fail("must not update"); })]);
     const result = await runDailyUpdate(config, plan, registry, logger, {
       openStore() {
         if (failure === "open") throw new Error("open failed");
@@ -127,11 +124,11 @@ test("database open, sync, reported, and close failures skip every strategy", as
     assert.deepEqual(calls, failure === "open" ? [] : ["availability", "dut_utilization", "close"]);
     assert.equal(result.dashboards[0]?.status, "skipped");
     assert.equal(result.dashboards[0]?.published, false);
-    assert.equal(defaultDashboardOutput(result.dashboards).analysisReason, "数据同步失败");
+    assert.equal(result.dashboards[0]?.reason, "数据同步失败");
   }
 });
 
-test("module warnings and sync warnings yield exit code 2; CLI legacy fields refer only to default", async (t) => {
+test("module warnings and sync warnings yield exit code 2; results keep details isolated per dashboard", async (t) => {
   const { config } = fixture(t);
   const registry = new DashboardRegistry([
     module("default", async () => ({ status: "completed_with_warnings", published: true, dataAsOf: snapshot.dataAsOf,
@@ -141,35 +138,30 @@ test("module warnings and sync warnings yield exit code 2; CLI legacy fields ref
   ]);
   const result = await runDailyUpdate(config, plan, registry, logger, database([]));
   assert.equal(outcomeExitCode(result.status), 2);
-  assert.deepEqual(defaultDashboardOutput(result.dashboards), { published: true, dataAsOf: snapshot.dataAsOf,
+  assert.deepEqual(Object.keys(result).sort(), ["dashboards", "database", "status", "throughDate"]);
+  assert.deepEqual(result.dashboards[0]?.details, {
     analysisStatus: "timed_out", analysisReason: "analysis unavailable", analysisRunId: "analysis-run", analysisArtifactDir: "analysis-dir" });
-  assert.equal(defaultDashboardOutput(result.dashboards.slice(1)).published, false);
+  assert.equal(result.dashboards[1]?.dataAsOf, "2026-09-16T01:00:00.000Z");
+  assert.equal(result.dashboards[1]?.details, undefined);
   const warningOnly = await runDailyUpdate(config, plan, new DashboardRegistry([]), logger, database([], true));
   assert.equal(outcomeExitCode(warningOnly.status), 2);
 });
 
-test("dry-run plans all registered boards without loading snapshots, updating, or writing artifacts", async (t) => {
+test("the update runner rejects dry-run before loading snapshots, updating, or writing artifacts", async (t) => {
   const { config, directory } = fixture(t);
   const defaultDefinition = createDefaultDashboardDefinition(config, {
     async generate() { assert.fail("dry-run must not generate"); }, publish() { assert.fail("dry-run must not publish"); },
   });
-  const context = { databasePath: config.databasePath, throughDate: plan.throughDate, now, syncWarnings: [], runId: "dry-run", logger };
-  const registry = new DashboardRegistry([defaultDefinition, module("static"), {
-    id: "weekly", loadInitial: () => snapshot, update: {
-      plan: () => ({ action: "skip", reason: "非更新时间" }), async run() { assert.fail("dry-run must not execute"); },
-    },
-  }]);
-  const plans = planDashboardUpdates(registry, context);
-  assert.deepEqual(plans.map((item) => item.action), ["run", "skip", "skip"]);
-  assert.ok("outputPath" in plans[0]! && plans[0].outputPath === config.defaultDashboardPath);
-  assert.deepEqual(planDashboardUpdates(createDashboardRegistry(config), context), plans.slice(0, 1));
+  const registry = new DashboardRegistry([defaultDefinition, module("static"),
+    module("weekly", async () => { assert.fail("dry-run must not execute"); }),
+  ]);
   await assert.rejects(runDailyUpdate(config, { ...plan, dryRun: true }, registry, logger, {
     openStore() { assert.fail("dry-run must not open database"); },
   }), /dry-run/u);
   assert.deepEqual(readdirSync(directory), []);
 });
 
-test("daily CLI dry-run reports database requests and per-board plans with legacy fields", (t) => {
+test("daily CLI dry-run reports database requests and registered updates without predictions or legacy fields", (t) => {
   const { directory, config } = fixture(t);
   const compiled = import.meta.url.endsWith(".js");
   const entry = fileURLToPath(new URL(compiled ? "../../scripts/oee-daily.js" : "../../scripts/oee-daily.ts", import.meta.url));
@@ -181,9 +173,15 @@ test("daily CLI dry-run reports database requests and per-board plans with legac
   const output = JSON.parse(result.stdout);
   assert.equal(output.dryRun, true);
   assert.equal(output.requests.length, 2);
-  assert.equal(output.defaultDashboardPath, config.defaultDashboardPath);
-  assert.equal(output.dashboards[0].dashboardId, "default");
-  assert.equal(output.dashboards[0].action, "run");
-  assert.deepEqual(output.periods, output.dashboards[0].details.periods);
+  assert.equal(output.databasePath, config.databasePath);
+  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }]);
+  assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "syncStart", "throughDate", "timezone"]);
   assert.deepEqual(readdirSync(directory), []);
+});
+
+test("shared registration loads initial snapshots without requiring an update agent", () => {
+  const registry = createDashboardRegistry();
+  assert.deepEqual(registry.list().map((definition) => definition.id), ["default"]);
+  assert.equal(registry.list()[0]?.update, undefined);
+  assert.equal(registry.loadInitial().widgets.length, 12);
 });

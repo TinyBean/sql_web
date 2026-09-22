@@ -2,14 +2,14 @@ import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { AppLogger } from "../../../logger.ts";
-import { parseDashboardState, type DashboardState } from "../../../../shared/dashboard.ts";
-import type { DefaultDashboardGenerationConfig } from "../config.ts";
-import type { AnalysisWorkerRequest } from "./worker.ts";
-import { analysisUnavailable } from "./report.ts";
-import { readAnalysisEvents, summarizeAnalysisEvents } from "./metrics.ts";
+import type { AppLogger } from "../../logger.ts";
+import { parseDashboardState, type DashboardState } from "../../../shared/dashboard.ts";
+import type { DefaultDashboardGenerationConfig } from "./config.ts";
+import type { DefaultDashboardWorkerRequest } from "./worker.ts";
+import { analysisUnavailable } from "./analysis/report.ts";
+import { readAnalysisEvents, summarizeAnalysisEvents } from "./analysis/metrics.ts";
 
-export interface DailyAnalysisResult {
+export interface DefaultDashboardResult {
   readonly state: DashboardState;
   readonly analysisStatus: "completed" | "failed" | "timed_out";
   readonly analysisReason: string | null;
@@ -17,10 +17,10 @@ export interface DailyAnalysisResult {
   readonly analysisArtifactDir: string;
 }
 
-export async function generateAnalyzedDashboard(
+export async function generateDefaultDashboard(
   config: DefaultDashboardGenerationConfig, throughDate: string, now: Date, warnings: readonly string[], logger: AppLogger,
   runId: string = randomUUID(), workerUrl = new URL("./worker.ts", import.meta.url),
-): Promise<DailyAnalysisResult> {
+): Promise<DefaultDashboardResult> {
   if (!/^[a-zA-Z0-9_-]+$/u.test(runId)) throw new Error("无效的分析运行 ID");
   // TypeScript rewrites import specifiers but not URLs in compiled test builds.
   if (import.meta.url.endsWith(".js") && workerUrl.pathname.endsWith("/worker.ts")) {
@@ -116,7 +116,7 @@ export async function generateAnalyzedDashboard(
         });
       } catch (error) { reject(error); }
     });
-    const request: AnalysisWorkerRequest = {
+    const request: DefaultDashboardWorkerRequest = {
       databasePath: config.databasePath, throughDate, now: now.toISOString(), warnings, config: config.analysis, runDir,
     };
     child.send(request, (error: Error | null) => { if (error) { failure = error.message; stop(); } });

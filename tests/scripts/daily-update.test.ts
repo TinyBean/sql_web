@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { buildDefaultDashboard } from "../../src/server/dashboard/default/build.ts";
+import { readCalculatedDashboard } from "../helpers/calculated-dashboard.ts";
+import { calculateNumericCards } from "../../src/server/dashboard/default/calculate.ts";
+import { prepareAnalysisCards } from "../../src/server/dashboard/default/analysis/index.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
-import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
+import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
 import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/periods.ts";
 import { addDays, latestClosedBusinessDate, latestCompleteWeek } from "../../src/server/database/business-dates.ts";
@@ -100,7 +102,26 @@ test("week labels match SQLite %U including years beginning on Monday and Sunday
   assert.equal(weekLabel("2026-09-13"), "2026-W37");
 });
 
-test("generates ten live cards using canonical calculations, stable extrema, and empty analysis placeholders", (t) => {
+test("numeric calculation and analysis preparation own separate cards without starting an agent or writing artifacts", (t) => {
+  const { config, directory } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  try {
+    database.exec("BEGIN");
+    // Establish SQLite's read snapshot (and its WAL sidecars) before observing card generation.
+    database.prepare("SELECT COUNT(*) FROM oee_availability").get();
+    const before = readdirSync(directory, { recursive: true });
+    const numeric = calculateNumericCards(database, "2026-01-12");
+    assert.deepEqual(numeric.map((widget) => widget.id), createDefaultDashboard().widgets.slice(0, 9).map((widget) => widget.id));
+    const analysis = prepareAnalysisCards(database, "2026-01-12");
+    assert.deepEqual(analysis.map((widget) => widget.id), createDefaultDashboard().widgets.slice(9).map((widget) => widget.id));
+    assert.ok(analysis.every((widget) => widget.data.length === 0));
+    assert.equal(database.prepare("SELECT total_changes() AS changes").get()?.["changes"], 0);
+    assert.deepEqual(readdirSync(directory, { recursive: true }), before);
+    database.exec("COMMIT");
+  } finally { database.close(); }
+});
+
+test("generates numeric cards using canonical calculations, stable extrema, and empty analysis placeholders", (t) => {
   const { config } = fixture(t);
   const writer = new DatabaseSync(config.databasePath);
   for (const day of ["2026-01-01", "2026-01-08"]) {
@@ -115,7 +136,7 @@ test("generates ten live cards using canonical calculations, stable extrema, and
   insert.run("TSPH001", "P-LOT", "Test(Normal)", "5000", "2026-01-01", 999999);
   insert.run("EXCLUDED", "None", "Test(Normal)", "5000", "2026-01-01", 999999);
   writer.close();
-  const state = buildDefaultDashboard(config.databasePath, "2026-01-08", new Date("2026-01-09T01:00:00Z"));
+  const state = readCalculatedDashboard(config.databasePath, "2026-01-08", new Date("2026-01-09T01:00:00Z"));
   assert.deepEqual(state.widgets.map((widget) => [widget.id, widget.size]), createDefaultDashboard().widgets.map((widget) => [widget.id, widget.size]));
   assert.deepEqual(state.dateRange, { start: "2026-01-01", end: "2026-01-08" });
   assert.equal(state.dataAsOf, "2026-01-09T01:00:00.000Z");
@@ -157,7 +178,7 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
   seed(writer, "2026-01-11", "MT", 80); // Sunday: W02, 5%
   writer.close();
 
-  const state = buildDefaultDashboard(config.databasePath, "2026-01-11");
+  const state = readCalculatedDashboard(config.databasePath, "2026-01-11");
   const weekly = state.widgets[4]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
     ["2026-W00", 20, null, null], ["2026-W01", 25, 25, null], ["2026-W02", 5, null, 5],
@@ -185,7 +206,7 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
   seed(writer, "2026-01-01", "ST", 40);
   seed(writer, "2026-01-02", "MT", 0);
   writer.close();
-  const state = buildDefaultDashboard(config.databasePath, "2026-01-02");
+  const state = readCalculatedDashboard(config.databasePath, "2026-01-02");
   assert.deepEqual(state.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").map((widget) => widget.data[0]), [
     { overall_oee_percent: 20, avg_availability_percent: 50, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
     { overall_oee_percent: 10, avg_availability_percent: 50, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
@@ -194,7 +215,7 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
 
 test("empty and cross-year dashboards contain null metrics and accurate period warnings", (t) => {
   const { config } = fixture(t);
-  const empty = buildDefaultDashboard(config.databasePath, "2027-01-01");
+  const empty = readCalculatedDashboard(config.databasePath, "2027-01-01");
   assert.equal(empty.widgets.length, 12);
   assert.equal(empty.widgets[1]?.data[0]?.["overall_oee_percent"], null);
   assert.equal(empty.widgets[7]?.data.length, 0);
@@ -244,7 +265,7 @@ test("sync warnings publish all twelve cards with data coverage warnings", async
   let published = false;
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
     async generate(config, date, now, warnings) {
-      return { state: buildDefaultDashboard(config.databasePath, date, now, warnings),
+      return { state: readCalculatedDashboard(config.databasePath, date, now, warnings),
         analysisStatus: "completed", analysisReason: null, analysisRunId: "test", analysisArtifactDir: "test" };
     },
     publish(filePath, state) {

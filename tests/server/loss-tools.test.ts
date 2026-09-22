@@ -9,7 +9,7 @@ import { AppDatabase } from "../../src/server/database/database.ts";
 import { AnalysisEvidence } from "../../src/server/dashboard/default/analysis/evidence.ts";
 import { createAnalysisTools } from "../../src/server/dashboard/default/analysis/tools.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import { SessionDashboardStore } from "../../src/server/dashboard/session-store.ts";
+import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
 import { createAgentTools } from "../../src/server/tool/database-tools.ts";
@@ -71,7 +71,7 @@ test("loss snapshots survive restoration, never replace earlier measurements, an
   const frozen = JSON.parse(readFileSync(restored.resolveDataSnapshot(first.snapshot.name).filePath, "utf8"));
   assert.deepEqual(frozen.rows, first.rows);
   assert.throws(() => store.forSession("other-test-session").resolveDataSnapshot(first.snapshot.name), /不存在/u);
-  const dashboard = new SessionDashboardStore(store, createDefaultDashboard);
+  const dashboard = new SessionDashboardStore(store, () => createDefaultDashboard());
   const baseline = dashboard.loadOrInitialize(sessionId);
   const result = dashboard.apply(sessionId, {
     action: "upsert", baseRevision: baseline.revision, snapshot: first.snapshot.name,

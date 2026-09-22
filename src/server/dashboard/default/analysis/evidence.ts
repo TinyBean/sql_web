@@ -3,13 +3,11 @@ import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { AppDatabase, assertReadOnlyQuery, type SqlParameter } from "../../../database/database.ts";
 import { MAX_QUERY_ARTIFACT_BYTES, type DataSnapshotDescriptor, type SessionArtifactStore } from "../../../tool/artifact-store.ts";
 import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
-import { dashboardPeriods, weekLabel } from "../periods.ts";
+import { dashboardPeriods, weekLabel, PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
 import type { LossMeasurement, LossScope } from "../../../tool/loss-tools.ts";
 import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
 
-export const PERIOD_KEYS = ["week", "month", "quarter"] as const;
-export type PeriodKey = typeof PERIOD_KEYS[number];
 export interface Evidence {
   readonly id: string;
   readonly sql: string;

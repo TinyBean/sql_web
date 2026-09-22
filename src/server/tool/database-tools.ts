@@ -17,7 +17,7 @@ import {
 import type { AppDatabase } from "../database/database.ts";
 import type { QueryResult } from "../database/database.ts";
 import { createMeasureLossTool, MEASURE_LOSS_TOOL_NAME } from "./loss-tools.ts";
-import type { SessionDashboardStore } from "../dashboard/session-store.ts";
+import type { SessionDashboardStore } from "../agent/session-dashboard.ts";
 import {
   createDashboardTools,
   DASHBOARD_AGENT_TOOL_NAMES,

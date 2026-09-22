@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { readDefaultDashboard, writeDefaultDashboard } from "../../src/server/dashboard/default/store.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import { SessionDashboardStore } from "../../src/server/dashboard/session-store.ts";
+import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 
 test("new defaults affect only new sessions, including when an empty session is already open", (t) => {
@@ -14,7 +14,10 @@ test("new defaults affect only new sessions, including when an empty session is 
   const file = path.join(root, "default.json");
   const artifacts = new ArtifactStore(path.join(root, "artifacts"));
   const dashboard = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
-  const first = createDefaultDashboard();
+  const template = createDefaultDashboard();
+  const first = { ...template, dateRange: { start: "2026-01-01", end: "2026-09-14" },
+    widgets: template.widgets.map((widget) => widget.id === "mt-oee-overview"
+      ? { ...widget, data: [{ ...widget.data[0], overall_oee_percent: 42 }] } : widget) };
   writeDefaultDashboard(file, first);
   const preview = dashboard.loadOrPreview("empty-session-a");
   assert.equal(existsSync(path.join(artifacts.rootDir, "empty-session-a")), false);
@@ -30,6 +33,7 @@ test("new defaults affect only new sessions, including when an empty session is 
 });
 
 test("invalid or missing default files fall back with a diagnostic", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-22T01:00:00Z") });
   const root = mkdtempSync(path.join(tmpdir(), "dashboard-default-fallback-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, "default.json");
@@ -43,12 +47,36 @@ test("invalid or missing default files fall back with a diagnostic", (t) => {
   assert.deepEqual(events, ["dashboard.default.fallback", "dashboard.default.invalid", "dashboard.default.invalid"]);
 });
 
-test("three-factor type snapshots keep their published OEE and warn instead of inferring Test Time", (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), "dashboard-legacy-performance-"));
+test("an empty fallback stays pinned after publication and remains the saved session's reset baseline", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "dashboard-empty-baseline-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "default.json");
+  const artifacts = new ArtifactStore(path.join(root, "artifacts"));
+  const sessions = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
+  const empty = sessions.loadOrPreview("empty-session");
+  assert.deepEqual(empty.dateRange, { start: null, end: null });
+  assert.equal(existsSync(path.join(artifacts.rootDir, "empty-session")), false);
+  const published = { ...empty, dateRange: { start: "2026-01-01", end: "2026-01-12" },
+    widgets: empty.widgets.map((widget) => widget.id === "mt-oee-overview"
+      ? { ...widget, data: [{ ...widget.data[0], overall_oee_percent: 35 }] } : widget) };
+  writeDefaultDashboard(file, published);
+  assert.deepEqual(sessions.loadOrPreview("empty-session"), empty);
+  assert.deepEqual(sessions.loadOrPreview("new-session"), published);
+  sessions.apply("empty-session", { action: "remove", baseRevision: 0, widgetId: empty.widgets[0]!.id });
+  const restarted = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
+  assert.deepEqual(restarted.apply("empty-session", { action: "reset", baseRevision: 1 }).dashboard,
+    { ...empty, revision: 2 });
+});
+
+test("old default formats fall back without rewriting snapshots or changing historical sessions", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-22T01:00:00Z") });
+  const root = mkdtempSync(path.join(tmpdir(), "dashboard-default-legacy-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, "default.json");
   const current = createDefaultDashboard();
-  const widgets = current.widgets.filter((widget) => !widget.id.includes("effective")).map((widget) => widget.kind === "overview" ? {
+  const ten = current.widgets.filter((widget) => !widget.id.includes("effective"));
+  const nine = [{ ...ten[0]!, id: "overall-oee-overview" }, ...ten.slice(2)];
+  const threeFactor = ten.map((widget) => widget.kind === "overview" ? {
     ...widget,
     data: [{ overall_oee_percent: 45, avg_availability_percent: 60, avg_performance_percent: 75, avg_yield_percent: 100 }],
     encoding: { ...widget.encoding, gauges: [
@@ -57,58 +85,28 @@ test("three-factor type snapshots keep their published OEE and warn instead of i
       { name: "Yield", column: "avg_yield_percent" },
     ] },
   } : widget);
-  writeFileSync(file, JSON.stringify({ ...current, widgets }));
-  const migrated = readDefaultDashboard(file);
-  for (const widget of migrated.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview")) {
-    assert.equal(widget.data[0]!["overall_oee_percent"], 45);
-    assert.equal(widget.data[0]!["avg_dut_on_percent"], 75);
-    assert.equal(widget.data[0]!["avg_test_time_percent"], null);
-    assert.match(widget.metricDefinition, /旧口径 OEE/u);
-  }
-  assert.ok(migrated.widgets.filter((widget) => !widget.id.includes("effective")).every((widget) => widget.warnings.some((warning) => warning.includes("旧口径快照"))));
-});
-
-test("old defaults split their known type OEE without inventing components or changing existing sessions", (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), "dashboard-split-overviews-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const file = path.join(root, "default.json");
-  const current = createDefaultDashboard();
-  const mt = current.widgets[1]!;
-  assert.ok(mt.kind === "overview");
-  const legacy = {
-    ...current, dataAsOf: "2026-09-16T01:00:00.000Z",
-    widgets: [{
-      ...mt, id: "overall-oee-overview", title: "Overall OEE",
-      data: [{ overall_oee_percent: 41, mt_oee_percent: 21, st_oee_percent: 62,
-        avg_availability_percent: 87, avg_performance_percent: 88, avg_yield_percent: 89 }],
-    }, ...current.widgets.slice(4)],
-  };
+  const oldOrder = [...current.widgets];
+  [oldOrder[4], oldOrder[6]] = [oldOrder[6]!, oldOrder[4]!];
   const artifacts = new ArtifactStore(path.join(root, "artifacts"));
-  const sessions = new SessionDashboardStore(artifacts, () => legacy);
-  const pinned = sessions.loadOrInitialize("existing");
-  writeFileSync(file, JSON.stringify(legacy));
-  const before = readFileSync(file, "utf8");
-  const migrated = readDefaultDashboard(file);
-  assert.equal(migrated.widgets.length, 12);
-  assert.equal(migrated.dataAsOf, legacy.dataAsOf);
-  assert.deepEqual(migrated.dateRange, legacy.dateRange);
-  for (const [index, widget] of migrated.widgets.slice(4).entries()) {
-    assert.deepEqual(widget.data, legacy.widgets[index + 1]!.data);
-    assert.ok(widget.warnings.some((warning) => warning.includes("旧口径快照")));
+  const events: string[] = [];
+  const logger = { info() {}, error(event: string) { events.push(event); } };
+  for (const [index, widgets] of [nine, ten, threeFactor, oldOrder].entries()) {
+    const legacy = { ...current, widgets, dataAsOf: "2026-09-16T01:00:00.000Z" };
+    const sessionId = "legacy-session-" + index;
+    const sessions = new SessionDashboardStore(artifacts, () => legacy);
+    const pinned = sessions.loadOrInitialize(sessionId);
+    const original = JSON.stringify(legacy);
+    writeFileSync(file, original);
+    assert.deepEqual(readDefaultDashboard(file, logger), current);
+    assert.equal(readFileSync(file, "utf8"), original);
+    const reopened = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
+    assert.deepEqual(reopened.loadOrPreview(sessionId), pinned);
+    assert.deepEqual(reopened.loadOrPreview("new-session-" + index), current);
+    reopened.apply(sessionId, { action: "remove", baseRevision: 0, widgetId: pinned.widgets[0]!.id });
+    assert.deepEqual(reopened.apply(sessionId, { action: "reset", baseRevision: 1 }).dashboard,
+      { ...pinned, revision: 2 });
   }
-  assert.deepEqual(migrated.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").map((widget) => widget.data[0]), [
-    { overall_oee_percent: 21, avg_availability_percent: null, avg_performance_percent: null, avg_dut_on_percent: null, avg_test_time_percent: null, avg_yield_percent: null },
-    { overall_oee_percent: 62, avg_availability_percent: null, avg_performance_percent: null, avg_dut_on_percent: null, avg_test_time_percent: null, avg_yield_percent: null },
-  ]);
-  assert.ok(migrated.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").every((widget) => widget.warnings.some((warning) => warning.includes("旧版快照"))));
-  assert.equal(readFileSync(file, "utf8"), before, "reading a default never rewrites its snapshot");
-  const reopened = new SessionDashboardStore(artifacts, () => readDefaultDashboard(file));
-  assert.deepEqual(reopened.loadOrInitialize("existing"), pinned);
-  assert.deepEqual(reopened.loadOrPreview("new-session"), migrated);
-  // A former quarter/month/week default must still retain its published data.
-  const [overview, weekly, monthly, quarterly, ...rest] = legacy.widgets;
-  writeFileSync(file, JSON.stringify({ ...legacy, widgets: [overview, quarterly, monthly, weekly, ...rest] }));
-  assert.deepEqual(readDefaultDashboard(file), migrated);
+  assert.deepEqual(events, Array(4).fill("dashboard.default.invalid"));
 });
 
 test("publication validates before writing and cleans temporary files after rename failure", (t) => {
@@ -125,34 +123,4 @@ test("publication validates before writing and cleans temporary files after rena
   assert.throws(() => writeDefaultDashboard(directoryTarget, state));
   assert.equal(readFileSync(file, "utf8"), original);
   assert.deepEqual(readdirSync(root).sort(), ["blocked", "default.json"]);
-});
-
-test("ten-card snapshots gain empty effective overviews without changing published data or reading twice differently", (t) => {
-  const root = mkdtempSync(path.join(tmpdir(), "dashboard-effective-migration-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const file = path.join(root, "default.json");
-  const current = createDefaultDashboard();
-  const legacy = { ...current, widgets: current.widgets.filter((widget) => !widget.id.includes("effective"))
-    .map((widget) => widget.kind === "overview" ? { ...widget, size: "wide" as const,
-      title: widget.title.replace("Test OEE", "OEE 概览"), encoding: { ...widget.encoding, label: "Overall OEE" } } : widget) };
-  writeFileSync(file, JSON.stringify(legacy));
-  const before = readFileSync(file, "utf8");
-  const migrated = readDefaultDashboard(file);
-  assert.deepEqual(migrated.widgets.map((widget) => widget.id), current.widgets.map((widget) => widget.id));
-  assert.deepEqual(migrated.widgets.slice(4), legacy.widgets.slice(2));
-  assert.deepEqual(migrated.dateRange, legacy.dateRange);
-  assert.equal(migrated.dataAsOf, legacy.dataAsOf);
-  for (const id of ["mt", "st"]) {
-    const effective = migrated.widgets.find((widget) => widget.id === `${id}-effective-oee-overview`)!;
-    assert.ok(Object.values(effective.data[0]!).every((value) => value === null));
-    assert.ok(effective.warnings.some((warning) => warning.includes("待每日更新补齐")));
-    const original = migrated.widgets.find((widget) => widget.id === `${id}-oee-overview`)!;
-    assert.deepEqual(original.data, legacy.widgets.find((widget) => widget.id === original.id)!.data);
-    assert.equal(original.size, "medium");
-    assert.ok(!original.warnings.some((warning) => warning.includes("旧口径")));
-  }
-  assert.equal(readFileSync(file, "utf8"), before);
-  writeDefaultDashboard(file, migrated);
-  assert.deepEqual(readDefaultDashboard(file), migrated);
-  assert.deepEqual(readDefaultDashboard(file), migrated);
 });

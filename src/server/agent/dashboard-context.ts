@@ -1,5 +1,5 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import type { SessionDashboardStore } from "../dashboard/session-store.ts";
+import type { SessionDashboardStore } from "./session-dashboard.ts";
 import type { AppLogger } from "../logger.ts";
 
 export const DASHBOARD_CONTEXT_MESSAGE_TYPE = "sql_web.dashboard.context";

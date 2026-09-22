@@ -8,9 +8,9 @@
 src/
 ├── client/          # 浏览器端交互、渲染和接口解码
 ├── server/
-│   ├── agent/       # Agent 会话与模型配置
+│   ├── agent/       # Agent 会话、会话看板状态与模型配置
 │   ├── database/    # SQLite 只读查询
-│   ├── dashboard/   # 看板定义、注册表、快照与会话状态；default/ 为默认看板实现
+│   ├── dashboard/   # 看板注册与快照；default/ 维护默认看板的卡片更新和每日分析 Agent
 │   ├── skills/      # 业务技能、规则参考与技能脚本
 │   │   └── test-oee-calculator/
 │   │       ├── assets/      # 工具定义、计算器与数据库辅助代码
@@ -34,30 +34,38 @@ scripts/
 
 ## 默认看板
 
-新会话使用固定的 12 张看板卡片，以会话 `01a0a299-72d4-7826-95ea-f521e796e3fc` 的最终看板（revision 19）为基础，按以下顺序展示：
+新会话使用固定的 12 张看板卡片，按以下顺序展示：
 
 1. 四张半宽 OEE 概览：第一排从左到右为 MT Effective OEE、MT Test OEE，第二排为 ST Effective OEE、ST Test OEE。每张上方展示 32px 主百分比，下方以 2×2 仪表盘展示四个组成项；Effective OEE 使用 Effective Availability，Test OEE 使用 Availability，其他组成项均为 Performance (DUT-On)、Performance (Test Time)、Yield。
 2. OEE 周趋势、月趋势、季趋势（含最高/最低点，业务周为周日至周六，年初首个周日之前为 W00）。
 3. OEE 极值明细、与各极值周期对应的机台 OEE 最低 TOP10 表格。
 4. 周、月、季改善措施与责任人清单，每张清单包含 MT/ST 两类。
 
-当前看板是 ID 为 `default` 的看板模块。卡片模板及首次部署的兜底快照保存在 `src/server/dashboard/default/template.ts`，周期、计算、Agent 分析和发布逻辑也在该模块内。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用内置快照（业务数据截至 2026-09-14）。原会话的 JSONL 和产物文件不是运行时依赖。
+当前看板是 ID 为 `default` 的看板模块。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用空数据模板。模板保留 12 张卡片的布局、编码和统计口径，概览指标为 NULL、趋势和表格为空，并提示等待每日更新。模板的业务日期范围为空，`dataAsOf` 记录模板创建时间，不代表已有业务数据；不再内置历史数据。已有有效发布快照仍原样读取。
+
+默认看板按三个职责组织：
+
+- `src/server/dashboard/default/template.ts`：卡片定义及构造函数，集中维护标题、布局、仪表盘、表头和统计口径；`createDefaultDashboard(now)` 可传入固定时间。
+- `src/server/dashboard/default/calculate.ts`：`calculateNumericCards(database, throughDate, syncWarnings)` 使用调用方的只读连接，返回 9 张数值卡片，不启动 Agent、不发布文件。
+- `src/server/dashboard/default/analysis/index.ts`：准备 3 张改善卡片的周期和覆盖提示，再启动临时 Agent、校验并回填报告；证据、草稿复核及审计保留在分析模块内。
+
+`generateDefaultDashboard()` 位于默认看板根目录的 `run.ts`，负责子进程生命周期、超时和降级；`worker.ts` 在同一只读事务中依次生成模板、计算数值、准备分析卡片、发送基础看板、执行 Agent 分析。默认看板的 `update()` 最后校验并原子发布完整看板。
 
 Performance (DUT-On) 为 `SUM(IN_QTY)/SUM(DUT_NUM)`；Performance (Test Time) 按业务日和 MT/ST 分别计算：`TrimmedMean(测试秒数, 0.2)×SUM(TD_Label)/SUM(测试秒数)`。测试秒数是 END_TIME 与 START_TIME 的差；非零有效整数 TOUCHDOWN_INDEX 的 TD_Label 为 1，否则为 NULL。截尾总比例为 0.2%，两端各删除 `floor(n/1000)` 条，仅影响均值；两个总和各自保留全部非空值。小于 1000 条且所有 TD 有效时 Test Time 为 100%。日 OEE 为 Availability×Performance (DUT-On)×Performance (Test Time)×Yield，多日仍等权平均日 OEE；概览五项统一使用该类型 OEE 可计算日。零分母和必要聚合值缺失保持 NULL，不限制结果上限。旧 `performance` 字段仅为 DUT-On 的兼容别名。
 
-Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；Effective OEE 复用已有逐日 SQL，以 Effective Availability 替换 Availability。每张 Effective OEE 概览的主值和组成项均对该类型日 Effective OEE 非 NULL 的业务日等权平均，覆盖计数独立于 Test OEE。旧默认快照缺少新增字段时显示空值并提示等待每日更新，不从 Test OEE 推算，也不在读取时重算或写回。已有会话继续使用各自保存的看板。每个看板最多允许 14 张卡片，默认 12 张仍留有两个新增位置。
+Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；Effective OEE 复用已有逐日 SQL，以 Effective Availability 替换 Availability。每张 Effective OEE 概览的主值和组成项均对该类型日 Effective OEE 非 NULL 的业务日等权平均，覆盖计数独立于 Test OEE。已有会话继续使用各自保存的看板。每个看板最多允许 14 张卡片，默认 12 张仍留有两个新增位置。
 
 机台 TOP10 表格按周最低、周最高、月最低、月最高、季最低、季最高排序，周期及周期 OEE 直接沿用极值明细，每行展示该周期 OEE 最低的至多 10 台机台。机台 OEE 使用整期汇总：运行秒数÷（该机台有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×该机台TD次数)÷SUM(该机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)，区别于周期 OEE 的日类型等权平均。机台 Test Time 复用同日同类型全部合格 DUT 的标准时间，不按机台单独截尾。同一机台的 MT/ST 数据合并，按 Availability 累计时长标注主要类型，并列取 MT；按未舍入 OEE 升序排名，并列按机台编号。查询保留完整周期末日的 DUT 数据，缺失或零分母为 NULL，不参与排名；表格提示各周期的机台数量和数据覆盖情况。
 
 新会话首次展示时锁定当时的默认版本，从 revision 0 开始；首次保存时将其写入该会话的 baseline 和 current，重置会恢复该会话的 baseline。已打开的空会话也保留其初始版本，且仍不创建持久化产物。已有会话可通过对话更新自己的卡片。
 
-MT/ST 概览分别对各自 OEE 可计算业务日的五项指标等权平均，不混合类型，也不将组成项的平均值再次相乘得到 OEE。读取旧版九卡默认快照时保留其余八张卡片的数据及已有的分类 OEE，并标注旧公式；旧快照未存储的分类组成项显示暂无数据，待每日更新补齐。读取旧三因子默认快照时标注旧公式，Test Time 显示暂无数据，不从旧 OEE 反推；已有会话的历史看板不做迁移。
+MT/ST 概览分别对各自 OEE 可计算业务日的五项指标等权平均，不混合类型，也不将组成项的平均值再次相乘得到 OEE。默认快照只接受当前固定顺序的 12 张卡片；旧九卡、十卡、旧趋势顺序及旧公式快照不再转换，不符合当前格式时记录日志并使用空数据模板，读取不会重算或改写原文件。已有会话仍读取自己的 baseline/current，编辑和重置行为保持不变。
 
 每次模型请求前，应用会将该会话当前展示的完整看板注入 Agent 上下文，包括图表数值、表格文字、日期、统计口径和警告。首次提问、后续提问、工具更新后的继续回答，以及历史会话恢复或上下文压缩后都能读取最新的会话看板。注入内容仅用于模型请求，不追加到聊天记录，也不触发看板重算或空会话产物创建。Agent 可直接解释看板内容；要求最新数据、重新计算或扩展分析时仍需查询工具。看板读取失败时会记录错误，并明确告知 Agent 当前看板不可用。
 
 ### 新增看板与用户选择
 
-看板通过 `src/server/dashboard/registered.ts` 显式注册，网站和每日任务共用该注册入口。每个 `DashboardDefinition` 提供唯一 `id`、`loadInitial()` 和可选的 `update` 策略；ID 只能包含小写字母、数字、下划线和连字符，以字母开头，最多 64 个字符。重复或未知 ID 会报错，未指定 ID 时选择 `default`。
+看板通过 `src/server/dashboard/index.ts` 的 `createDashboardRegistry()` 显式注册，网站和每日任务共用该注册入口。每个 `DashboardDefinition` 提供唯一 `id`、`loadInitial()` 和可选的 `update(context)`；ID 只能包含小写字母、数字、下划线和连字符，以字母开头，最多 64 个字符。重复或未知 ID 会报错，未指定 ID 时选择 `default`。
 
 新增看板时，在独立目录中实现定义并加入注册表。快照使用各自的文件路径，例如 `.data/dashboards/production.json`；`readDashboardSnapshot` / `writeDashboardSnapshot` 提供通用结构校验、大小限制和原子发布，不要求固定卡片数量。初始快照 revision 必须为 0；文件缺失时使用什么兜底内容、额外业务校验及分析产物目录由各模块维护。
 
@@ -67,25 +75,23 @@ MT/ST 概览分别对各自 OEE 可计算业务日的五项指标等权平均，
 const productionDashboard: DashboardDefinition = {
   id: "production",
   loadInitial: () => readDashboardSnapshot(snapshotPath),
-  update: {
-    plan({ throughDate }) {
-      // 截止业务日为周六时更新，即通常在周日的每日任务中执行。
-      const due = new Date(throughDate + "T00:00:00Z").getUTCDay() === 6;
-      return { action: due ? "run" : "skip", reason: due ? null : "本周无需更新", outputPath: snapshotPath };
-    },
-    async run(context) {
-      const { buildProductionDashboard } = await import("./build.ts");
-      const state = await buildProductionDashboard(context);
-      writeDashboardSnapshot(snapshotPath, state);
-      return { status: "completed", published: true, dataAsOf: state.dataAsOf, reason: null };
-    },
+  async update(context) {
+    // 截止业务日为周六时更新，即通常在周日的每日任务中执行。
+    const due = new Date(context.throughDate + "T00:00:00Z").getUTCDay() === 6;
+    if (!due) {
+      return { status: "skipped", published: false, dataAsOf: null, reason: "本周无需更新" };
+    }
+    const { buildProductionDashboard } = await import("./build.ts");
+    const state = await buildProductionDashboard(context);
+    writeDashboardSnapshot(snapshotPath, state);
+    return { status: "completed", published: true, dataAsOf: state.dataAsOf, reason: null };
   },
 };
 ```
 
-`plan(context)` 必须无副作用，不访问 API 或数据库、不写文件和日志、不启动 Agent；dry-run 只调用该方法。`run(context)` 接收数据库路径、截止业务日、运行时间、同步警告、运行 ID 和日志对象，只能只读访问数据库；生成和校验成功后再发布。模块若有自己的分析或缓存文件，使用独立目录以避免相同运行 ID 下相互覆盖。省略 `update` 的看板仅用作初始模板。
+`update(context)` 接收数据库路径、截止业务日、运行时间、同步警告、运行 ID 和日志对象，由看板自行决定更新或返回 `skipped`。各看板维护自己的卡片计算、每日分析 Agent 和发布逻辑，只能只读访问数据库，生成和校验成功后再原子发布。分析或缓存文件使用独立目录，避免相同运行 ID 下相互覆盖。省略 `update` 的看板仅用作初始模板。注册和 `loadInitial()` 不启动更新或 Agent；dry-run 只列出注册信息，不调用 `loadInitial()` 或 `update()`。
 
-会话层使用注入的 `loadInitialDashboard(sessionId)` 获取初始快照。当前服务组装处传入 `() => dashboards.loadInitial()`；后续用户系统可在这里根据会话所属用户的配置调用 `dashboards.loadInitial(dashboardId)`，无需改动卡片编辑、版本冲突或重置逻辑。本次不增加用户存储、登录或看板选择界面，HTTP 契约及历史会话文件格式保持兼容。
+会话看板状态由 `src/server/agent/session-dashboard.ts` 维护，使用注入的 `loadInitialDashboard(sessionId)` 获取初始快照。当前服务组装处传入 `() => dashboards.loadInitial()`；后续用户系统可在这里根据会话所属用户的配置调用 `dashboards.loadInitial(dashboardId)`，无需改动卡片编辑、版本冲突或重置逻辑。网站对话 Agent 继续共用，HTTP 契约及历史会话文件格式保持兼容。
 
 ## 每日自动更新
 
@@ -97,15 +103,15 @@ npm run data:daily
 npm run data:daily -- --through-date 2026-09-14
 ```
 
-业务日为上海时间当天 08:30 至次日 08:30。任务在 08:30 后默认同步到昨天，之前同步到前天；显式截止日期也必须是已结束的业务日。`--dry-run` 仅显示计划、接口日期和目标文件，不访问 API，也不创建日志、锁或数据库文件。
+业务日为上海时间当天 08:30 至次日 08:30。任务在 08:30 后默认同步到昨天，之前同步到前天；显式截止日期也必须是已结束的业务日。`--dry-run` 仅显示数据库路径、同步请求和已注册看板的 `dashboardId`、`hasUpdate`（是否配置更新入口），不预测看板是否跳过，不访问 API，也不创建日志、锁或数据库文件。
 
 任务串行同步 Availability 和 DUT，复用现有补缺口、失败窗口重试和最近两天刷新机制。DUT 接口的请求起止日期均比目标业务日期晚一天，两张事实表原始日期保持不变。数据范围覆盖截止业务日所属年份的 1 月 1 日至截止日，以及最近完整周（必要时包含上一年）。
 
 数据库同步范围独立于看板配置，即使没有注册更新策略也照常同步。同步完成并关闭写入连接后，按注册顺序串行执行各看板策略。默认看板每次都更新，在同一个只读 SQLite 事务中重算 12 张卡片。业务周为周日至周六，周编号采用 `%U`，每年首个周日之前为 W00；例如 2026-W36 为 09-06 至 09-12。趋势每年从 1 月 1 日重新开始；最高/最低点排除 NULL，按未舍入值比较，并列取最早期间。改善清单分别对应最近完整周、截止业务日所在月累计和季度累计；最近完整周截至不晚于截止业务日的最近周六，向前覆盖七天。由临时 Agent 结合年内最低点与历史覆盖自主查询、判断并排序，不限制损失类别。顶层日期范围是年内趋势范围；部分周期、缺日和最新业务日未就绪会显示提示。已保存的历史会话和快照保留原日期与口径，新生成的周指标使用新定义。
 
-两个接口均成功时，即使数据缺失也继续执行看板策略并传递同步警告；默认看板发布已有结果，缺失指标保留 NULL。任何接口硬失败都会跳过全部看板，已完成的数据库导入仍保留审计记录。单个看板的计划、计算、验证或写入失败会保留其旧快照并继续更新后续看板，已发布的其他看板不回滚；每个看板的全部卡片一次性原子发布。
+两个接口均成功时，即使数据缺失也继续执行看板更新并传递同步警告；默认看板发布已有结果，缺失指标保留 NULL。任何接口硬失败都会跳过全部看板，已完成的数据库导入仍保留审计记录。单个看板的计算、验证或写入失败会保留其旧快照并继续更新后续看板，已发布的其他看板不回滚；每个看板的全部卡片一次性原子发布。
 
-命令结果包含 `database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、原因及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；策略正常跳过不计为警告。原有顶层 `published`、`dataAsOf` 和分析字段保留，始终映射默认看板的结果。dry-run 同时展示数据库请求与各看板的执行或跳过计划，不执行更新。
+每日调度由 `scripts/scheduling/daily-update.ts` 维护。命令结果包含总体 `status`、`throughDate`、`database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、`reason` 及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；正常跳过不计为警告。CLI 不再重复输出默认看板的顶层 `published`、`dataAsOf` 和分析字段；消费者应在 `dashboards` 中按 `dashboardId` 读取。dry-run 也不再输出默认看板路径和周期详情。
 
 ### 临时 Agent 改善分析
 
@@ -121,9 +127,9 @@ npm run data:daily -- --through-date 2026-09-14
 
 `SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、优先级和损失证据；`submit_analysis` 校验并保存完整草稿，返回 `draft_id`，再次完整提交会使旧 ID 失效。Agent 须在后续模型轮次逐条复核数值、机台、历史结论、日均分母及措施可行性，再调用 `finalize_analysis` 提交 `draft_id`、`verification` 和 `updates`。无修改时 `updates=[]`；`update_period` 修改比较说明，`update_item` 按周期、类型、原优先级修改条目，新增、删除及重排使用 `replace_group`。重复或冲突的修改被拒绝；合并后仍执行全部原有校验，失败不改变草稿。首次有效复核返回实际修改及完整合并结果、生成新的草稿 ID；Agent 必须在后续轮次核对复核说明中的修正已落实，再以 `updates=[]` 确认，若补交修改则再次确认。该短步骤避免“说明已修改、实际漏提交”的情况。压缩后可用 `get_analysis_draft` 按周期、类型读取服务端草稿。字段错误反馈包含路径及可获取的错误位置，不猜测修复损坏 JSON。
 
-模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。内置快照也不再附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
+模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。空数据模板不附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
 
-每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID 和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态、轮次和工具 ID、工具耗时、完整草稿、复核修改及压缩事件）、`metrics.json`（分阶段耗时、token、错误、重试及超时未完成区间）和有效的 `report.json`。模型耗时为客户端观测的等待与生成区间，可能包括重试和压缩，不代表服务端纯推理时间。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和产物路径，CLI 也保留这些顶层兼容字段；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
+每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID 和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态、轮次和工具 ID、工具耗时、完整草稿、复核修改及压缩事件）、`metrics.json`（分阶段耗时、token、错误、重试及超时未完成区间）和有效的 `report.json`。模型耗时为客户端观测的等待与生成区间，可能包括重试和压缩，不代表服务端纯推理时间。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和 `analysisArtifactDir`；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
 
 分析性能对照使用独立的旧版工作目录和一致数据库备份，不同步数据、不发布看板、不创建网站会话：
 
@@ -134,7 +140,7 @@ node --import tsx scripts/benchmark-daily-analysis.ts \
   --through-date 2026-09-16 --pairs 3
 ```
 
-旧版目录需包含原版本源码及可用依赖。脚本使用当前项目的同一模型配置和凭据，通过 SQLite backup 创建数据库副本；也可用 `--snapshot /path/to/backup.sqlite` 指定已有一致备份。按“旧/新、新/旧、旧/新”顺序串行运行，保存完整报告、证据、`evaluation.json` 和 `summary.json`。性能只比较成功运行的中位数，旧版成功不足两次时不认定提速目标；质量评审单独记录，不能仅凭耗时结果认定通过。评审核对关键数值、机台、日期和措施依据，以及旧版多次出现的有效高优先级问题是否得到保留或有证据的排除。
+旧版目录需包含原版本源码及可用依赖。对照脚本调用旧版的 `analysis/run.ts` 中的 `generateAnalyzedDashboard()`，当前版调用默认看板根目录 `run.ts` 中的 `generateDefaultDashboard()`。脚本使用当前项目的同一模型配置和凭据，通过 SQLite backup 创建数据库副本；也可用 `--snapshot /path/to/backup.sqlite` 指定已有一致备份。按“旧/新、新/旧、旧/新”顺序串行运行，保存完整报告、证据、`evaluation.json` 和 `summary.json`。性能只比较成功运行的中位数，旧版成功不足两次时不认定提速目标；质量评审单独记录，不能仅凭耗时结果认定通过。评审核对关键数值、机台、日期和措施依据，以及旧版多次出现的有效高优先级问题是否得到保留或有证据的排除。
 
 提交示例、回退边界和真实对照记录见 [临时 Agent 耗时优化与验收](docs/default-analysis-performance.md)。
 

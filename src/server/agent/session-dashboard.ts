@@ -32,7 +32,8 @@ import {
 } from "../../shared/dashboard.ts";
 import type { QueryResult } from "../database/database.ts";
 import type { ArtifactStore, SessionArtifactStore } from "../tool/artifact-store.ts";
-import type { InitialDashboardProvider } from "./definition.ts";
+
+export type InitialDashboardProvider = (sessionId: string) => DashboardState;
 
 const DASHBOARD_FILENAME = "dashboard.json";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;

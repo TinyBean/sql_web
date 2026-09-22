@@ -4,9 +4,9 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import test, { type TestContext } from "node:test";
 import { MAX_DASHBOARD_FILE_BYTES, parseDashboardState, type DashboardState } from "../../src/shared/dashboard.ts";
-import { DashboardRegistry } from "../../src/server/dashboard/registry.ts";
+import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { readDashboardSnapshot, writeDashboardSnapshot } from "../../src/server/dashboard/snapshot-store.ts";
-import { SessionDashboardStore } from "../../src/server/dashboard/session-store.ts";
+import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 
 function snapshot(kind: "kpi" | "table"): DashboardState {
@@ -45,8 +45,8 @@ test("registry selects isolated snapshots with different card structures and rej
   writeDashboardSnapshot(firstFile, { ...first, widgets: [] });
   assert.deepEqual(registry.loadInitial().widgets, []);
   assert.deepEqual(registry.loadInitial("production"), second);
-  assert.throws(() => registry.get("missing"), /未知看板/u);
-  assert.throws(() => new DashboardRegistry([registry.get(), registry.get()]), /重复/u);
+  assert.throws(() => registry.loadInitial("missing"), /未知看板/u);
+  assert.throws(() => new DashboardRegistry([registry.list()[0]!, registry.list()[0]!]), /重复/u);
   assert.throws(() => new DashboardRegistry([{ id: "../outside", loadInitial: () => first }]), /无效/u);
   assert.throws(() => new DashboardRegistry([{ id: "default", loadInitial: () => ({ ...first, revision: 1 }) }]).loadInitial(), /revision/u);
 });

@@ -3,17 +3,15 @@ import {
   createAgentSession, DefaultResourceLoader, defineTool, ModelRuntime, SessionManager, SettingsManager,
   type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { assertModelInLocalCatalog } from "../../../agent/local-model-catalog.ts";
 import { loadAgentSkillCatalog } from "../../../agent/skill-catalog.ts";
 import { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
 import type { DefaultDashboardAnalysisConfig } from "../config.ts";
 import { AnalysisEvidence, PERIOD_KEYS, type AnalysisContext, type Evidence } from "./evidence.ts";
-import { AnalysisReportSchema, parseAnalysisReport, PeriodKeySchema, validateAnalysisReport } from "./report.ts";
+import { AnalysisReportSchema, parseAnalysisReport, validateAnalysisReport } from "./report.ts";
 import { analysisBudget } from "./budget.ts";
 import { createAnalysisTools } from "./tools.ts";
 
-import { lossEvidenceOutput } from "./loss-output.ts";
 import { AnalysisDrafts, FinalizeAnalysisSchema, GetAnalysisDraftSchema, parseFinalizeAnalysis } from "./drafts.ts";
 
 export const MAX_ANALYSIS_TOOL_CALLS = 60;
@@ -49,7 +47,7 @@ export function analysisPrompt(context: AnalysisContext): string {
 结合年内对应粒度 Overall OEE 最低点及历史数据，解释问题是否持续、改善或新出现；
 comparison 中写比较结论、覆盖差异及可比性。minimum_evidence/history_evidence 填下面相应 evidence_id，
 group.evidence_ids 必须含本期 current.evidence_id。没有可计算最低点/历史时明确说明，不能虚构对比。
-阅读 Test OEE Skill 和两个 references 后，优先调用 measure_loss 分别查询三期全部损失状态，
+阅读 Test OEE Skill 和两个 references 后，优先调用 measure_loss 分别查询三期全部损失状态，start_date/end_date 必须使用下方 periods 中对应周期的 start/end（业务日闭区间），
 再按需要用 measure_loss(by_machine=true)、execute_sql 和 Skill SQL 工具自主调查机台、状态及组成项。
 数据库数据采用冻结快照传递。execute_sql 自动保存完整结果，measure_loss 和初始比较证据也附带 snapshot。
 measure_loss 的 view.mode=complete 表示全部结果，summary 包含全量派生统计及局部排名；优先直接使用这些确定性统计，不要仅为读取、排序、求和重复调用 Python。execute_sql 的预览不是完整结果：需要额外计算时将 snapshot.name（初始比较为 snapshot 字符串）传给 code_interpreter.snapshot，使用 snapshot_rows（list[dict]），不要手抄预览或把数据库数据塞进代码/user_input。
@@ -150,20 +148,6 @@ async function runSession(
   const output = (details: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(details) }], details });
   const tools = [
     ...createAnalysisTools(evidence, interpreter),
-    defineTool({
-      name: "measure_loss", label: "查询本期实测损失", executionMode: "sequential",
-      description: "Query all non-Machine_Running Availability states using canonical date/LOT/PCIe/MT/ST rules. No fixed category filter. Rows carry kind, state_group, optional machine, loss_hours, observed_days (days with that loss), kind_availability_days (all covered days of that type), selected_days, hours_per_kind_available_day and hours_per_selected_day. Use the same denominator for comparisons; loss occurrence days are NOT full period coverage. Only this tool can supply report loss_reference. states/machines optionally narrow the measurement. row_index is zero-based.",
-      parameters: Type.Object({
-        period: PeriodKeySchema,
-        states: Type.Optional(Type.Array(Type.String(), { maxItems: 40 })),
-        machines: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
-        by_machine: Type.Optional(Type.Boolean()),
-      }),
-      async execute(_id, params, signal) {
-        signal?.throwIfAborted();
-        return lossEvidenceOutput(evidence.measureLoss(params.period, context.periods[params.period], params.states, params.machines, params.by_machine));
-      },
-    }),
     defineTool({
       name: "submit_analysis", label: "保存三期分析草稿", executionMode: "sequential",
       description: "Save a complete validated draft, never publishes. Returns a new draft_id; previous ids expire. After receiving review instructions, review the evidence in a later model turn and use finalize_analysis with only updates and verification. Do not regenerate an unchanged report. Narrative must be business-readable Chinese; keep evidence references in structured fields.",

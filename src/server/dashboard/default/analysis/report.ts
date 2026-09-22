@@ -116,7 +116,7 @@ export function validateAnalysisReport(
           checkRefs([ref.evidence_id]);
           const measured = evidence.get(ref.evidence_id)!;
           const row = measured.rows[ref.row_index];
-          if (!item.evidence_ids.includes(ref.evidence_id) || measured.lossPeriod !== key ||
+          if (!item.evidence_ids.includes(ref.evidence_id) || measured.source !== "measure_loss" ||
               measured.range?.start !== context.periods[key].start || measured.range.end !== context.periods[key].end ||
               row?.["kind"] !== kind || typeof row["loss_hours"] !== "number") {
             throw new Error("损失小时必须引用 measure_loss 返回的本期同类型实测行");

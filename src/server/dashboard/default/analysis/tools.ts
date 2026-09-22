@@ -2,6 +2,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { normalizeDataSnapshotName } from "../../../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
 import { createAgentTools, createExecuteSqlTool, executeSqlParameters } from "../../../tool/database-tools.ts";
+import { createMeasureLossTool, MEASURE_LOSS_TOOL_NAME } from "../../../tool/loss-tools.ts";
 import type { AnalysisEvidence, Evidence } from "./evidence.ts";
 
 /** Full rows stay on disk and in the audit registry, not in model messages. */
@@ -14,7 +15,7 @@ export function evidenceOutput(record: Evidence) {
     preview.push({ row_index, row });
   }
   const details = {
-    evidence_id: record.id, range: record.range, loss_period: record.lossPeriod,
+    evidence_id: record.id, range: record.range, source: record.source,
     snapshot: record.snapshot ?? null, row_count: record.rows.length, truncated: record.truncated,
     preview: { rows: preview, truncated: preview.length < record.rows.length },
     pythonInput: { rows: "snapshot_rows", rowShape: "list[dict]", rowAccess: "row['column_name']",
@@ -28,7 +29,8 @@ export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: Cod
   if (!artifacts) throw new Error("每日分析需要独立的数据快照存储");
   const tool = createExecuteSqlTool(evidence.queries, artifacts);
   return [
-    ...createAgentTools(evidence.queries, artifacts, interpreter).filter((entry) => entry.name !== "execute_sql"),
+    ...createAgentTools(evidence.queries, artifacts, interpreter).filter((entry) => entry.name !== "execute_sql" && entry.name !== MEASURE_LOSS_TOOL_NAME),
+    createMeasureLossTool(evidence.queries, artifacts, (measurement) => evidence.recordLoss(measurement).id),
     defineTool<typeof executeSqlParameters, ReturnType<typeof evidenceOutput>["details"]>({
       ...tool,
       parameters: executeSqlParameters,

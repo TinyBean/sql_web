@@ -1,5 +1,5 @@
-import type { DashboardRow } from "../../../../shared/dashboard.ts";
-import type { Evidence } from "./evidence.ts";
+import type { DashboardRow } from "../../shared/dashboard.ts";
+import type { LossResult } from "./loss-tools.ts";
 
 export const LOSS_VIEW_BYTES = 12 * 1024;
 const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(value));
@@ -15,7 +15,7 @@ const denominator = (rows: readonly DashboardRow[], key: string): number | null 
 };
 
 /** Derived totals never gain row indices. Only original rows can supply display hours. */
-export function lossView(record: Evidence) {
+export function lossView(record: LossResult) {
   const indexed = record.rows.map((row, row_index) => ({ row_index, row }));
   if (record.truncated) return { mode: "unavailable" as const, rows_complete: false,
     reason: "原始证据被截断，不能生成全量统计或用于报告；请缩小查询范围" };
@@ -58,9 +58,9 @@ export function lossView(record: Evidence) {
   return summary;
 }
 
-export function lossEvidenceOutput(record: Evidence) {
-  const details = { evidence_id: record.id, range: record.range, loss_period: record.lossPeriod,
-    scope: record.lossScope, snapshot: record.snapshot ?? null, row_count: record.rows.length,
+export function lossOutput(record: LossResult, evidenceId?: string) {
+  const details = { ...(evidenceId === undefined ? {} : { evidence_id: evidenceId }), range: record.range,
+    scope: record.scope, snapshot: record.snapshot ?? null, row_count: record.rows.length,
     truncated: record.truncated, view: lossView(record),
     next_step: "complete 视图已含全部结果，summary 已含全量计算的合计和局部排名；可直接分析。额外调查才用 SQL/Python。需要更多明细时按 snapshot.name 读取，保留原始 row_index。" };
   return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };

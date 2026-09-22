@@ -26,9 +26,9 @@ import { createDefaultDashboard } from "../../src/server/dashboard/default/templ
 import type { AppLogger } from "../../src/server/logger.ts";
 
 import { AnalysisDrafts } from "../../src/server/dashboard/default/analysis/drafts.ts";
-import { lossEvidenceOutput, LOSS_VIEW_BYTES } from "../../src/server/dashboard/default/analysis/loss-output.ts";
+import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.ts";
+import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.ts";
 import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
-import type { Evidence } from "../../src/server/dashboard/default/analysis/evidence.ts";
 
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
 
@@ -90,7 +90,7 @@ test("daily queries reuse shared tools and freeze complete evidence without copy
   const artifacts = new SessionArtifactStore(directory, "test-snapshots");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-12");
-  const loss = evidence.measureLoss("week", context.periods.week, [], [], true);
+  const loss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, { start_date: context.periods.week.start, end_date: context.periods.week.end, by_machine: true }));
   assert.equal(loss.rows.length, 207);
   assert.equal(loss.truncated, false);
   const preview = evidenceOutput(loss);
@@ -177,19 +177,20 @@ test("daily model budgets respect deployment limits and reserve compaction/outpu
 });
 
 test("analysis evidence shares the metrics snapshot and validates six unchanged columns and actual measured hours", (t) => {
-  const { config, connections } = fixture(t);
+  const { config, directory, connections } = fixture(t);
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
   database.exec("BEGIN");
   const base = buildDefaultDashboardInTransaction(database, "2026-01-12");
-  const evidence = new AnalysisEvidence(database);
+  const artifacts = new SessionArtifactStore(directory, "test-snapshots");
+  const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-12");
   assert.deepEqual(context.comparisons.week.minimum.range, { start: "2026-01-01", end: "2026-01-03" });
   assert.deepEqual(context.comparisons.week.current.range, { start: "2026-01-04", end: "2026-01-10" });
   const writer = new DatabaseSync(config.databasePath);
   writer.prepare("UPDATE oee_availability SET time_span=18000 WHERE final_state='Conversion'").run();
   writer.close();
-  const loss = evidence.measureLoss("week", context.periods.week);
+  const loss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, { start_date: context.periods.week.start, end_date: context.periods.week.end }));
   assert.equal(loss.rows[0]?.["state_group"], "Conversion");
   assert.equal(loss.rows[0]?.["loss_hours"], 2.5, "reads the original transaction snapshot after concurrent changes");
   assert.equal(loss.rows[0]?.["hours_per_kind_available_day"], 2.5);
@@ -226,11 +227,33 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   reject((r) => { r.periods[0]!.minimum_evidence = "invalid"; }, /最低点/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.evidence_ids = ["invalid"]; }, /证据不存在/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.loss_reference!.row_index = 1; }, /同类型/u);
+  reject((r) => { r.periods[0]!.groups[0]!.items[0]!.loss_reference!.row_index = 999; }, /同类型/u);
   reject((r) => { r.periods[1]!.groups[0]!.items[0] = structuredClone(item); }, /本期/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.category = "yield"; }, /不得折算/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.priority = 2; }, /连续/u);
   reject((r) => { r.periods.pop(); }, /结构无效/u);
   reject((r) => { r.periods[0]!.groups[0]!.items = []; }, /空清单/u);
+  const ordinarySql = evidence.query(loss.sql, loss.parameters);
+  evidence.records.set(ordinarySql.id, { ...ordinarySql, range: loss.range! });
+  reject((r) => {
+    const target = r.periods[0]!.groups[0]!.items[0]!;
+    target.evidence_ids.push(ordinarySql.id);
+    target.loss_reference = { evidence_id: ordinarySql.id, row_index: 0 };
+  }, /measure_loss/u);
+  const monthLoss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, {
+    start_date: context.periods.month.start, end_date: context.periods.month.end,
+  }));
+  assert.deepEqual(context.periods.month, context.periods.quarter);
+  const overlapping = structuredClone(report);
+  for (const period of overlapping.periods.filter((entry) => entry.period !== "week")) {
+    const target = period.groups[0]!.items[0]!;
+    target.category = "availability";
+    target.evidence_ids.push(monthLoss.id);
+    target.loss_reference = { evidence_id: monthLoss.id, row_index: 0 };
+  }
+  const validated = validateAnalysisReport(overlapping, context, evidence.records);
+  assert.equal(validated.rows.month[0]?.["loss_hours"], 7.5);
+  assert.equal(validated.rows.quarter[0]?.["loss_hours"], 7.5, "matching ranges share standard loss evidence across periods");
   assert.throws(() => evidence.query("DELETE FROM oee_availability"), /只读/u);
   assert.throws(() => evidence.query("ATTACH DATABASE ':memory:' AS another"));
   assert.throws(() => evidence.query("PRAGMA query_only=OFF"));
@@ -409,7 +432,10 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
     if (turn === 1) return [
       toolCall(0, "read", { path: path.join(directory, "outside.txt") }),
       toolCall(1, "execute_sql", { sql: "DELETE FROM oee_availability" }),
-      ...PERIOD_KEYS.map((period, index) => toolCall(index + 2, "measure_loss", { period })),
+      ...PERIOD_KEYS.map((period, index) => {
+        const context = JSON.parse(readFileSync(path.join(config.analysis.artifactDir, "mock-analysis", "context.json"), "utf8")) as AnalysisContext;
+        return toolCall(index + 2, "measure_loss", { start_date: context.periods[period].start, end_date: context.periods[period].end });
+      }),
     ];
     const runDir = path.join(config.analysis.artifactDir, "mock-analysis");
     if (turn >= 4) assert.equal(existsSync(path.join(runDir, "report.json")), false, "unreadable prose, unreviewed drafts and unconfirmed updates cannot be published");
@@ -418,7 +444,7 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
     if (turn >= 5) report.verification = "已逐条复核原始查询：换线小时与本期同类型证据一致，未把损失出现日数当作全期天数；责任为职能建议。";
     for (const period of report.periods) {
       const all = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-      const loss = all.find((entry) => entry.lossPeriod === period.period);
+      const loss = all.find((entry) => entry.source === "measure_loss" && entry.range.start === context.periods[period.period].start && entry.range.end === context.periods[period.period].end);
       for (const group of period.groups) {
         const rowIndex = loss.rows.findIndex((row: Record<string, unknown>) => row["kind"] === group.kind);
         const item = group.items[0]!;
@@ -502,7 +528,7 @@ test("ephemeral analysis compacts context and restores snapshot references and d
       if (turn === 4) return "草稿分析已完成。";
       if (turn === 5) {
         assert.match(messages, /当前已有有效草稿/u, "prose-only completion is repaired using the saved draft");
-        return [toolCall(0, "measure_loss", { period: "week", states: ["Conversion"] })];
+        return [toolCall(0, "measure_loss", { start_date: context.periods.week.start, end_date: context.periods.week.end, states: ["Conversion"] })];
       }
       return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: report.verification, updates: [] })];
     }
@@ -581,13 +607,13 @@ test("loss views preserve original row references and compute scoped statistics 
   const rows = Array.from({ length: 40 }, (_, i) => ({ kind: i % 2 ? "ST" : "MT", state_group: i % 4 < 2 ? "PM" : "Conversion",
     machine: "M" + String(40 - i).padStart(2, "0"), loss_hours: i === 0 ? 10.004 : 10,
     observed_days: 1, kind_availability_days: 5, selected_days: 7 }));
-  const record: Evidence = { id: "q11", sql: "SELECT", parameters: [], rows, truncated: false,
-    lossPeriod: "week", range: { start: "2026-01-05", end: "2026-01-11" },
-    lossScope: { states: ["PM", "Conversion"], machines: [], byMachine: true } };
-  const full = lossEvidenceOutput({ ...record, rows: rows.slice(0, 12) }).details;
+  const record: LossResult = { rows, truncated: false,
+    range: { start: "2026-01-05", end: "2026-01-11" },
+    scope: { states: ["PM", "Conversion"], machines: [], byMachine: true } };
+  const full = lossOutput({ ...record, rows: rows.slice(0, 12) }).details;
   assert.ok(full.view.mode === "complete");
   assert.deepEqual(full.view.rows?.map((r) => r.row_index), Array.from({ length: 12 }, (_, i) => i));
-  const output = lossEvidenceOutput(record).details;
+  const output = lossOutput(record).details;
   assert.ok(output.view.mode === "summary");
   const mt = output.view.by_kind![0]!;
   assert.equal(mt.kind_availability_days, 5);
@@ -598,27 +624,27 @@ test("loss views preserve original row references and compute scoped statistics 
   assert.ok(Math.abs(mt.state_totals.reduce((sum, state) => sum + state.share_percent!, 0) - 100) < 1e-8);
   for (const state of mt.state_totals) assert.equal(state.hours_per_kind_available_day, state.loss_hours! / 5);
   for (const entry of output.view.by_kind!.flatMap((kind) => kind.ranking)) assert.deepEqual(entry.row, rows[entry.row_index]);
-  assert.deepEqual(output.scope, record.lossScope);
+  assert.deepEqual(output.scope, record.scope);
   const st = output.view.by_kind![1]!;
   assert.equal(st.loss_hours, 200);
   assert.equal(st.ranking.length, 10, "both types receive their own top ten");
-  assert.equal(lossEvidenceOutput({ ...record, rows: rows.slice(0, 32) }).details.view.mode, "complete");
-  assert.equal(lossEvidenceOutput({ ...record, rows: rows.slice(0, 33) }).details.view.mode, "summary");
-  const ties = lossEvidenceOutput({ ...record, rows: rows.map((r) => ({ ...r, machine: "same", loss_hours: 10 })) }).details.view;
+  assert.equal(lossOutput({ ...record, rows: rows.slice(0, 32) }).details.view.mode, "complete");
+  assert.equal(lossOutput({ ...record, rows: rows.slice(0, 33) }).details.view.mode, "summary");
+  const ties = lossOutput({ ...record, rows: rows.map((r) => ({ ...r, machine: "same", loss_hours: 10 })) }).details.view;
   assert.ok(ties.mode === "summary");
   assert.equal(ties.by_kind![0]!.ranking[0]!.row["state_group"], "Conversion", "machine ties use state name");
-  const zero = lossEvidenceOutput({ ...record, rows: rows.map((r) => ({ ...r, loss_hours: 0, kind_availability_days: 0 })) });
+  const zero = lossOutput({ ...record, rows: rows.map((r) => ({ ...r, loss_hours: 0, kind_availability_days: 0 })) });
   assert.ok(zero.details.view.mode === "summary");
   assert.ok(zero.details.view.by_kind!.every((g) => g.state_totals.every((state) => state.share_percent === null && state.hours_per_kind_available_day === null)));
-  const inconsistent = lossEvidenceOutput({ ...record, rows: rows.map((r, i) => ({ ...r, kind_availability_days: i < 2 ? 4 : 5 })) }).details.view;
+  const inconsistent = lossOutput({ ...record, rows: rows.map((r, i) => ({ ...r, kind_availability_days: i < 2 ? 4 : 5 })) }).details.view;
   assert.ok(inconsistent.mode === "summary");
   assert.ok(inconsistent.by_kind!.every((g) => g.kind_availability_days === null && g.state_totals.every((s) => s.hours_per_kind_available_day === null)));
-  const missing = lossEvidenceOutput({ ...record, rows: [] }).details;
+  const missing = lossOutput({ ...record, rows: [] }).details;
   assert.equal(missing.view.mode, "complete");
-  const truncated = lossEvidenceOutput({ ...record, truncated: true }).details;
+  const truncated = lossOutput({ ...record, truncated: true }).details;
   assert.equal(truncated.view.mode, "unavailable");
   assert.equal("by_kind" in truncated.view, false);
-  const huge = lossEvidenceOutput({ ...record, rows: rows.map((r, i) => ({ ...r, machine: "M".repeat(1000) + i, state_group: "S".repeat(1000) + i })) }).details;
+  const huge = lossOutput({ ...record, rows: rows.map((r, i) => ({ ...r, machine: "M".repeat(1000) + i, state_group: "S".repeat(1000) + i })) }).details;
   assert.ok(Buffer.byteLength(JSON.stringify(huge.view)) <= LOSS_VIEW_BYTES);
   assert.equal(huge.view.rows_complete, false);
   assert.ok(huge.view.mode === "summary");

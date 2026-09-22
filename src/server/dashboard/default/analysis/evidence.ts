@@ -2,9 +2,10 @@ import { readFileSync, writeSync } from "node:fs";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { AppDatabase, assertReadOnlyQuery, type SqlParameter } from "../../../database/database.ts";
 import { MAX_QUERY_ARTIFACT_BYTES, type DataSnapshotDescriptor, type SessionArtifactStore } from "../../../tool/artifact-store.ts";
-import { getDefaultTestOeeSql, getTestOeeSqlExpressions } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { dashboardPeriods, weekLabel } from "../periods.ts";
 import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
+import type { LossMeasurement, LossScope } from "../../../tool/loss-tools.ts";
 import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
 
 export const PERIOD_KEYS = ["week", "month", "quarter"] as const;
@@ -17,8 +18,8 @@ export interface Evidence {
   readonly truncated: boolean;
   readonly sourceId?: string;
   readonly range?: DatePeriod;
-  readonly lossPeriod?: PeriodKey;
-  readonly lossScope?: { readonly states: readonly string[]; readonly machines: readonly string[]; readonly byMachine: boolean };
+  readonly source?: "measure_loss";
+  readonly lossScope?: LossScope;
   readonly snapshot?: DataSnapshotDescriptor;
 }
 
@@ -89,7 +90,7 @@ export class AnalysisEvidence {
   catalog() {
     return [...this.records.values()].map((record) => ({
       evidence_id: record.id, snapshot: record.snapshot?.name ?? null, row_count: record.rows.length,
-      truncated: record.truncated, range: record.range, loss_period: record.lossPeriod, loss_scope: record.lossScope,
+      truncated: record.truncated, range: record.range, source: record.source, loss_scope: record.lossScope,
     }));
   }
 
@@ -143,41 +144,13 @@ export class AnalysisEvidence {
     return { throughDate, periods, comparisons, dashboard: state };
   }
 
-  measureLoss(
-    periodKey: PeriodKey, period: DatePeriod,
-    states: readonly string[] = [], machines: readonly string[] = [], byMachine = false,
-  ): Evidence {
-    const e = getTestOeeSqlExpressions("availability", period.start, period.end, "a");
-    const predicates: string[] = ["kind IN ('MT','ST')", "state_group <> 'Machine_Running'"];
-    const parameters: SQLInputValue[] = [];
-    if (states.length) {
-      predicates.push("state_group IN (" + states.map(() => "?").join(",") + ")");
-      parameters.push(...states);
-    }
-    if (machines.length) {
-      predicates.push("machine IN (" + machines.map(() => "?").join(",") + ")");
-      parameters.push(...machines);
-    }
-    const sql = `WITH facts AS (
-      SELECT ${e.dayExpression} AS day, ${e.kindExpression} AS kind,
-        ${e.availabilityStateExpression} AS state_group, a.tool_name AS machine,
-        CAST(a.time_span AS REAL) AS seconds
-      FROM oee_availability a
-      WHERE ${e.dateRangePredicate} AND ${e.lotPredicate} AND ${e.platformPredicate}
-    ), coverage AS (
-      SELECT kind, COUNT(DISTINCT day) AS available_days FROM facts GROUP BY kind
-    ), losses AS (SELECT kind, state_group, ${byMachine ? "machine," : ""}
-      SUM(seconds)/3600.0 AS loss_hours, COUNT(*) AS records, COUNT(DISTINCT day) AS observed_days
-    FROM facts WHERE ${predicates.join(" AND ")}
-    GROUP BY kind, state_group${byMachine ? ", machine" : ""}
-    ) SELECT losses.*, coverage.available_days AS kind_availability_days,
-      ${(Date.parse(period.end) - Date.parse(period.start)) / 86_400_000 + 1} AS selected_days,
-      loss_hours / NULLIF(coverage.available_days, 0) AS hours_per_kind_available_day,
-      loss_hours / ${(Date.parse(period.end) - Date.parse(period.start)) / 86_400_000 + 1} AS hours_per_selected_day
-    FROM losses JOIN coverage USING (kind)
-    ORDER BY kind, loss_hours DESC, state_group${byMachine ? ", machine" : ""}`;
-    // Only this program-generated measurement can supply display hours.
-    return this.#save({ ...this.#read(sql, parameters, 100_000), lossPeriod: periodKey, range: period,
-      lossScope: { states: [...states], machines: [...machines], byMachine } });
+  /** Only the shared standard measurement path can mark report loss references. */
+  recordLoss(measurement: LossMeasurement): Evidence {
+    return this.#save({
+      sql: measurement.sql,
+      parameters: measurement.parameters.map((value) => typeof value === "boolean" ? Number(value) : value),
+      rows: measurement.rows, truncated: false, snapshot: measurement.snapshot,
+      range: measurement.range, lossScope: measurement.scope, source: "measure_loss",
+    });
   }
 }

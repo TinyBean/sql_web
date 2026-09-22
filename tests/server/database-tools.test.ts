@@ -52,7 +52,7 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
     projectRoot: directory,
   });
   const tools = createAgentTools(database, artifacts, runtime) as readonly CallableTool[];
-  assert.deepEqual(tools.map((tool) => tool.name), ["execute_sql", "get_current_time"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["execute_sql", "get_current_time", "measure_loss"]);
   const executeSql = tools.find((tool) => tool.name === "execute_sql");
   assert.ok(executeSql);
   assert.equal(JSON.stringify(executeSql.parameters).includes("output_format"), false);

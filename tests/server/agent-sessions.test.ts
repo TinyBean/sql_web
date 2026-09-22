@@ -69,6 +69,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "measure_loss",
     "get_dashboard",
     "update_dashboard",
   ]);
@@ -78,6 +79,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "measure_loss",
     "get_dashboard",
     "update_dashboard",
   ]);
@@ -111,7 +113,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /Dashboard 使用说明:/u);
   assert.match(
     piSession.systemPrompt,
-    /标准流程固定为 get_dashboard → execute_sql\(save_as\) → update_dashboard/u,
+    /标准流程为 get_dashboard → 查询并保存快照 → update_dashboard/u,
   );
   assert.match(piSession.systemPrompt, /kpi 用于单值,line 用于有序趋势/u);
   assert.match(piSession.systemPrompt, /format\.unit 只是显示后缀,不会缩放数值/u);
@@ -210,6 +212,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "measure_loss",
     "get_dashboard",
     "update_dashboard",
     "test_oee_calculator__get_default_sql",
@@ -279,6 +282,15 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     true,
   );
 
+  const lossTool = piSession.getToolDefinition("measure_loss");
+  assert.ok(lossTool);
+  const lossParams = { start_date: "2026-01-01", end_date: "2026-01-03" };
+  const lossResult = await lossTool.execute("measure-loss", lossParams, undefined, undefined, undefined as never);
+  const measured = JSON.parse(lossResult.content.find((part) => part.type === "text")!.text);
+  assert.equal(measured.snapshot.name, "loss-20260101-20260103");
+  assert.equal(measured.view.mode, "complete");
+  assert.deepEqual(measured.view.rows, []);
+
   const restoredRuntime = await CodeInterpreterRuntime.create({
     pythonPath: path.join(directory, "missing-python"),
     bwrapPath: path.join(directory, "missing-bwrap"),
@@ -297,6 +309,13 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     email: { host: "127.0.0.1", port: 25, fromAddress: '"JV OEE Agent"@sdsscn.com', fromName: "JV OEE Agent" },
   });
   const restoredSession = await restoredStore.get(created.id);
+  assert.ok(restoredStore.status().tools.includes("measure_loss"));
+  assert.ok(restoredSession.getActiveToolNames().includes("measure_loss"));
+  const restoredLossTool = restoredSession.getToolDefinition("measure_loss");
+  assert.ok(restoredLossTool);
+  const restoredLoss = await restoredLossTool.execute("restored-loss", lossParams, undefined, undefined, undefined as never);
+  assert.equal(JSON.parse(restoredLoss.content.find((part) => part.type === "text")!.text).snapshot.name, measured.snapshot.name + "-2");
+  assert.ok(artifacts.forSession(created.id).resolveDataSnapshot(measured.snapshot.name));
   assert.ok(restoredStore.status().tools.includes("send_email"));
   assert.ok(restoredSession.getActiveToolNames().includes("send_email"));
   assert.ok(restoredSession.getToolDefinition("send_email"));
@@ -317,6 +336,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "read",
     "execute_sql",
     "get_current_time",
+    "measure_loss",
     "get_dashboard",
     "update_dashboard",
   ]);

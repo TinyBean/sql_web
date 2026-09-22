@@ -5,7 +5,7 @@ description: 使用固定 LOT、PCIe 平台排除、MT/ST、Machine_Running、Id
 
 # Test OEE 与 Effective OEE 计算
 
-本技能不直接连接数据库。规则工具只生成或验证确定性的 SQL 和分类结果；数据库事实必须来自 `execute_sql`。
+本技能不直接连接数据库。规则工具只生成或验证确定性的 SQL 和分类结果；数据库事实必须来自 `execute_sql` 或公共工具 `measure_loss`。
 
 ## 工作流
 
@@ -17,8 +17,9 @@ description: 使用固定 LOT、PCIe 平台排除、MT/ST、Machine_Running、Id
 6. 核对默认 SQL 返回的每个所选业务日均有 MT、ST 两行，并检查 `availability_rows`、`machine_count`、`dut_rows`、`calculable_day_count`、`effective_calculable_day_count` 和 `selected_day_count`。Effective OEE 的可计算日可能少于 Test OEE；概览使用[Effective OEE 概览字段映射](references/business-rules.md#effective-oee-概览字段映射)中的独立组成项及覆盖计数。缺数据和不可计算项必须明确警告，不能视为 0 或完整覆盖。
 7. 用户临时修改日期范围以外的计算规则时，不使用默认 SQL。分别为 Availability 和 DUT 调用 `test_oee_calculator__get_sql_expressions`，传入相同日期与对应表别名；原样复用返回的日期、LOT、平台、MT/ST 和状态表达式，仅改动用户指定的部分。回答中列出与默认口径的差异。
 8. 优先让 SQLite 在同一条查询中完成过滤、聚合、窗口排序、比率、连接和乘积。所有分母用 `CASE` 防止除零；不舍入中间值，不封顶或静默修正源值。
-9. 只有同一条 SQL 无法完成所需统计或需要 PNG 时才使用 `code_interpreter`。先由 `execute_sql.save_as` 保存完整、未截断的查询结果，再传规范快照名；不得复制 SQL 预览或数据库数字到 Python 字面量。优先直接遍历 `snapshot_rows`；它是 `list[dict]`，用 `row["列名"]` 取值，严禁再用 `zip(columns, row)` 重建。代码必须调用一次 `emit_result`，并在空集合、首项、`min`/`max` 和除法前处理空值。
-10. 回答时说明业务日范围、实际覆盖、连接粒度、公式、各项分子分母以及多日实际纳入的日数。分母为零或必要输入缺失表示“无法计算”，不是 0%。解释和界面展示使用 `Performance (DUT-On)` 和 `Performance (Test Time)`。
+9. 查询默认口径的状态损失时，优先使用公共工具 `measure_loss`，传入业务日闭区间 `start_date`、`end_date`，可选 `states`、`machines`、`by_machine`。它自动保存完整快照并返回 `snapshot.name`；小结果直接展示全部行，大结果返回当前筛选范围的 MT/ST 合计、状态占比和排名。覆盖分母仍是该类型全部有效 Availability 业务日，不能使用损失出现日数或累加机台天数代替。空结果不能当作零损失或完整覆盖。用户修改固定口径时改用规则 SQL 表达式和 `execute_sql`。快照可直接交给 `update_dashboard` 或 `code_interpreter`，无需为读取或求和重复调用 Python。
+10. 只有同一条 SQL 无法完成所需统计或需要 PNG 时才使用 `code_interpreter`。先由 `execute_sql.save_as` 或 `measure_loss` 保存完整、未截断的查询结果，再传规范快照名；不得复制 SQL 预览或数据库数字到 Python 字面量。优先直接遍历 `snapshot_rows`；它是 `list[dict]`，用 `row["列名"]` 取值，严禁再用 `zip(columns, row)` 重建。代码必须调用一次 `emit_result`，并在空集合、首项、`min`/`max` 和除法前处理空值。
+11. 回答时说明业务日范围、实际覆盖、连接粒度、公式、各项分子分母以及多日实际纳入的日数。分母为零或必要输入缺失表示“无法计算”，不是 0%。解释和界面展示使用 `Performance (DUT-On)` 和 `Performance (Test Time)`。
 
 ## 固定规则工具
 

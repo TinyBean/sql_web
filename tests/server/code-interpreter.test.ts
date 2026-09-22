@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import {
   CodeInterpreterRuntime,
   formatCodeInterpreterResult,
@@ -165,6 +166,25 @@ test("saves a query snapshot and reuses it in Python without passing SQL", async
     assert.equal(storedFiles.includes(savedPayload.snapshot.name), false);
     assert.equal(storedFiles.includes("snapshots.json"), true);
     assert.equal(storedFiles.filter((name) => /^[0-9a-f-]+\.json$/u.test(name)).length, 1);
+    const writer = new DatabaseSync(filePath);
+    try {
+      writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES('MT-01','P1','Conversion','5000','2026-01-01',7200)").run();
+    } finally {
+      writer.close();
+    }
+    const loss = tools.find((tool) => tool.name === "measure_loss");
+    assert.ok(loss);
+    const measured = await loss.execute("loss-snapshot", {
+      start_date: "2026-01-01", end_date: "2026-01-03",
+    }, undefined, undefined, undefined as never);
+    const lossSnapshot = JSON.parse(measured.content[0]?.text ?? "{}").snapshot.name;
+    const lossCalculation = await interpreter.execute("loss-python", {
+      snapshot: lossSnapshot,
+      code: "emit_result(metrics={'hours': sum(row['loss_hours'] for row in snapshot_rows)})",
+    }, undefined, undefined, undefined as never);
+    const lossPayload = JSON.parse(lossCalculation.content[0]?.text ?? "{}");
+    assert.equal(lossPayload.result.metrics.hours, 2);
+    assert.equal(lossPayload.provenance.snapshotName, lossSnapshot);
   } finally {
     database.close();
   }

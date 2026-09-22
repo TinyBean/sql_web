@@ -285,7 +285,7 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
     name: "update_dashboard",
     label: "更新指标看板",
     description:
-      "Atomically update the current session dashboard. For upsert, reference one complete session snapshot created by execute_sql.save_as and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. For an overview, set encoding.label and encoding.description to match its actual metric, period, and aggregation; never assume seven days or OEE. SQL must aggregate and sort the snapshot first. format.unit is a suffix only and never rescales values: with %, the snapshot must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
+      "Atomically update the current session dashboard. For upsert, reference one complete session snapshot created by execute_sql.save_as or measure_loss and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. For an overview, set encoding.label and encoding.description to match its actual metric, period, and aggregation; never assume seven days or OEE. Use SQL or the standard loss query to aggregate and sort the snapshot first. format.unit is a suffix only and never rescales values: with %, the snapshot must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
     promptSnippet: "按快照名和列映射原子更新当前会话看板",
     executionMode: "sequential",
     parameters: updateParameters,

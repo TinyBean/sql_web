@@ -16,13 +16,14 @@ import {
 } from "./code-interpreter.ts";
 import type { AppDatabase } from "../database/database.ts";
 import type { QueryResult } from "../database/database.ts";
+import { createMeasureLossTool, MEASURE_LOSS_TOOL_NAME } from "./loss-tools.ts";
 import type { SessionDashboardStore } from "../dashboard/session-store.ts";
 import {
   createDashboardTools,
   DASHBOARD_AGENT_TOOL_NAMES,
 } from "./dashboard-tools.ts";
 
-export const BASE_AGENT_TOOL_NAMES = ["execute_sql", "get_current_time"] as const satisfies
+export const BASE_AGENT_TOOL_NAMES = ["execute_sql", "get_current_time", MEASURE_LOSS_TOOL_NAME] as const satisfies
   readonly AgentToolName[];
 export const ALL_AGENT_TOOL_NAMES = [
   ...BASE_AGENT_TOOL_NAMES,
@@ -233,7 +234,7 @@ export function createAgentTools(
     },
   });
 
-  const tools = [executeSqlTool, currentTimeTool];
+  const tools = [executeSqlTool, currentTimeTool, createMeasureLossTool(database, artifacts)];
   if (dashboardContext) {
     tools.push(...createDashboardTools(dashboardContext.dashboard, dashboardContext.sessionId));
   }
@@ -242,14 +243,14 @@ export function createAgentTools(
     name: "code_interpreter",
     label: "执行可信数据分析",
     description:
-      "Execute Python in a strict, network-disabled sandbox for calculations, statistics, or PNG rendering. Optionally pass one session-scoped logical snapshot name from execute_sql.save_as. With a snapshot, use the pre-injected snapshot_rows directly: it is list[dict], so read values with row['column_name']; rows are already objects and must never be rebuilt with zip(columns, row). input_data supports both input_data.database and input_data['database']; without a snapshot, input_data.database is None and snapshot_rows is empty. input_data.user contains optional user_input. The tool never accepts or executes SQL. Call emit_result exactly once; it accepts a JSON value or summary/metrics/intermediates/data/notes keyword fields, supplies a default summary, and normalizes a string note into a list. print() is only for debug logs and does not replace emit_result. Guard empty collections before min/max or indexing. Every image must be emitted explicitly with emit_image(value, reference_name), where reference_name is a meaningful, specific English ASCII name whose normalized length does not exceed 50 characters, such as oee-ranking or availability-trend. Spaces and punctuation are normalized to lowercase hyphens; purely numeric, random, or generic names are not allowed. Matplotlib is configured for Simplified Chinese. matplotlib_chinese_font and chinese_font are pre-injected globals, not Python modules; never import them. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
+      "Execute Python in a strict, network-disabled sandbox for calculations, statistics, or PNG rendering. Optionally pass one session-scoped logical snapshot name from execute_sql.save_as or measure_loss. With a snapshot, use the pre-injected snapshot_rows directly: it is list[dict], so read values with row['column_name']; rows are already objects and must never be rebuilt with zip(columns, row). input_data supports both input_data.database and input_data['database']; without a snapshot, input_data.database is None and snapshot_rows is empty. input_data.user contains optional user_input. The tool never accepts or executes SQL. Call emit_result exactly once; it accepts a JSON value or summary/metrics/intermediates/data/notes keyword fields, supplies a default summary, and normalizes a string note into a list. print() is only for debug logs and does not replace emit_result. Guard empty collections before min/max or indexing. Every image must be emitted explicitly with emit_image(value, reference_name), where reference_name is a meaningful, specific English ASCII name whose normalized length does not exceed 50 characters, such as oee-ranking or availability-trend. Spaces and punctuation are normalized to lowercase hyphens; purely numeric, random, or generic names are not allowed. Matplotlib is configured for Simplified Chinese. matplotlib_chinese_font and chinese_font are pre-injected globals, not Python modules; never import them. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
     promptSnippet: "在严格 Python 沙箱中计算或绘图,可按逻辑名称读取一个会话级数据快照",
     executionMode: "sequential",
     parameters: Type.Object({
       code: Type.String({ description: "Python source code to execute.", maxLength: 20_000 }),
       snapshot: Type.Optional(Type.String({
         description:
-          "Logical data snapshot name returned by execute_sql.save_as. Omit for Python that does not need database data.",
+          "Logical data snapshot name returned by execute_sql.save_as or measure_loss. Omit for Python that does not need database data.",
         minLength: 1,
         maxLength: 64,
       })),

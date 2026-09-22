@@ -197,6 +197,15 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
   assert.match(codeInterpreter.description, /logical snapshot name/u);
   assert.match(codeInterpreter.description, /emit_result exactly once/u);
 
+  const childTools = createAgentTools(database, artifacts, availableRuntime, new Set(), undefined, true) as readonly CallableTool[];
+  const childPython = childTools.find((tool) => tool.name === "code_interpreter")!;
+  assert.match(childPython.description, /emit_image is forbidden/u);
+  await assert.rejects(childPython.execute("child-image", { code: "render", snapshot: "oee-总计" }, undefined, undefined, undefined as never), /禁止 emit_image/u);
+  const pureCalculation = await childPython.execute("child-calculation", { code: "emit_result(summary='ok')" }, undefined, undefined, undefined as never);
+  assert.equal(JSON.parse(pureCalculation.content[0]!.text!).result.summary, "pure python");
+  // The following assertions describe only the parent tool executions.
+  mountedInputs.length = 0;
+
   await assert.rejects(
     () => codeInterpreter.execute(
       "old-call",

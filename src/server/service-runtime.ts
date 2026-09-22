@@ -32,7 +32,7 @@ interface RuntimeCodeInterpreter {
 }
 
 interface RuntimeSessions extends WebSessionPort {
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 interface OpenRuntimeSessionsOptions {
@@ -173,7 +173,7 @@ export async function startWebService(
     if (server?.listening) server.close();
     if (sessions) {
       try {
-        sessions.dispose();
+        await sessions.dispose();
       } catch (cleanupError) {
         logger.error("system.cleanup.failed", cleanupError, { stage: "agent_store" });
       }
@@ -259,7 +259,7 @@ export async function startWebService(
           const cleanupStartedAt = Date.now();
           logger.info("system.stage.started", { stage, action: "shutdown" });
           try {
-            cleanup();
+            await cleanup();
             logger.info("system.stage.completed", {
               stage,
               action: "shutdown",

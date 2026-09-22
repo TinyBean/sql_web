@@ -57,8 +57,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     agentDir,
     model: { provider: "test-provider", model: "test-model" },
   });
-  t.after(() => {
-    store.dispose();
+  t.after(async () => {
+    await store.dispose();
     database.close();
     rmSync(directory, { recursive: true, force: true });
   });
@@ -72,6 +72,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "measure_loss",
     "get_dashboard",
     "update_dashboard",
+    "subagent",
   ]);
   assert.equal(created.model?.provider, "test-provider");
   assert.equal(created.model?.id, "test-model");
@@ -82,6 +83,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "measure_loss",
     "get_dashboard",
     "update_dashboard",
+    "subagent",
   ]);
 
   const piSession = await store.get(created.id);
@@ -215,6 +217,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "measure_loss",
     "get_dashboard",
     "update_dashboard",
+    "subagent",
     "test_oee_calculator__get_default_sql",
     "test_oee_calculator__get_default_dashboard_sql",
     "test_oee_calculator__get_sql_expressions",
@@ -329,7 +332,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     restoredSession.getActiveToolNames().includes("test_oee_calculator__get_sql_expressions"),
     true,
   );
-  restoredStore.dispose();
+  await restoredStore.dispose();
 
   const isolated = await store.create();
   assert.deepEqual(isolated.tools, [
@@ -339,6 +342,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "measure_loss",
     "get_dashboard",
     "update_dashboard",
+    "subagent",
   ]);
   const isolatedSession = await store.get(isolated.id);
   assert.equal(
@@ -422,8 +426,8 @@ test("forwards explicit Skill syntax as ordinary prompt text", async (t) => {
     agentDir,
     model: { provider: "test-provider", model: "test-model" },
   });
-  t.after(() => {
-    store.dispose();
+  t.after(async () => {
+    await store.dispose();
     database.close();
     rmSync(directory, { recursive: true, force: true });
   });

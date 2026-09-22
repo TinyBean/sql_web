@@ -24,24 +24,29 @@ export function evidenceOutput(record: Evidence) {
   return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 }
 
-export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: CodeInterpreterRuntime) {
+export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: CodeInterpreterRuntime, calculationOnly = false) {
   const artifacts = evidence.artifacts;
   if (!artifacts) throw new Error("每日分析需要独立的数据快照存储");
   const tool = createExecuteSqlTool(evidence.queries, artifacts);
+  const loss = createMeasureLossTool(evidence.queries, artifacts, (measurement) => evidence.recordLoss(measurement).id);
   return [
-    ...createAgentTools(evidence.queries, artifacts, interpreter).filter((entry) => entry.name !== "execute_sql" && entry.name !== MEASURE_LOSS_TOOL_NAME),
-    createMeasureLossTool(evidence.queries, artifacts, (measurement) => evidence.recordLoss(measurement).id),
+    ...createAgentTools(evidence.queries, artifacts, interpreter, new Set(), undefined, calculationOnly)
+      .filter((entry) => entry.name !== "execute_sql" && entry.name !== MEASURE_LOSS_TOOL_NAME),
+    defineTool({ ...loss, execute: (id, params, signal, update, ctx) =>
+      evidence.withEvidenceWrite(() => loss.execute(id, params, signal, update, ctx), signal) }),
     defineTool<typeof executeSqlParameters, ReturnType<typeof evidenceOutput>["details"]>({
       ...tool,
       parameters: executeSqlParameters,
       description: tool.description + " Daily analysis always saves the complete result as an immutable evidence snapshot, even when save_as is omitted. Returns an evidence_id and at most 3 preview rows. Existing evidence names cannot be replaced; use a new save_as name. Names beginning evidence- are reserved. All queries share the dashboard read transaction.",
       async execute(id, params, signal, onUpdate, ctx) {
-        const name = normalizeDataSnapshotName(params.save_as ?? "query-" + (evidence.records.size + 1));
-        if (name.startsWith("evidence-") || [...evidence.records.values()].some((record) => record.snapshot?.name === name)) {
-          throw new Error("快照名称已固定为审计证据或属于保留名称，请使用新的 save_as 名称");
-        }
-        await tool.execute(id, { ...params, save_as: name, limit: Math.min(params.limit ?? 3, 3) }, signal, onUpdate, ctx);
-        return evidenceOutput(evidence.recordSnapshot(params.sql, params.parameters ?? [], name));
+        return evidence.withEvidenceWrite(async () => {
+          const name = normalizeDataSnapshotName(params.save_as ?? "query-" + (evidence.records.size + 1));
+          if (name.startsWith("evidence-") || [...evidence.records.values()].some((record) => record.snapshot?.name === name)) {
+            throw new Error("快照名称已固定为审计证据或属于保留名称，请使用新的 save_as 名称");
+          }
+          await tool.execute(id, { ...params, save_as: name, limit: Math.min(params.limit ?? 3, 3) }, signal, onUpdate, ctx);
+          return evidenceOutput(evidence.recordSnapshot(params.sql, params.parameters ?? [], name));
+        }, signal);
       },
     }),
   ];

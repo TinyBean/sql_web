@@ -116,8 +116,8 @@ async function fixture(t: TestContext) {
   const initialLoads: string[] = [];
   const errors: Array<{ readonly event: string; readonly error: unknown; readonly fields: unknown }> = [];
   const stores: AgentSessionStore[] = [];
-  t.after(() => {
-    for (const store of stores) store.dispose();
+  t.after(async () => {
+    for (const store of stores) await store.dispose();
     database.close();
     rmSync(directory, { recursive: true, force: true });
   });
@@ -255,7 +255,7 @@ test("restores current dashboard after restart and compaction while retaining th
     action: "remove", baseRevision: 0, widgetId: "mt-oee-overview",
   });
   setInitial({ ...created.dashboard, widgets: [], dataAsOf: "2026-09-17T01:00:00.000Z" });
-  store.dispose();
+  await store.dispose();
 
   const restoredStore = await openStore();
   const restoredSession = await restoredStore.get(created.id);

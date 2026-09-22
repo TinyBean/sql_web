@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 const ARTIFACT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/u;
@@ -146,12 +146,27 @@ export class SessionArtifactStore {
   readonly #rootDir: string;
   readonly #sessionId: string;
   readonly #sessionDir: string;
+  readonly #namespace: string | undefined;
 
-  constructor(rootDir: string, sessionId: string) {
+  constructor(rootDir: string, sessionId: string, namespace?: string) {
     assertSessionId(sessionId);
     this.#rootDir = path.resolve(rootDir);
     this.#sessionId = sessionId;
     this.#sessionDir = path.join(this.#rootDir, sessionId);
+    this.#namespace = namespace;
+  }
+
+  /** Shares reads with the parent, but all writes use a private task namespace. */
+  scoped(namespace: string): SessionArtifactStore {
+    return new SessionArtifactStore(this.#rootDir, this.#sessionId, namespace);
+  }
+
+  snapshotName(requestedName: string): string {
+    const normalized = normalizeDataSnapshotName(requestedName);
+    const digest = (value: string, size: number): string => createHash("sha256").update(value).digest("hex").slice(0, size);
+    const label = Array.from(normalized).slice(0, 10).join("").replace(/-+$/u, "");
+    return this.#namespace === undefined ? normalized
+      : `sa-${digest(this.#namespace, 10)}-${label}-${digest(normalized, 6)}`;
   }
 
   #readSnapshotManifest(): SnapshotManifest {
@@ -265,7 +280,7 @@ export class SessionArtifactStore {
     requestedName: string,
     write: (fileDescriptor: number) => Value,
   ): CreatedDataSnapshot<Value> {
-    const name = normalizeDataSnapshotName(requestedName);
+    const name = this.snapshotName(requestedName);
     const manifest = this.#readSnapshotManifest();
     const previous = manifest.snapshots[name];
     const created = this.createJson(write);

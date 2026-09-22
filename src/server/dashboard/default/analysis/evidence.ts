@@ -48,6 +48,17 @@ export class AnalysisEvidence {
   readonly artifacts: SessionArtifactStore | undefined;
   readonly #database: DatabaseSync;
   readonly #onEvidence: (evidence: Evidence) => void;
+  #pendingWrite: Promise<unknown> = Promise.resolve();
+
+  /** Reserve names, write the snapshot and register evidence as one operation across all agents. */
+  async withEvidenceWrite<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const result = this.#pendingWrite.then(() => {
+      signal?.throwIfAborted();
+      return operation();
+    });
+    this.#pendingWrite = result.catch(() => {});
+    return result;
+  }
 
   constructor(database: DatabaseSync, onEvidence: (evidence: Evidence) => void = () => {}, artifacts?: SessionArtifactStore) {
     this.#database = database;

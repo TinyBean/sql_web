@@ -105,7 +105,7 @@ function fakeDependencies(events: string[]): ServiceRuntimeDependencies {
       delete: async () => {},
       prompt: async () => {},
       abort: async () => {},
-      dispose: () => events.push("sessions.dispose"),
+      dispose: () => { events.push("sessions.dispose"); },
     }),
     createServer: () => createServer(),
   };

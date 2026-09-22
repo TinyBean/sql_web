@@ -30,6 +30,7 @@ import { AnalysisDrafts } from "../../src/server/dashboard/default/analysis/draf
 import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.ts";
 import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.ts";
 import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
+import type { SubagentResult } from "../../src/server/agent/subagent.ts";
 
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
 
@@ -147,6 +148,38 @@ test("daily queries reuse shared tools and freeze complete evidence without copy
   } else {
     assert.equal(python, undefined, "SQL snapshots remain available when the sandbox is unavailable");
   }
+  database.exec("COMMIT");
+});
+
+test("parallel SQL evidence registration is atomic and queued cancellations do not poison later queries", async (t) => {
+  const { config, directory, connections } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  database.exec("BEGIN");
+  const evidence = new AnalysisEvidence(database, undefined, new SessionArtifactStore(directory, "parallel-data"));
+  const interpreter = await CodeInterpreterRuntime.create({ projectRoot: directory,
+    pythonPath: "/nonexistent/python", bwrapPath: "/nonexistent/bwrap", prlimitPath: "/nonexistent/prlimit" });
+  t.after(() => interpreter.dispose());
+  const agents = Array.from({ length: 3 }, () => createAnalysisTools(evidence, interpreter, true));
+  const query = (index: number, params: Record<string, unknown>, signal?: AbortSignal) =>
+    agents[index]!.find((tool) => tool.name === "execute_sql")!.execute("same-call-id", params, signal, undefined, undefined as never);
+  const results = await Promise.all(agents.map((_, index) => query(index, { sql: `SELECT ${index} AS value` })));
+  const details = results.map((result) => JSON.parse(result.content.find((part) => part.type === "text")!.text));
+  assert.equal(new Set(details.map((entry) => entry.evidence_id)).size, 3);
+  assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 3);
+  assert.deepEqual(details.map((entry) => evidence.records.get(entry.evidence_id)!.rows[0]!["value"]), [0, 1, 2]);
+  const duplicate = await Promise.allSettled([query(0, { sql: "SELECT 4", save_as: "duplicate" }), query(1, { sql: "SELECT 5", save_as: "duplicate" })]);
+  assert.deepEqual(duplicate.map((result) => result.status), ["fulfilled", "rejected"]);
+  let release!: () => void;
+  const gate = evidence.withEvidenceWrite(() => new Promise<void>((resolve) => { release = resolve; }));
+  await Promise.resolve();
+  const abort = new AbortController();
+  const cancelled = query(2, { sql: "SELECT 6", save_as: "cancelled" }, abort.signal);
+  abort.abort(); release();
+  await gate;
+  await assert.rejects(cancelled, /abort/iu);
+  assert.throws(() => evidence.artifacts!.resolveDataSnapshot("cancelled"));
+  await query(0, { sql: "SELECT 7", save_as: "after-cancel" });
   database.exec("COMMIT");
 });
 
@@ -515,6 +548,66 @@ test("ephemeral model repairs evidence and unreadable prose before publishing si
   writer.close();
 });
 
+test("daily parent submits and reviews a report citing three children sharing its evidence registry", { timeout: 30_000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runId = "subagent-report";
+  const runDir = path.join(config.analysis.artifactDir, runId);
+  let rootTurn = 0;
+  let children: SubagentResult[] = [];
+  await mockModel(t, directory, (body) => {
+    const tools = body["tools"] as { function: { name: string } }[];
+    const messages = (body["messages"] as { role: string; content: string | { text?: string }[] }[])
+      .map((message) => ({ ...message, content: typeof message.content === "string" ? message.content : message.content?.map((part) => part.text ?? "").join("") ?? "" }));
+    const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
+    const isParent = tools.some((tool) => tool.function.name === "submit_analysis");
+    if (!isParent) {
+      assert.ok(!tools.some((tool) => ["subagent", "finalize_analysis", "get_analysis_draft", "send_email", "update_dashboard"].includes(tool.function.name)));
+      const task = JSON.parse(messages.findLast((message) => message.role === "user")!.content) as { task: keyof AnalysisContext["comparisons"] };
+      const results = messages.filter((message) => message.role === "tool");
+      if (!results.length) return [toolCall(0, "execute_sql", { sql: "SELECT 1 AS marker" })];
+      if (results.length === 1) return [toolCall(0, "measure_loss", {
+        start_date: context.periods[task.task].start, end_date: context.periods[task.task].end,
+      })];
+      return "已核实本期损失，主 Agent 应按证据原始行号引用。";
+    }
+    rootTurn += 1;
+    if (rootTurn === 1) return [toolCall(0, "subagent", { tasks: PERIOD_KEYS.map((period) => ({ name: period, task: period })) })];
+    if (rootTurn === 2) {
+      children = JSON.parse(messages.filter((message) => message.role === "tool").at(-1)!.content).results;
+      assert.deepEqual(children.map((child) => child.status), ["completed", "completed", "completed"]);
+      const evidence = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const report = reportFor(context);
+      for (const [index, period] of report.periods.entries()) {
+        const child = children[index]!;
+        const loss = evidence.find((entry) => child.evidence_ids.includes(entry.id) && entry.source === "measure_loss");
+        assert.ok(loss);
+        for (const group of period.groups) {
+          const item = group.items[0]!;
+          item.category = "availability";
+          item.issue = "Conversion（换线）损失，准备时间待验证";
+          item.evidence_ids.push(loss.id);
+          item.loss_reference = { evidence_id: loss.id, row_index: loss.rows.findIndex((row: { kind: string }) => row.kind === group.kind) };
+        }
+      }
+      return [toolCall(0, "submit_analysis", report)];
+    }
+    const draft = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line))
+      .findLast((event) => event.type === "analysis_draft");
+    return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: "已逐项核对原始证据、期间、类型及换线损失小时，措施仍需验证。", updates: [] })];
+  });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assert.equal(result.state.widgets[9]!.data[0]!["loss_hours"], 2.5);
+  assert.equal(result.state.widgets[10]!.data[0]!["loss_hours"], 7.5);
+  assertNumericCardsUnchanged(result.state, runDir);
+  const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
+  assert.equal(Object.keys(metrics.agents).length, 4);
+  assert.equal(metrics.tools.execute_sql.calls, 3);
+  assert.equal(metrics.tools.measure_loss.calls, 3);
+  assert.equal(metrics.tools.subagent.calls, 1);
+  assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
+});
+
 test("ephemeral analysis compacts context and restores snapshot references and draft status", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
   let turn = 0;
@@ -687,4 +780,30 @@ test("analysis metrics separate model intervals and tools and record unfinished 
   assert.equal(metrics.outputTokens, 20);
   assert.equal(metrics.retryCount, 1);
   assert.deepEqual(metrics.pending, [{ kind: "model", name: "client_observed", durationMs: 300 }]);
+});
+
+test("parallel metrics isolate repeated IDs and exclude orchestration waits from tool work", () => {
+  const at = (ms: number) => new Date(ms).toISOString();
+  const events = [
+    { at: at(0), type: "session" },
+    { at: at(10), type: "tool_call", toolCallId: "same", name: "subagent" },
+    ...["a", "b"].flatMap((agentId) => [
+      { agentId, at: at(20), type: "session" },
+      { agentId, at: at(20), type: "model_turn_start", turnId: 1 },
+      { agentId, at: at(60), type: "assistant", message: { usage: { input: 10, output: 5 }, content: [{ type: "toolCall", name: "execute_sql" }] } },
+      { agentId, at: at(60), type: "tool_call", toolCallId: "same", name: "execute_sql" },
+      { agentId, at: at(70), type: "tool_result", toolCallId: "same", name: "execute_sql" },
+      { agentId, at: at(80), type: "subagent_result" },
+    ]),
+    { at: at(90), type: "tool_result", toolCallId: "same", name: "subagent" },
+  ];
+  const metrics = summarizeAnalysisEvents(events, 0, 100);
+  assert.equal(metrics.durationMs, 100);
+  assert.equal(metrics.inputTokens, 20);
+  assert.equal(metrics.outputTokens, 10);
+  assert.equal(metrics.modelObservedMs, 80);
+  assert.equal(metrics.toolMs, 20);
+  assert.equal(metrics.delegationMs, 80);
+  assert.equal(metrics.tools["execute_sql"]!.calls, 2);
+  assert.deepEqual(metrics.pending, []);
 });

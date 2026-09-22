@@ -83,7 +83,7 @@ export function measureLoss(
   const names = new Set(artifacts.listDataSnapshots().map((entry) => entry.name));
   const baseName = "loss-" + range.start.replaceAll("-", "") + "-" + range.end.replaceAll("-", "");
   let name = baseName;
-  for (let suffix = 2; names.has(name); suffix += 1) name = baseName + "-" + suffix;
+  for (let suffix = 2; names.has(artifacts.snapshotName(name)); suffix += 1) name = baseName + "-" + suffix;
   const { value: _value, replaced: _replaced, ...snapshot } = artifacts.createDataSnapshot(name, (fileDescriptor) => {
     const exported = database.exportQueryJson(sql, parameters, {
       fileDescriptor, maxRows: 100_000, maxBytes: MAX_QUERY_ARTIFACT_BYTES, previewRows: 0,
@@ -94,7 +94,7 @@ export function measureLoss(
     }
     return exported;
   });
-  const data = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(name).filePath, "utf8")) as { rows: DashboardRow[] };
+  const data = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(snapshot.name).filePath, "utf8")) as { rows: DashboardRow[] };
   return { sql, parameters, range, scope, rows: data.rows, snapshot, truncated: false };
 }
 

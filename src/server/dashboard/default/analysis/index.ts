@@ -37,6 +37,7 @@ export function prepareAnalysisCards(
 export async function analyzeCards(
   database: DatabaseSync, state: DashboardState, throughDate: string,
   config: DefaultDashboardAnalysisConfig, runDir: string, onResult: (state: DashboardState) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const log = (name: string, event: unknown): void => {
     appendFileSync(path.join(runDir, name + ".jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event as object }) + "\n", { mode: 0o600 });
@@ -50,5 +51,5 @@ export async function analyzeCards(
   await runAnalysisAgent(config, context, evidence, (event) => log("events", event), (result) => {
     writeFileSync(path.join(runDir, "report.json"), JSON.stringify(result.report, null, 2), { mode: 0o600 });
     onResult(applyAnalysisReport(state, result));
-  });
+  }, signal);
 }

@@ -87,6 +87,18 @@ test("loss snapshots survive restoration, never replace earlier measurements, an
   assert.equal(existsSync(path.join(directory, "artifacts", sessionId)), false);
 });
 
+test("child loss measurements keep distinct immutable snapshots readable by the parent", (t) => {
+  const { database, artifacts } = fixture(t);
+  const child = artifacts.scoped("child-task-one");
+  const first = measureLoss(database, child, range);
+  const second = measureLoss(database, child, { ...range, machines: ["MT-01"] });
+  const sibling = measureLoss(database, artifacts.scoped("child-task-two"), range);
+  assert.equal(new Set([first.snapshot.name, second.snapshot.name, sibling.snapshot.name]).size, 3);
+  for (const measurement of [first, second, sibling]) {
+    assert.deepEqual(JSON.parse(readFileSync(artifacts.resolveDataSnapshot(measurement.snapshot.name).filePath, "utf8")).rows, measurement.rows);
+  }
+});
+
 test("chat and daily tools share schemas, rows and views while only daily registers audit evidence", async (t) => {
   const { directory, databasePath, database, artifacts, store } = fixture(t);
   const runtime = await CodeInterpreterRuntime.create({

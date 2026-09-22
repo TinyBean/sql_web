@@ -32,6 +32,20 @@ scripts/
 └── session-to-html.ts  # 持久化会话排障 HTML 导出
 ```
 
+## 子 Agent 委派
+
+网站对话与每日分析都提供 `subagent` 工具：`{ tasks: [{ name, task }], context? }`。一次可传入 1–3 项独立调查任务，最多同时运行 3 个，等待全部结束后按输入顺序返回结果。主 Agent 自行判断何时委派，简单问题仍直接处理。
+
+每个子 Agent 使用独立的内存会话，沿用主 Agent 的模型、上下文和输出限制；只接收任务、显式背景与应用提供的看板或每日证据目录，不复制聊天历史。它可独立读取 Skill、查询只读 SQLite、查询标准损失及使用可用的 Python 沙箱计算；不提供继续委派、修改看板、发送邮件或提交每日报告的工具，Python 图片输出也会被拒绝。最终业务动作与 PNG 由主 Agent 完成。
+
+子任务默认最多运行 180 秒、调用 12 次工具，父任务期限更短时服从父任务期限。每日主子 Agent 合计仍最多调用 60 次工具，参数错误和未知工具也计数，最后 8 次只允许主 Agent 使用。网站点击停止、每日分析超时与服务关闭都会取消关联子任务并等待清理。
+
+结果包含 `agent_id`、`name`、`status`、`text`、`text_truncated`、`error`、`snapshots`、`evidence_ids`、`usage` 和 `duration_ms`。状态为 `completed`、`failed`、`timed_out`、`aborted` 或 `budget_exhausted`；单项失败保留其他结果，主 Agent 不能把未完成输出当作完整结论。每项结论最多返回 12,000 字符，超出时明确标记截断。
+
+网站子任务快照保存在父会话下，使用任务独立的规范名称，主 Agent 可直接读取或用于看板更新。每日主子 Agent 共享同一只读事务和冻结证据登记表；查询、快照落盘与证据登记串行完成，模型请求仍可并行，报告继续执行原有证据校验。
+
+前端沿用一次工具调用记录，子任务明细写入服务端日志，并关联父调用与子任务 ID。每日 `metrics.json` 的 `schemaVersion` 为 2，`agents` 分别记录主子 Agent 指标，顶层 token 汇总所有 Agent；`durationMs` 为实际总耗时，`modelObservedMs` 与 `toolMs` 为可重叠的累计耗时。`toolMs` 排除委派等待，等待时间单独记为 `delegationMs`。子任务不产生网站会话，也不改变 HTTP/SSE、聊天历史或看板的数据格式。
+
 ## 默认看板
 
 新会话使用固定的 12 张看板卡片，按以下顺序展示：

@@ -22,7 +22,7 @@ function send(message: unknown): Promise<void> {
   });
 }
 
-async function run(request: DefaultDashboardWorkerRequest): Promise<void> {
+async function run(request: DefaultDashboardWorkerRequest, signal: AbortSignal): Promise<void> {
   const database = new DatabaseSync(request.databasePath, { readOnly: true, timeout: 5000 });
   try {
     database.exec("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF; BEGIN");
@@ -35,7 +35,7 @@ async function run(request: DefaultDashboardWorkerRequest): Promise<void> {
     let completed: Promise<void> | undefined;
     await analyzeCards(database, state, request.throughDate, request.config, request.runDir, (analyzed) => {
       completed = send({ type: "analysis", state: analyzed });
-    });
+    }, signal);
     await completed;
     database.exec("COMMIT");
   } finally {
@@ -44,8 +44,11 @@ async function run(request: DefaultDashboardWorkerRequest): Promise<void> {
 }
 
 process.once("message", (request: DefaultDashboardWorkerRequest) => {
-  void run(request).catch(async (error: unknown) => {
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
+  process.once("SIGTERM", stop);
+  void run(request, controller.signal).catch(async (error: unknown) => {
     await send({ type: "failure", reason: error instanceof Error ? error.message : String(error) }).catch(() => {});
     process.exitCode = 1;
-  }).finally(() => process.disconnect?.());
+  }).finally(() => { process.off("SIGTERM", stop); process.disconnect?.(); });
 });

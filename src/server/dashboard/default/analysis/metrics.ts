@@ -12,7 +12,7 @@ export function readAnalysisEvents(filePath: string): Event[] {
 }
 
 /** Client-observed intervals include request waiting, generation, and any SDK retries. */
-export function summarizeAnalysisEvents(events: readonly Event[], startedAt: number, endedAt: number, baseReadyAt?: number) {
+function summarizeAgentEvents(events: readonly Event[], startedAt: number, endedAt: number, baseReadyAt?: number) {
   const tools: Record<string, { calls: number; errors: number; durationMs: number }> = {};
   const turns: { turnId: number; phase: string; durationMs: number; inputTokens: number; outputTokens: number }[] = [];
   const activeTools = new Map<string, { at: number; name: string }>();
@@ -32,6 +32,7 @@ export function summarizeAnalysisEvents(events: readonly Event[], startedAt: num
     else if (type === "analysis_draft") draft = true;
     else if (type === "auto_retry_start") retryCount += 1;
     else if (type === "compaction_start") compactionCount += 1;
+    else if (type === "subagent_result") { accepted = true; modelStart = undefined; lastBoundary = at; }
     else if (type === "assistant") {
       const message = object(event["message"]);
       const usage = object(message["usage"]);
@@ -76,4 +77,46 @@ export function summarizeAnalysisEvents(events: readonly Event[], startedAt: num
     outputTokens: turns.reduce((sum, turn) => sum + turn.outputTokens, 0),
     toolMs: Object.values(tools).reduce((sum, value) => sum + value.durationMs, 0),
     tools, turns, phaseMs, retryCount, compactionCount, pending };
+}
+
+/** Separate streams before correlating turn/tool IDs: different models often reuse them. */
+export function summarizeAnalysisEvents(events: readonly Event[], startedAt: number, endedAt: number, baseReadyAt?: number) {
+  const groups = new Map<string, Event[]>([["root", []]]);
+  for (const event of events) {
+    const id = typeof event["agentId"] === "string" ? event["agentId"] : "root";
+    const group = groups.get(id) ?? [];
+    group.push(event);
+    groups.set(id, group);
+  }
+  const agents = Object.fromEntries([...groups].map(([id, group]) => {
+    const first = group.find((event) => Number.isFinite(timestamp(event["at"])));
+    const last = group.find((event) => event["type"] === "subagent_result");
+    return [id, summarizeAgentEvents(group, id === "root" ? startedAt : timestamp(first?.["at"]) || startedAt,
+      last ? timestamp(last["at"]) : endedAt, id === "root" ? baseReadyAt : undefined)];
+  }));
+  const root = agents["root"]!;
+  const summaries = Object.values(agents);
+  const sum = (key: "inputTokens" | "outputTokens" | "modelObservedMs" | "retryCount" | "compactionCount") =>
+    summaries.reduce((total, entry) => total + entry[key], 0);
+  const tools: typeof root.tools = {};
+  const phaseMs: Record<string, number> = {};
+  for (const entry of summaries) {
+    for (const [name, value] of Object.entries(entry.tools)) {
+      const merged = tools[name] ??= { calls: 0, errors: 0, durationMs: 0 };
+      merged.calls += value.calls; merged.errors += value.errors; merged.durationMs += value.durationMs;
+    }
+    for (const [phase, ms] of Object.entries(entry.phaseMs)) phaseMs[phase] = (phaseMs[phase] ?? 0) + ms;
+  }
+  return {
+    ...root, schemaVersion: 2,
+    timingDefinition: "durationMs is wall time; modelObservedMs and toolMs sum per-agent client-observed intervals and may overlap. toolMs excludes subagent orchestration waits (delegationMs).",
+    inputTokens: sum("inputTokens"), outputTokens: sum("outputTokens"), modelObservedMs: sum("modelObservedMs"),
+    retryCount: sum("retryCount"), compactionCount: sum("compactionCount"),
+    toolMs: Object.entries(tools).filter(([name]) => name !== "subagent").reduce((total, [, value]) => total + value.durationMs, 0),
+    delegationMs: tools["subagent"]?.durationMs ?? 0,
+    tools, phaseMs, agents,
+    turns: Object.entries(agents).flatMap(([agentId, entry]) => entry.turns.map((turn) => ({ ...turn, agentId }))),
+    pending: Object.entries(agents).flatMap(([agentId, entry]) => entry.pending.map((item) =>
+      agentId === "root" ? item : { ...item, agentId })),
+  };
 }

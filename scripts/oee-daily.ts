@@ -6,12 +6,15 @@ import { loadDataCommandConfig } from "./database/data-command-config.ts";
 import { dailyUpdatePlan } from "./database/daily-update.ts";
 import { runDailyUpdate } from "./scheduling/daily-update.ts";
 import { outcomeExitCode } from "./database/oee-data-store.ts";
+import { createNotificationDispatcher } from "../src/server/notifications.ts";
 
 async function main(): Promise<void> {
   const now = new Date();
   const plan = dailyUpdatePlan(process.argv.slice(2), now);
   const config = loadDataCommandConfig(PROJECT_ROOT);
-  const registry = createDashboardRegistry(config);
+  const registry = createDashboardRegistry({
+    ...config, notify: createNotificationDispatcher(config.notificationOptions),
+  });
   if (plan.dryRun) {
     console.log(JSON.stringify({
       ...plan, databasePath: config.databasePath,

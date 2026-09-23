@@ -124,7 +124,7 @@ export function loadConfig(env: AppEnvironment): AppConfig {
   };
 }
 
-function loadEmailConfig(env: AppEnvironment): EmailConfig | null {
+export function loadEmailConfig(env: AppEnvironment): EmailConfig | null {
   const values = [env.SQL_WEB_SMTP_HOST, env.SQL_WEB_SMTP_PORT, env.SQL_WEB_MAIL_FROM_ADDRESS, env.SQL_WEB_MAIL_FROM_NAME];
   if (values.every((value) => !value?.trim())) return null;
   const host = env.SQL_WEB_SMTP_HOST?.trim();

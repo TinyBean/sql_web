@@ -125,7 +125,7 @@ npm run data:daily -- --through-date 2026-09-14
 
 两个接口均成功时，即使数据缺失也继续执行看板更新并传递同步警告；默认看板发布已有结果，缺失指标保留 NULL。任何接口硬失败都会跳过全部看板，已完成的数据库导入仍保留审计记录。单个看板的计算、验证或写入失败会保留其旧快照并继续更新后续看板，已发布的其他看板不回滚；每个看板的全部卡片一次性原子发布。
 
-每日调度由 `scripts/scheduling/daily-update.ts` 维护。命令结果包含总体 `status`、`throughDate`、`database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、`reason` 及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；正常跳过不计为警告。CLI 不再重复输出默认看板的顶层 `published`、`dataAsOf` 和分析字段；消费者应在 `dashboards` 中按 `dashboardId` 读取。dry-run 也不再输出默认看板路径和周期详情。
+每日调度由 `scripts/scheduling/daily-update.ts` 维护。命令结果包含总体 `status`、`throughDate`、`database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、`reason` 及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；正常跳过不计为警告。CLI 不再重复输出默认看板的顶层 `published`、`dataAsOf` 和分析字段；消费者应在 `dashboards` 中按 `dashboardId` 读取。默认看板的 `details.notification` 记录周改善表邮件状态；通知异常保留 `published: true`，计为警告，不回滚快照。dry-run 也不再输出默认看板路径和周期详情。
 
 ### 临时 Agent 改善分析
 
@@ -397,6 +397,39 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 结果包含 `messageId`、`accepted`、`rejected`、`response`、`errorCode` 和 `status`：`accepted` 表示 SMTP 接受全部收件人，`partial` 表示部分接受，`failed` 表示未被接受，`unknown` 表示连接中断或取消后无法确定是否已被接受。SMTP 接受仅表示进入投递流程，实际送达需收件端确认。连接最长等待 10 秒，每次调用总时限 30 秒，取消会关闭本次 SMTP 连接；工具不自动重试，结果未知时应先核实收件情况，部分接受时不要向已接受地址重复发送。
 
 运行日志 `email.completed` 仅记录会话及工具调用 ID、状态、耗时、收件人数和错误代码，不记录邮件正文、收件地址或完整 SMTP 会话。邮件参数和工具结果与其他工具一样保存在会话历史中。未配置时服务正常启动；配置不完整或发件地址无效时启动报错。
+
+## 每日邮件通知与发送群组
+
+每日任务仅在本次默认看板分析成功（`analysisStatus: completed`）且快照发布成功后发送周改善措施表。定时任务和手动 `npm run data:daily` 使用同一流程；每次成功都会发送，包括相同截止业务日的手动重跑，不按天或周去重。分析失败、超时、同步硬失败或发布失败时不发送；`--dry-run` 不读取通知规则、不发送，也不创建通知产物。
+
+收件人配置保存在项目 `.data/notifications.json`，不纳入 Git。新部署可将下方 JSON 示例保存为该文件，并配置上文 SMTP。示例启用 `weekly-improvement`，通过群组发送给 `Cheng.Wu@sdsscn.com`。文件不存在、没有对应规则或 `enabled: false` 时正常跳过；不会自动创建配置或发送历史快照。
+
+配置包含 `groups`（群组名到邮箱数组）和 `routes`（信息类型到发送规则）。每条规则必须填写 `enabled`、`groups`、`to`；不使用的收件方式填写空数组。以下示例把周表收件人放入可维护的群组：
+
+```json
+{
+  "groups": {
+    "oee-improvement": ["Cheng.Wu@sdsscn.com"]
+  },
+  "routes": {
+    "weekly-improvement": {
+      "enabled": true,
+      "groups": ["oee-improvement"],
+      "to": []
+    }
+  }
+}
+```
+
+可在 `groups` 中维护多个群组；一条规则可以选择多个群组，并在 `to` 中追加个人邮箱。群组只包含邮箱，不嵌套群组。发送前合并地址、校验邮箱并去重，沿用现有邮箱规范化规则（域名转小写、本地部分保留大小写），合并后限 1–50 人，超限不拆分发送。规则文件每次发送前重新读取，修改后下一次任务生效，无需重启网站。收件地址只来自这些显式配置，不从分析文字或建议责任人推测。
+
+目前只有 `weekly-improvement` 接入自动发送。后续增加信息类型时，调用通用通知模块并在 `routes` 中配置相应规则即可；仅添加规则不会产生新的定时任务。网页群组管理、对话群组选择及月季表自动发送尚未接入。
+
+邮件包含本次已发布周表的 MT/ST 六列、最近完整周的起止日期、截止业务日、统计口径与数据覆盖提示，同时提供 HTML 和纯文本正文。缺失损失小时显示“—”，没有建议时保留原因，责任人仍为待人工确认的职能建议。无需重新调用模型；邮件不包含附件或月季表。
+
+`details.notification` 包含 `status`、`reason`、`messageId`、`recipientCount`、`acceptedCount`、`rejectedCount`、`errorCode`。状态为 `accepted`、`partial`、`failed`、`unknown` 或 `skipped`；`accepted` 只表示 SMTP 接受，不保证实际送达。启用规则但 JSON/结构无效、引用未知群组、邮箱无效、收件人数不合要求或 SMTP 未配置时记录失败。失败、部分接受或结果未知都不自动重试，不影响已发布的看板；每日结果为 `completed_with_warnings`（无其他硬失败时退出 `2`）。结果未知时先核实收件情况再决定是否手动重跑，重跑会再次向该规则的全部收件人发送。
+
+`daily.notification.completed` 日志记录运行 ID、信息类型、截止日期、发送状态、耗时及收件人数，不记录正文、收件邮箱或完整 SMTP 回复。SMTP 配置复用 `.env` 的四个邮件设置，遵循数据命令的环境变量优先规则，仅在发送前校验；错误不会阻断数据库同步或看板发布。
 
 ## 安全边界
 

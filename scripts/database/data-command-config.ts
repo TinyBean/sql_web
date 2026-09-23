@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
 import type { OeeDataStoreOptions } from "./oee-data-store.ts";
+import { loadEmailConfig } from "../../src/server/config.ts";
+import type { NotificationOptions } from "../../src/server/notifications.ts";
 
 import type { DefaultDashboardAnalysisConfig } from "../../src/server/dashboard/default/config.ts";
 
@@ -9,6 +11,7 @@ export interface DataCommandConfig extends OeeDataStoreOptions {
   readonly defaultDashboardPath: string;
   readonly logDir: string;
   readonly analysis: DefaultDashboardAnalysisConfig;
+  readonly notificationOptions: NotificationOptions;
 }
 
 export function loadDataCommandConfig(
@@ -40,6 +43,15 @@ export function loadDataCommandConfig(
     databasePath: path.resolve(projectRoot, setting("SQL_WEB_DB_PATH") ?? ".data/database/oee.sqlite"),
     defaultDashboardPath: path.resolve(projectRoot, setting("SQL_WEB_DEFAULT_DASHBOARD_PATH") ?? ".data/default-dashboard.json"),
     logDir: path.join(projectRoot, ".data", "logs"),
+    notificationOptions: {
+      configPath: path.join(projectRoot, ".data", "notifications.json"),
+      loadEmail: () => loadEmailConfig({
+        SQL_WEB_SMTP_HOST: setting("SQL_WEB_SMTP_HOST"),
+        SQL_WEB_SMTP_PORT: setting("SQL_WEB_SMTP_PORT"),
+        SQL_WEB_MAIL_FROM_ADDRESS: setting("SQL_WEB_MAIL_FROM_ADDRESS"),
+        SQL_WEB_MAIL_FROM_NAME: setting("SQL_WEB_MAIL_FROM_NAME"),
+      }),
+    },
     analysis: {
       cwd: projectRoot,
       agentDir: path.join(projectRoot, ".data", "agent"),

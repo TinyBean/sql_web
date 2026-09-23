@@ -1,7 +1,7 @@
 import { readFileSync, writeSync } from "node:fs";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { AppDatabase, assertReadOnlyQuery, type SqlParameter } from "../../../database/database.ts";
-import { MAX_QUERY_ARTIFACT_BYTES, type DataSnapshotDescriptor, type SessionArtifactStore } from "../../../tool/artifact-store.ts";
+import { MAX_QUERY_ARTIFACT_BYTES, normalizeDataSnapshotName, type DataSnapshotDescriptor, type SessionArtifactStore } from "../../../tool/artifact-store.ts";
 import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { dashboardPeriods, weekLabel, PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
@@ -19,6 +19,16 @@ export interface Evidence {
   readonly source?: "measure_loss";
   readonly lossScope?: LossScope;
   readonly snapshot?: DataSnapshotDescriptor;
+  readonly owner?: EvidenceOwner;
+}
+
+export interface EvidenceOwner {
+  readonly period: PeriodKey;
+  readonly agentId: string;
+}
+
+export interface AnalysisEvidenceScope extends EvidenceOwner {
+  readonly baselineIds: readonly string[];
 }
 
 export interface AnalysisContext {
@@ -87,24 +97,41 @@ export class AnalysisEvidence {
   }
 
   /** Register the complete result exported by the shared SQL tool, never its preview. */
-  recordSnapshot(sql: string, parameters: readonly SqlParameter[], name: string): Evidence {
+  recordSnapshot(sql: string, parameters: readonly SqlParameter[], name: string, owner: EvidenceOwner): Evidence {
     if (!this.artifacts) throw new Error("分析快照存储尚未初始化");
     const { filePath, ...snapshot } = this.artifacts.resolveDataSnapshot(name);
     const data = JSON.parse(readFileSync(filePath, "utf8")) as { rows: DashboardRow[]; truncated: boolean };
     if (data.truncated) throw new Error("分析证据快照被截断");
     return this.#save({ sql, parameters: parameters.map((value) => typeof value === "boolean" ? Number(value) : value),
-      rows: data.rows, truncated: false, snapshot });
+      rows: data.rows, truncated: false, snapshot, owner });
   }
 
-  catalog() {
-    return [...this.records.values()].map((record) => ({
+  scope(context: AnalysisContext, period: PeriodKey, agentId: string): AnalysisEvidenceScope {
+    return { period, agentId, baselineIds: Object.values(context.comparisons[period]).map((record) => record.id) };
+  }
+
+  #visible(record: Evidence, scope: AnalysisEvidenceScope): boolean {
+    return record.owner?.period === scope.period &&
+      (scope.baselineIds.includes(record.id) || record.owner.agentId === scope.agentId);
+  }
+
+  /** Check before resolving a name: the shared store's missing-name error lists all snapshots. */
+  assertSnapshotAccess(name: string, scope: AnalysisEvidenceScope): void {
+    const normalized = normalizeDataSnapshotName(name);
+    if (![...this.records.values()].some((record) => record.snapshot?.name === normalized && this.#visible(record, scope))) {
+      throw new Error("当前子任务无可用的该证据快照，请使用本周期证据目录中的名称");
+    }
+  }
+
+  catalog(scope?: AnalysisEvidenceScope) {
+    return [...this.records.values()].filter((record) => !scope || this.#visible(record, scope)).map((record) => ({
       evidence_id: record.id, snapshot: record.snapshot?.name ?? null, row_count: record.rows.length,
-      truncated: record.truncated, range: record.range, source: record.source, loss_scope: record.lossScope,
+      truncated: record.truncated, range: record.range, source: record.source, loss_scope: record.lossScope, owner: record.owner,
     }));
   }
 
-  query(sql: string, parameters: readonly SQLInputValue[] = [], maxRows = 200): Evidence {
-    return this.#save(this.#read(sql, parameters, maxRows));
+  query(sql: string, parameters: readonly SQLInputValue[] = [], maxRows = 200, owner?: EvidenceOwner): Evidence {
+    return this.#save({ ...this.#read(sql, parameters, maxRows), ...(owner ? { owner } : {}) });
   }
 
   #read(sql: string, parameters: readonly SQLInputValue[], maxRows = 200): Omit<Evidence, "id"> {
@@ -125,8 +152,9 @@ export class AnalysisEvidence {
     const periods = dashboardPeriods(throughDate);
     const source = this.query(getDefaultTestOeeSql(periods.syncStart, throughDate).sql, [], 800);
     if (source.truncated) throw new Error("基础分析证据被截断");
-    const slice = (range: DatePeriod | undefined): Evidence => this.#save({
+    const slice = (period: PeriodKey, range: DatePeriod | undefined): Evidence => this.#save({
       sql: source.sql, parameters: [], sourceId: source.id, ...(range ? { range } : {}),
+      owner: { period, agentId: "baseline" },
       rows: range ? source.rows.filter((row) => String(row["day"]) >= range.start && String(row["day"]) <= range.end) : [],
       truncated: false,
     });
@@ -143,9 +171,9 @@ export class AnalysisEvidence {
         if (dayLabel === label) days.push(day);
       }
       comparisons[key] = {
-        current: slice(periods[key]),
-        minimum: slice(days.length ? { start: days[0]!, end: days.at(-1)! } : undefined),
-        history: slice(periods[key].start > periods.trend.start ? {
+        current: slice(key, periods[key]),
+        minimum: slice(key, days.length ? { start: days[0]!, end: days.at(-1)! } : undefined),
+        history: slice(key, periods[key].start > periods.trend.start ? {
           start: periods.trend.start, end: addDays(periods[key].start, -1),
         } : undefined),
       };
@@ -154,12 +182,12 @@ export class AnalysisEvidence {
   }
 
   /** Only the shared standard measurement path can mark report loss references. */
-  recordLoss(measurement: LossMeasurement): Evidence {
+  recordLoss(measurement: LossMeasurement, owner: EvidenceOwner): Evidence {
     return this.#save({
       sql: measurement.sql,
       parameters: measurement.parameters.map((value) => typeof value === "boolean" ? Number(value) : value),
       rows: measurement.rows, truncated: false, snapshot: measurement.snapshot,
-      range: measurement.range, lossScope: measurement.scope, source: "measure_loss",
+      range: measurement.range, lossScope: measurement.scope, source: "measure_loss", owner,
     });
   }
 }

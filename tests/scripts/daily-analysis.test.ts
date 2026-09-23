@@ -8,12 +8,13 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 import { AnalysisEvidence, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
-import { PERIOD_KEYS } from "../../src/server/dashboard/default/periods.ts";
+import { PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/periods.ts";
 import { applyAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
+import { analysisPrompt, runAnalysisAgent } from "../../src/server/dashboard/default/analysis/agent.ts";
 import { analysisBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
 import { createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/tools.ts";
 import { SessionArtifactStore } from "../../src/server/tool/artifact-store.ts";
-import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
+import { CodeInterpreterRuntime, type CodeInterpreterInput } from "../../src/server/tool/code-interpreter.ts";
 import { generateDefaultDashboard } from "../../src/server/dashboard/default/run.ts";
 import { calculatedDashboard } from "../helpers/calculated-dashboard.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
@@ -26,7 +27,6 @@ import { createDefaultDashboard } from "../../src/server/dashboard/default/templ
 import type { AppLogger } from "../../src/server/logger.ts";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
 
-import { AnalysisDrafts } from "../../src/server/dashboard/default/analysis/drafts.ts";
 import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.ts";
 import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.ts";
 import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
@@ -99,7 +99,7 @@ test("daily queries reuse shared tools and freeze complete evidence without copy
   const artifacts = new SessionArtifactStore(directory, "test-snapshots");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-12");
-  const loss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, { start_date: context.periods.week.start, end_date: context.periods.week.end, by_machine: true }));
+  const loss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, { start_date: context.periods.week.start, end_date: context.periods.week.end, by_machine: true }), { period: "week", agentId: "root" });
   assert.equal(loss.rows.length, 207);
   assert.equal(loss.truncated, false);
   const preview = evidenceOutput(loss);
@@ -120,7 +120,7 @@ test("daily queries reuse shared tools and freeze complete evidence without copy
   t.after(() => interpreter.dispose());
   const tools = createAnalysisTools(evidence, interpreter);
   const sql = tools.find((tool) => tool.name === "execute_sql")!;
-  const run = (params: Record<string, unknown>) => sql.execute("query", params, undefined, undefined, undefined as never);
+  const run = (params: Record<string, unknown>) => sql.execute("query", { period: "week", ...params }, undefined, undefined, undefined as never);
   const concurrent = new DatabaseSync(config.databasePath);
   concurrent.prepare("UPDATE oee_availability SET time_span=7200 WHERE tool_name LIKE 'ADH%'").run();
   concurrent.close();
@@ -160,7 +160,9 @@ test("parallel SQL evidence registration is atomic and queued cancellations do n
   const interpreter = await CodeInterpreterRuntime.create({ projectRoot: directory,
     pythonPath: "/nonexistent/python", bwrapPath: "/nonexistent/bwrap", prlimitPath: "/nonexistent/prlimit" });
   t.after(() => interpreter.dispose());
-  const agents = Array.from({ length: 3 }, () => createAnalysisTools(evidence, interpreter, true));
+  const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
+  const scopes = PERIOD_KEYS.map((period) => evidence.scope(context, period, period + "-agent"));
+  const agents = scopes.map((scope) => createAnalysisTools(evidence, interpreter, scope));
   const query = (index: number, params: Record<string, unknown>, signal?: AbortSignal) =>
     agents[index]!.find((tool) => tool.name === "execute_sql")!.execute("same-call-id", params, signal, undefined, undefined as never);
   const results = await Promise.all(agents.map((_, index) => query(index, { sql: `SELECT ${index} AS value` })));
@@ -169,7 +171,13 @@ test("parallel SQL evidence registration is atomic and queued cancellations do n
   assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 3);
   assert.deepEqual(details.map((entry) => evidence.records.get(entry.evidence_id)!.rows[0]!["value"]), [0, 1, 2]);
   const duplicate = await Promise.allSettled([query(0, { sql: "SELECT 4", save_as: "duplicate" }), query(1, { sql: "SELECT 5", save_as: "duplicate" })]);
-  assert.deepEqual(duplicate.map((result) => result.status), ["fulfilled", "rejected"]);
+  assert.deepEqual(duplicate.map((result) => result.status), ["fulfilled", "fulfilled"]);
+  await assert.rejects(query(0, { sql: "SELECT 8", save_as: "duplicate" }), /已固定/u);
+  for (const [index, scope] of scopes.entries()) {
+    assert.ok(evidence.catalog(scope).every((record) => record.owner?.period === scope.period));
+    assert.ok(evidence.catalog(scope).some((record) => record.evidence_id === details[index].evidence_id));
+    assert.ok(!evidence.catalog(scope).some((record) => record.evidence_id === details[(index + 1) % 3].evidence_id));
+  }
   let release!: () => void;
   const gate = evidence.withEvidenceWrite(() => new Promise<void>((resolve) => { release = resolve; }));
   await Promise.resolve();
@@ -181,6 +189,72 @@ test("parallel SQL evidence registration is atomic and queued cancellations do n
   assert.throws(() => evidence.artifacts!.resolveDataSnapshot("cancelled"));
   await query(0, { sql: "SELECT 7", save_as: "after-cancel" });
   database.exec("COMMIT");
+});
+
+test("period evidence whitelists protect Python reads, initial context and newly registered snapshots", async (t) => {
+  const { config, directory, connections } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  const artifacts = new SessionArtifactStore(directory, "isolated-data");
+  const evidence = new AnalysisEvidence(database, undefined, artifacts);
+  const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
+  const scopes = PERIOD_KEYS.map((period) => evidence.scope(context, period, period + "-agent"));
+  const readNames: (string | null)[] = [];
+  // Keep this authorization test independent of host Python/bwrap availability.
+  const interpreter = { status: { available: true }, async execute(_code: string, input: CodeInterpreterInput) {
+    readNames.push(input.snapshot?.name ?? null);
+    return { details: { images: [], result: { summary: "read" } } };
+  } } as unknown as CodeInterpreterRuntime;
+  const agents = scopes.map((scope) => createAnalysisTools(evidence, interpreter, scope));
+  const run = (index: number, name: string, params: Record<string, unknown>) =>
+    agents[index]!.find((tool) => tool.name === name)!.execute("same", params, undefined, undefined, undefined as never);
+  for (const [index, scope] of scopes.entries()) {
+    assert.deepEqual(evidence.catalog(scope).map((entry) => entry.evidence_id), scope.baselineIds);
+    const prompt = analysisPrompt(context, scope.period);
+    assert.deepEqual(Object.keys(JSON.parse(prompt.split("\n").at(-1)!).periods), [scope.period]);
+    for (const record of Object.values(context.comparisons[scope.period])) {
+      await run(index, "code_interpreter", { snapshot: record.snapshot!.name, code: "emit_result(summary='read')" });
+    }
+    for (const other of PERIOD_KEYS.filter((period) => period !== scope.period)) {
+      for (const record of Object.values(context.comparisons[other])) assert.ok(!prompt.includes(record.snapshot!.name));
+    }
+  }
+  const initialReads = readNames.length;
+  let denial: string | undefined;
+  for (const name of [context.comparisons.month.current.snapshot!.name, evidence.records.get("q1")!.snapshot!.name, "unknown-secret"]) {
+    await assert.rejects(run(0, "code_interpreter", { snapshot: name, code: "emit_result(summary='read')" }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      denial ??= error.message;
+      assert.equal(error.message, denial);
+      assert.ok(!error.message.includes(name));
+      assert.ok(!error.message.includes(context.comparisons.quarter.current.snapshot!.name));
+      return true;
+    });
+  }
+  assert.equal(readNames.length, initialReads, "denied reads never reach Python or snapshot resolution");
+  const queries = await Promise.all(agents.map((_, index) => run(index, "execute_sql", { sql: "SELECT 1 AS marker", save_as: "same-name" })));
+  const details = queries.map((result) => JSON.parse(result.content.find((part) => part.type === "text")!.text));
+  assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 3);
+  for (const [index, scope] of scopes.entries()) {
+    assert.equal(evidence.catalog(scope).length, 4);
+    assert.equal(evidence.catalog(scope).at(-1)!.evidence_id, details[index].evidence_id);
+    await run(index, "code_interpreter", { snapshot: details[index].snapshot.name, code: "emit_result(summary='read')" });
+    await assert.rejects(run(index, "code_interpreter", { snapshot: details[(index + 1) % 3].snapshot.name, code: "emit_result(summary='read')" }), /当前子任务/u);
+    await assert.rejects(run(index, "execute_sql", { period: "month", sql: "SELECT 1" }), /服务端绑定/u);
+  }
+  const samePeriodOtherTask = evidence.scope(context, "week", "another-week-agent");
+  assert.throws(() => evidence.assertSnapshotAccess(details[0].snapshot.name, samePeriodOtherTask), /当前子任务/u);
+  const parent = createAnalysisTools(evidence, interpreter);
+  const parentSql = parent.find((tool) => tool.name === "execute_sql")!;
+  await assert.rejects(parentSql.execute("missing", { sql: "SELECT 1" }, undefined, undefined, undefined as never), /指定 period/u);
+  await assert.rejects(parentSql.execute("bad", { period: "year", sql: "SELECT 1" }, undefined, undefined, undefined as never), /指定 period/u);
+  const followUp = await parentSql.execute("parent", { period: "week", sql: "SELECT 2" }, undefined, undefined, undefined as never);
+  const parentData = JSON.parse(followUp.content.find((part) => part.type === "text")!.text);
+  assert.deepEqual(parentData.owner, { period: "week", agentId: "root" });
+  assert.equal(evidence.catalog(scopes[0]!).length, 4, "parent follow-ups do not enter a child's whitelist");
+  const parentPython = parent.find((tool) => tool.name === "code_interpreter")!;
+  await parentPython.execute("parent-read", { snapshot: details[1].snapshot.name, code: "emit_result(summary='read')" }, undefined, undefined, undefined as never);
+  assert.equal(readNames.at(-1), details[1].snapshot.name);
 });
 
 test("stringified report structures are decoded before strict validation without echoing the report", (t) => {
@@ -231,7 +305,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   const writer = new DatabaseSync(config.databasePath);
   writer.prepare("UPDATE oee_availability SET time_span=18000 WHERE final_state='Conversion'").run();
   writer.close();
-  const loss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, { start_date: context.periods.week.start, end_date: context.periods.week.end }));
+  const loss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, { start_date: context.periods.week.start, end_date: context.periods.week.end }), { period: "week", agentId: "root" });
   assert.equal(loss.rows[0]?.["state_group"], "Conversion");
   assert.equal(loss.rows[0]?.["loss_hours"], 2.5, "reads the original transaction snapshot after concurrent changes");
   assert.equal(loss.rows[0]?.["hours_per_kind_available_day"], 2.5);
@@ -270,12 +344,12 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.evidence_ids = ["invalid"]; }, /证据不存在/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.loss_reference!.row_index = 1; }, /同类型/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.loss_reference!.row_index = 999; }, /同类型/u);
-  reject((r) => { r.periods[1]!.groups[0]!.items[0] = structuredClone(item); }, /本期/u);
+  reject((r) => { r.periods[1]!.groups[0]!.items[0] = structuredClone(item); }, /本周期/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.category = "yield"; }, /不得折算/u);
   reject((r) => { r.periods[0]!.groups[0]!.items[0]!.priority = 2; }, /连续/u);
   reject((r) => { r.periods.pop(); }, /结构无效/u);
   reject((r) => { r.periods[0]!.groups[0]!.items = []; }, /空清单/u);
-  const ordinarySql = evidence.query(loss.sql, loss.parameters);
+  const ordinarySql = evidence.query(loss.sql, loss.parameters, 200, { period: "week", agentId: "root" });
   evidence.records.set(ordinarySql.id, { ...ordinarySql, range: loss.range! });
   reject((r) => {
     const target = r.periods[0]!.groups[0]!.items[0]!;
@@ -284,7 +358,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   }, /measure_loss/u);
   const monthLoss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, {
     start_date: context.periods.month.start, end_date: context.periods.month.end,
-  }));
+  }), { period: "month", agentId: "root" });
   assert.deepEqual(context.periods.month, context.periods.quarter);
   const overlapping = structuredClone(report);
   for (const period of overlapping.periods.filter((entry) => entry.period !== "week")) {
@@ -293,9 +367,16 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
     target.evidence_ids.push(monthLoss.id);
     target.loss_reference = { evidence_id: monthLoss.id, row_index: 0 };
   }
+  assert.throws(() => validateAnalysisReport(overlapping, context, evidence.records), /不属于本周期/u);
+  const quarterLoss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, {
+    start_date: context.periods.quarter.start, end_date: context.periods.quarter.end,
+  }), { period: "quarter", agentId: "root" });
+  const quarterItem = overlapping.periods[2]!.groups[0]!.items[0]!;
+  quarterItem.evidence_ids = [context.comparisons.quarter.current.id, quarterLoss.id];
+  quarterItem.loss_reference = { evidence_id: quarterLoss.id, row_index: 0 };
   const validated = validateAnalysisReport(overlapping, context, evidence.records);
   assert.equal(validated.rows.month[0]?.["loss_hours"], 7.5);
-  assert.equal(validated.rows.quarter[0]?.["loss_hours"], 7.5, "matching ranges share standard loss evidence across periods");
+  assert.equal(validated.rows.quarter[0]?.["loss_hours"], 7.5, "matching ranges still require separate period evidence");
   assert.throws(() => evidence.query("DELETE FROM oee_availability"), /只读/u);
   assert.throws(() => evidence.query("ATTACH DATABASE ':memory:' AS another"));
   assert.throws(() => evidence.query("PRAGMA query_only=OFF"));
@@ -310,7 +391,6 @@ test("reports require readable business text while preserving structured audit r
   const evidence = new AnalysisEvidence(database);
   const context = evidence.context(base, "2026-01-12");
   const report = reportFor(context);
-  report.verification = "已核对 q2 的原始查询结果。";
   report.periods[0]!.groups[0]!.items[0]!.issue = "MT 在 Q1 的 W01 可用率偏低；ADH075 的 Assistance（协助等待）需进一步核查。";
   const result = validateAnalysisReport(report, context, evidence.records);
   assert.deepEqual(result.report, report, "audit references and business identifiers are preserved");
@@ -422,32 +502,39 @@ test("empty current periods and missing minima retain nulls and require explicit
 });
 
 async function mockModel(t: TestContext, directory: string, responder: (body: Record<string, unknown>) => unknown,
-  options: { contextWindow?: number; maxTokens?: number; firstPromptTokens?: number; tokenUsageRequest?: number } = {}): Promise<Server> {
+  options: { contextWindow?: number; maxTokens?: number; firstPromptTokens?: number; tokenUsageRequest?: number;
+    promptTokensFor?: (body: Record<string, unknown>) => number | undefined } = {}): Promise<Server> {
   let requests = 0;
+  const errors: unknown[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     try {
       const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>;
-      const result = responder(body);
+      const result = await responder(body);
+      if (result instanceof Error) { response.writeHead(400); response.end(JSON.stringify({ error: { message: result.message } })); return; }
       const calls = typeof result === "string" ? null : result;
       requests += 1;
+      const promptTokens = options.promptTokensFor?.(body) ??
+        (requests === (options.tokenUsageRequest ?? 1) ? options.firstPromptTokens : undefined);
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: ' + JSON.stringify({
         id: "completion", object: "chat.completion.chunk", created: 0, model: "test-model",
         choices: [{ index: 0, delta: { role: "assistant", ...(calls ? { tool_calls: calls } : { content: typeof result === "string" ? result : "done" }) }, finish_reason: null }],
       }) + '\n\ndata: ' + JSON.stringify({
         id: "completion", choices: [{ index: 0, delta: {}, finish_reason: calls ? "tool_calls" : "stop" }],
-        ...(requests === (options.tokenUsageRequest ?? 1) && options.firstPromptTokens ? { usage: { prompt_tokens: options.firstPromptTokens,
-          completion_tokens: 1, total_tokens: options.firstPromptTokens + 1 } } : {}),
+        ...(promptTokens ? { usage: { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 } } : {}),
       }) + '\n\ndata: [DONE]\n\n');
     } catch (error) {
-      response.writeHead(500); response.end(String(error));
+      errors.push(error); response.writeHead(500); response.end(String(error));
     }
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => { server.closeAllConnections(); server.close(); });
+  t.after(() => {
+    server.closeAllConnections(); server.close();
+    assert.deepEqual(errors, [], "mock model assertions failed");
+  });
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const agentDir = path.join(directory, ".data", "agent");
@@ -464,196 +551,302 @@ function toolCall(index: number, name: string, args: unknown) {
   return { index, id: "call-" + index + "-" + name, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-test("ephemeral model repairs evidence and unreadable prose before publishing six-column recommendations", { timeout: 30_000 }, async (t) => {
-  const { config, directory } = fixture(t);
-  let turn = 0;
-  let rejected = false;
-  await mockModel(t, directory, (body) => {
-    turn += 1;
-    assert.equal(body["max_tokens"] ?? body["max_completion_tokens"], 8192);
-    if (turn > 1) {
-      const messages = body["messages"] as { role: string; name?: string; content: string }[];
-      for (const message of messages.filter((message) => message.role === "tool" && message.name === "measure_loss")) {
-        assert.ok(message.content.length < 15000, "loss views are bounded");
-      }
-      assert.doesNotMatch(JSON.stringify(messages), /Received arguments:/u);
+function modelMessages(body: Record<string, unknown>) {
+  return (body["messages"] as { role: string; name?: string; content: string | { text?: string }[] }[])
+    .map((message) => ({ ...message, content: typeof message.content === "string" ? message.content
+      : message.content?.map((part) => part.text ?? "").join("") ?? "" }));
+}
+
+function modelContext(body: Record<string, unknown>) {
+  const values = modelMessages(body).flatMap((message) => {
+    try { return [JSON.parse(message.content)]; } catch { return []; }
+  });
+  const root = values.find((value) => Array.isArray(value.subagent_results));
+  const child = values.find((value) => value.data?.evidence);
+  assert.ok(root || child, "server-owned context must be injected");
+  return { root, child: child?.data };
+}
+
+function savedContext(runDir: string): AnalysisContext {
+  return JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
+}
+
+function lossReport(runDir: string): AnalysisReport {
+  const context = savedContext(runDir);
+  const report = reportFor(context);
+  const records = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  for (const period of report.periods) {
+    const loss = records.find((entry) => entry.source === "measure_loss" && entry.owner.period === period.period);
+    assert.ok(loss, "missing loss evidence for " + period.period);
+    for (const group of period.groups) {
+      const item = group.items[0]!;
+      item.category = "availability";
+      item.issue = "Conversion（换线）损失，准备时间待验证";
+      item.measure = "试行换线预备并比较日均换线时长";
+      item.suggested_owner = "换线工艺工程";
+      item.evidence_ids.push(loss.id);
+      item.loss_reference = { evidence_id: loss.id, row_index: loss.rows.findIndex((row: { kind: string }) => row.kind === group.kind) };
     }
+  }
+  return report;
+}
+
+function childLossResponse(body: Record<string, unknown>, runDir: string): unknown {
+  const { child } = modelContext(body);
+  assert.ok(child);
+  const keys = Object.keys(child.periods);
+  assert.equal(keys.length, 1);
+  const period = keys[0] as PeriodKey;
+  const context = savedContext(runDir);
+  const tools = body["tools"] as { function: { name: string; parameters: { properties: Record<string, unknown> } } }[];
+  assert.ok(!tools.some((tool) => ["subagent", "submit_analysis", "finalize_analysis", "get_analysis_draft", "send_email", "update_dashboard"].includes(tool.function.name)));
+  assert.ok(tools.filter((tool) => ["measure_loss", "execute_sql"].includes(tool.function.name))
+    .every((tool) => !("period" in tool.function.parameters.properties)));
+  assert.ok(child.evidence.every((entry: { owner: { period: string } }) => entry.owner.period === period));
+  const messages = JSON.stringify(body["messages"]);
+  for (const other of PERIOD_KEYS.filter((key) => key !== period)) {
+    assert.ok(!messages.includes(context.comparisons[other].current.snapshot!.name));
+    assert.ok(!messages.includes(context.comparisons[other].minimum.snapshot!.name));
+    assert.ok(!messages.includes(context.comparisons[other].history.snapshot!.name));
+  }
+  if (!modelMessages(body).some((message) => message.role === "tool")) {
+    return [toolCall(0, "measure_loss", { start_date: context.periods[period].start, end_date: context.periods[period].end })];
+  }
+  return "本周期候选结论：Conversion（换线）损失，准备时间待验证；试行换线预备并比较日均时长，建议换线工艺工程跟进。";
+}
+
+test("ephemeral model repairs evidence and unreadable prose then immediately accepts a complete report", { timeout: 30_000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runDir = path.join(config.analysis.artifactDir, "mock-analysis");
+  let turn = 0;
+  await mockModel(t, directory, (body) => {
+    const { root } = modelContext(body);
+    if (!root) return childLossResponse(body, runDir);
+    turn += 1;
+    assert.equal(existsSync(path.join(runDir, "report.json")), false);
+    assert.doesNotMatch(JSON.stringify(body["messages"]), /Received arguments:/u);
     if (turn === 1) return [
       toolCall(0, "read", { path: path.join(directory, "outside.txt") }),
-      toolCall(1, "execute_sql", { sql: "DELETE FROM oee_availability" }),
-      ...PERIOD_KEYS.map((period, index) => {
-        const context = JSON.parse(readFileSync(path.join(config.analysis.artifactDir, "mock-analysis", "context.json"), "utf8")) as AnalysisContext;
-        return toolCall(index + 2, "measure_loss", { start_date: context.periods[period].start, end_date: context.periods[period].end });
-      }),
+      toolCall(1, "execute_sql", { period: "week", sql: "DELETE FROM oee_availability" }),
     ];
-    const runDir = path.join(config.analysis.artifactDir, "mock-analysis");
-    if (turn >= 4) assert.equal(existsSync(path.join(runDir, "report.json")), false, "unreadable prose, unreviewed drafts and unconfirmed updates cannot be published");
-    const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
-    const report = reportFor(context);
-    if (turn >= 5) report.verification = "已逐条复核原始查询：换线小时与本期同类型证据一致，未把损失出现日数当作全期天数；责任为职能建议。";
-    for (const period of report.periods) {
-      const all = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-      const loss = all.find((entry) => entry.source === "measure_loss" && entry.range.start === context.periods[period.period].start && entry.range.end === context.periods[period.period].end);
-      for (const group of period.groups) {
-        const rowIndex = loss.rows.findIndex((row: Record<string, unknown>) => row["kind"] === group.kind);
-        const item = group.items[0]!;
-        item.category = "availability";
-        item.issue = loss.rows[rowIndex].state_group + " 换线损失，准备时间需验证";
-        item.measure = "试行换线预备并比较日均换线时长";
-        item.suggested_owner = "换线工艺工程";
-        item.evidence_ids.push(loss.id);
-        item.loss_reference = { evidence_id: loss.id, row_index: rowIndex };
-      }
-    }
-    if (turn === 2) { report.periods[0]!.minimum_evidence = "missing"; rejected = true; }
+    const report = lossReport(runDir);
+    if (turn === 2) report.periods[0]!.minimum_evidence = "missing";
     if (turn === 3) report.periods[0]!.groups[0]!.items[0]!.issue = "本周换线损失 2.5 小时（q11 第 0 行）";
-    if (turn >= 5) {
-      const draft = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n")
-        .map((line) => JSON.parse(line)).findLast((event) => event.type === "analysis_draft");
-      if (turn >= 6) {
-        assert.equal(draft.stage, "merged_review");
-        assert.equal(draft.report.periods[0].groups[0].items[0].issue, "Conversion（换线）损失 2.5 小时，准备时间待验证");
-      }
-      if (turn >= 7) assert.equal(draft.report.periods[0].groups[0].items[0].measure, "记录换线准备环节并在下周核对相同口径日均时长");
-      const updates = turn === 5
-        ? [{ op: "update_item", period: "week", kind: "MT", priority: 1, changes: { issue: "Conversion（换线）损失 2.5 小时，准备时间待验证" } }]
-        : turn === 6
-          ? [{ op: "update_item", period: "week", kind: "MT", priority: 1, changes: { measure: "记录换线准备环节并在下周核对相同口径日均时长" } }]
-          : [];
-      return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: report.verification, updates })];
-    }
     return [toolCall(0, "submit_analysis", { ...report, periods: JSON.stringify(report.periods) })];
   });
   writeFileSync(path.join(directory, "outside.txt"), "must not be readable");
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
-  assert.equal(rejected, true);
-  assert.ok(turn >= 7, "requires review, inspection of merged updates, and confirmation after the last correction");
-  assert.ok(JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "report.json"), "utf8")).verification);
-  assert.match(String(result.state.widgets[9]?.data[0]?.["issue"]), /Conversion/u);
+  assert.equal(turn, 4, "first valid submission finishes without any review or confirmation request");
+  assert.ok(!("verification" in JSON.parse(readFileSync(path.join(runDir, "report.json"), "utf8"))));
   assert.equal(result.state.widgets[9]?.data[0]?.["loss_hours"], 2.5);
   assert.equal(result.state.widgets[10]?.data[0]?.["loss_hours"], 7.5);
-  const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
+  const events = readFileSync(path.join(runDir, "events.jsonl"), "utf8");
   assert.match(events, /read 仅允许/u);
   assert.match(events, /只读/u);
   assert.match(events, /最低点/u);
   assert.match(events, /业务用户可理解/u);
+  assert.doesNotMatch(events, /must not be readable|"type":"analysis_draft"|"type":"analysis_review"/u);
   assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(9)), /\bq\d+\b|第\s*0\s*行/u);
-  assert.doesNotMatch(events, /must not be readable/u);
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
-  const writer = new DatabaseSync(config.databasePath);
-  assert.equal(writer.prepare("SELECT COUNT(*) AS n FROM oee_availability").get()?.["n"], 12);
-  writer.exec("BEGIN IMMEDIATE; COMMIT");
-  writer.close();
 });
 
-test("daily parent submits and reviews a report citing three children sharing its evidence registry", { timeout: 30_000 }, async (t) => {
+test("daily orchestration starts three isolated periods concurrently before the parent submits once", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
-  const runId = "subagent-report";
-  const runDir = path.join(config.analysis.artifactDir, runId);
-  let rootTurn = 0;
-  let children: SubagentResult[] = [];
-  await mockModel(t, directory, (body) => {
-    const tools = body["tools"] as { function: { name: string } }[];
-    const messages = (body["messages"] as { role: string; content: string | { text?: string }[] }[])
-      .map((message) => ({ ...message, content: typeof message.content === "string" ? message.content : message.content?.map((part) => part.text ?? "").join("") ?? "" }));
-    const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
-    const isParent = tools.some((tool) => tool.function.name === "submit_analysis");
-    if (!isParent) {
-      assert.ok(!tools.some((tool) => ["subagent", "finalize_analysis", "get_analysis_draft", "send_email", "update_dashboard"].includes(tool.function.name)));
-      const task = JSON.parse(messages.findLast((message) => message.role === "user")!.content) as { task: keyof AnalysisContext["comparisons"] };
-      const results = messages.filter((message) => message.role === "tool");
-      if (!results.length) return [toolCall(0, "execute_sql", { sql: "SELECT 1 AS marker" })];
-      if (results.length === 1) return [toolCall(0, "measure_loss", {
-        start_date: context.periods[task.task].start, end_date: context.periods[task.task].end,
-      })];
-      return "已核实本期损失，主 Agent 应按证据原始行号引用。";
-    }
-    rootTurn += 1;
-    if (rootTurn === 1) return [toolCall(0, "subagent", { tasks: PERIOD_KEYS.map((period) => ({ name: period, task: period })) })];
-    if (rootTurn === 2) {
-      children = JSON.parse(messages.filter((message) => message.role === "tool").at(-1)!.content).results;
-      assert.deepEqual(children.map((child) => child.status), ["completed", "completed", "completed"]);
-      const evidence = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-      const report = reportFor(context);
-      for (const [index, period] of report.periods.entries()) {
-        const child = children[index]!;
-        const loss = evidence.find((entry) => child.evidence_ids.includes(entry.id) && entry.source === "measure_loss");
-        assert.ok(loss);
-        for (const group of period.groups) {
-          const item = group.items[0]!;
-          item.category = "availability";
-          item.issue = "Conversion（换线）损失，准备时间待验证";
-          item.evidence_ids.push(loss.id);
-          item.loss_reference = { evidence_id: loss.id, row_index: loss.rows.findIndex((row: { kind: string }) => row.kind === group.kind) };
-        }
+  const runDir = path.join(config.analysis.artifactDir, "subagent-report");
+  let rootTurns = 0;
+  let started = 0;
+  let completed = 0;
+  let release!: () => void;
+  const allStarted = new Promise<void>((resolve) => { release = resolve; });
+  await mockModel(t, directory, async (body) => {
+    const { root } = modelContext(body);
+    if (!root) {
+      if (!modelMessages(body).some((message) => message.role === "tool")) {
+        started += 1;
+        if (started === 3) release();
+        await allStarted;
       }
-      return [toolCall(0, "submit_analysis", report)];
+      const response = childLossResponse(body, runDir);
+      if (typeof response === "string") completed += 1;
+      return response;
     }
-    const draft = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line))
-      .findLast((event) => event.type === "analysis_draft");
-    return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: "已逐项核对原始证据、期间、类型及换线损失小时，措施仍需验证。", updates: [] })];
+    rootTurns += 1;
+    assert.equal(completed, 3);
+    const children = root.subagent_results as SubagentResult[];
+    assert.deepEqual(children.map((entry) => entry.name), PERIOD_KEYS);
+    assert.deepEqual(children.map((entry) => entry.status), ["completed", "completed", "completed"]);
+    const tools = body["tools"] as { function: { name: string; parameters: { required?: string[] } } }[];
+    assert.ok(!tools.some((tool) => ["subagent", "get_analysis_draft", "finalize_analysis"].includes(tool.function.name)));
+    assert.ok(tools.filter((tool) => ["execute_sql", "measure_loss"].includes(tool.function.name))
+      .every((tool) => tool.function.parameters.required?.includes("period")));
+    return [toolCall(0, "submit_analysis", lossReport(runDir))];
   });
-  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "subagent-report");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
-  assert.equal(result.state.widgets[9]!.data[0]!["loss_hours"], 2.5);
-  assert.equal(result.state.widgets[10]!.data[0]!["loss_hours"], 7.5);
+  assert.equal(started, 3);
+  assert.equal(rootTurns, 1);
   assertNumericCardsUnchanged(result.state, runDir);
   const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
   assert.equal(Object.keys(metrics.agents).length, 4);
-  assert.equal(metrics.tools.execute_sql.calls, 3);
   assert.equal(metrics.tools.measure_loss.calls, 3);
   assert.equal(metrics.tools.subagent.calls, 1);
-  assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
+  assert.equal(metrics.tools.submit_analysis.calls, 1);
+  assert.ok(metrics.delegationMs > 0);
+  assert.ok(!metrics.turns.some((turn: { phase: string }) => /review|draft/u.test(turn.phase)));
 });
 
-test("ephemeral analysis compacts context and restores snapshot references and draft status", { timeout: 30_000 }, async (t) => {
+for (const failure of ["failed", "truncated"] as const) {
+  test("parent fills the " + failure + " period from its own scoped evidence", { timeout: 30_000 }, async (t) => {
+    const { config, directory } = fixture(t);
+    const runId = "fallback-" + failure;
+    const runDir = path.join(config.analysis.artifactDir, runId);
+    let rootTurns = 0;
+    await mockModel(t, directory, (body) => {
+      const { root, child } = modelContext(body);
+      if (!root) {
+        if (child.periods.week) return failure === "failed" ? new Error("week investigation failed") : "不完整结论".repeat(4000);
+        return childLossResponse(body, runDir);
+      }
+      rootTurns += 1;
+      const week = (root.subagent_results as SubagentResult[])[0]!;
+      if (failure === "failed") assert.equal(week.status, "failed");
+      else assert.equal(week.text_truncated, true);
+      if (rootTurns === 1) {
+        const context = savedContext(runDir);
+        return [toolCall(0, "measure_loss", { period: "week", start_date: context.periods.week.start, end_date: context.periods.week.end })];
+      }
+      assert.ok(root.evidence.some((entry: { owner?: { period: string; agentId: string } }) => entry.owner?.period === "week" && entry.owner.agentId === "root"));
+      return [toolCall(0, "submit_analysis", lossReport(runDir))];
+    });
+    const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
+    assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+    assert.equal(rootTurns, 2);
+    assert.equal(result.state.widgets[9]?.data[0]?.["loss_hours"], 2.5);
+  });
+}
+
+test("unsuccessful parent fallback uses two repair prompts then publishes only numeric cards", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
+  let rootTurns = 0;
+  await mockModel(t, directory, (body) => {
+    if (!modelContext(body).root) return new Error("child unavailable");
+    rootTurns += 1;
+    return "未能完成报告";
+  });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "fallback-failed");
+  assert.equal(result.analysisStatus, "failed");
+  assert.equal(rootTurns, 3);
+  assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
+  assert.ok(result.state.widgets.slice(9).every((widget) => !widget.data.length));
+  assert.equal(existsSync(path.join(result.analysisArtifactDir, "report.json")), false);
+});
+
+test("ephemeral analysis compacts context and restores child results and scoped evidence", { timeout: 30_000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runDir = path.join(config.analysis.artifactDir, "compaction-test");
   let turn = 0;
   let summaries = 0;
   await mockModel(t, directory, (body) => {
     assert.ok(Number(body["max_tokens"] ?? body["max_completion_tokens"]) <= 32768);
-    if (!body["tools"]) { summaries += 1; return "已检查数据库。继续按系统给定比较基准、证据快照目录和草稿状态完成三期报告。"; }
+    if (!body["tools"]) { summaries += 1; return "继续依据系统比较基准和服务端子任务结果汇总报告。"; }
+    const { root } = modelContext(body);
+    if (!root) return "本周期数据不足，请主 Agent 补齐。";
     turn += 1;
     if (turn === 1) return [
-      toolCall(0, "execute_sql", { sql: "SELECT 1 AS marker", save_as: "compact-check" }),
-      // A long failed query makes enough history eligible for an actual summary.
-      toolCall(1, "execute_sql", { sql: "-- " + "x".repeat(70_000) + "\nSELECT 1", save_as: "large-request" }),
+      toolCall(0, "execute_sql", { period: "week", sql: "SELECT 1 AS marker", save_as: "compact-check" }),
+      toolCall(1, "execute_sql", { period: "week", sql: "-- " + "x".repeat(70_000) + "\nSELECT 1", save_as: "large-request" }),
     ];
-    const messages = JSON.stringify(body["messages"]);
-    assert.match(messages, /compact-check/u);
-    assert.match(messages, /minimum_evidence/u, "system rules and comparison anchors survive compaction");
-    const runDir = path.join(config.analysis.artifactDir, "compaction-test");
-    const context = JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
-    const report = reportFor(context);
-    if (turn >= 3) {
-      assert.match(messages, /\\"draft_validated\\":true/u);
-      report.verification = "已逐条复查本期、最低点与历史证据，缺失保持缺失；措施与根因区分。";
-    }
-    if (turn >= 3) {
-      const draft = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n")
-        .map((line) => JSON.parse(line)).findLast((event) => event.type === "analysis_draft");
-      if (turn === 3) return [toolCall(0, "get_analysis_draft", { draft_id: draft.draft_id, period: "week", kind: "MT" })];
-      if (turn === 4) return "草稿分析已完成。";
-      if (turn === 5) {
-        assert.match(messages, /当前已有有效草稿/u, "prose-only completion is repaired using the saved draft");
-        return [toolCall(0, "measure_loss", { start_date: context.periods.week.start, end_date: context.periods.week.end, states: ["Conversion"] })];
-      }
-      return [toolCall(0, "finalize_analysis", { draft_id: draft.draft_id, verification: report.verification, updates: [] })];
-    }
-    return [toolCall(0, "submit_analysis", report)];
-  }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000, tokenUsageRequest: 2 });
+    assert.equal(root.subagent_results.length, 3);
+    assert.ok(root.evidence.some((entry: { owner?: { agentId: string } }) => entry.owner?.agentId === "root"));
+    assert.match(JSON.stringify(body["messages"]), /minimum_evidence/u);
+    if (turn === 2) return "已完成汇总，准备提交。";
+    assert.ok(summaries >= 1);
+    assert.match(JSON.stringify(body["messages"]), /尚未提交有效报告/u);
+    return [toolCall(0, "submit_analysis", reportFor(savedContext(runDir)))];
+  }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000, tokenUsageRequest: 5 });
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "compaction-test");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
-  assert.ok(summaries >= 1, "SDK must actually invoke compaction, not merely enable its setting");
-  const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8");
+  assert.ok(summaries >= 1);
+  const events = readFileSync(path.join(runDir, "events.jsonl"), "utf8");
   assert.match(events, /"type":"compaction_end"/u);
-  assert.ok(events.indexOf('"type":"analysis_draft"') < events.indexOf('"type":"compaction_start"'), "draft is created before history compaction");
-  assert.match(events, /"name":"measure_loss"/u, "review can add fresh evidence after restoring the draft");
   assert.match(events, /"contextWindow":262144/u);
   assert.match(events, /"maxOutputTokens":32768/u);
 });
+
+test("child compaction restores only its period baselines and its own new evidence", { timeout: 30_000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runDir = path.join(config.analysis.artifactDir, "child-compaction");
+  let weekTurns = 0;
+  let summaries = 0;
+  await mockModel(t, directory, (body) => {
+    if (!body["tools"]) { summaries += 1; return "继续本周期调查，使用服务端证据目录。"; }
+    const { root, child } = modelContext(body);
+    if (root) return [toolCall(0, "submit_analysis", lossReport(runDir))];
+    if (!child.periods.week) return childLossResponse(body, runDir);
+    weekTurns += 1;
+    assert.ok(child.evidence.every((entry: { owner: { period: string } }) => entry.owner.period === "week"));
+    if (weekTurns === 1) return [
+      toolCall(0, "execute_sql", { sql: "SELECT 1 AS marker", save_as: "week-marker" }),
+      toolCall(1, "execute_sql", { sql: "-- " + "x".repeat(70_000) + "\nSELECT 1", save_as: "week-long" }),
+    ];
+    if (weekTurns === 2) return [toolCall(0, "measure_loss", {
+      start_date: child.periods.week.start, end_date: child.periods.week.end,
+    })];
+    assert.ok(summaries >= 1);
+    assert.equal(child.evidence.length, 5, "three baselines, the marker query and loss evidence survive; the oversized query was rejected");
+    childLossResponse(body, runDir); // Also checks no other period's anchors reach this model request.
+    return "本周损失已分析，使用本周标准证据汇总。";
+  }, { contextWindow: 1_000_000, maxTokens: 131072, promptTokensFor(body) {
+    if (!body["tools"]) return undefined;
+    const { child } = modelContext(body);
+    return child?.periods.week && modelMessages(body).filter((message) => message.role === "tool").length === 2 ? 230000 : undefined;
+  } });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "child-compaction");
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assert.ok(summaries >= 1);
+  const events = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.type === "compaction_end" && event.taskName === "week"));
+});
+
+for (const stop of ["abort", "timeout"] as const) {
+  test("daily " + stop + " cleans up all three children without publishing", { timeout: 15_000 }, async (t) => {
+    const { config, directory, connections } = fixture(t);
+    const pending: ((result: string) => void)[] = [];
+    let started!: () => void;
+    const allStarted = new Promise<void>((resolve) => { started = resolve; });
+    await mockModel(t, directory, (body) => {
+      const { child } = modelContext(body);
+      if (stop === "abort") assert.ok(child);
+      return new Promise<string>((resolve) => {
+        pending.push(resolve);
+        if (pending.length === 3) started();
+      });
+    });
+    t.after(() => pending.forEach((resolve) => resolve("cancelled")));
+    const database = new DatabaseSync(config.databasePath, { readOnly: true });
+    connections.push(database);
+    const evidence = new AnalysisEvidence(database, undefined, new SessionArtifactStore(directory, "cancel-data"));
+    const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
+    const events: Record<string, unknown>[] = [];
+    const controller = new AbortController();
+    let reports = 0;
+    const running = runAnalysisAgent({ ...config.analysis, timeoutMs: 3000,
+      codeInterpreter: { ...config.analysis.codeInterpreter, pythonPath: "/nonexistent/python",
+        bwrapPath: "/nonexistent/bwrap", prlimitPath: "/nonexistent/prlimit" },
+    }, context, evidence, (event) => events.push(event), () => { reports += 1; }, controller.signal);
+    const rejected = assert.rejects(running, /abort|timeout/iu);
+    await allStarted;
+    if (stop === "abort") controller.abort();
+    await rejected;
+    assert.equal(reports, 0);
+    if (stop === "abort") assert.ok(!events.some((event) => event["type"] === "model_turn_start" && !event["agentId"]));
+    const results = events.filter((event) => event["type"] === "subagent_result").map((event) => event["result"] as SubagentResult);
+    assert.equal(results.length, 3);
+    assert.deepEqual(results.map((result) => result.status), Array(3).fill(stop === "abort" ? "aborted" : "timed_out"));
+  });
+}
 
 test("tool budget includes malformed calls and terminates at sixty without a report", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
@@ -666,52 +859,6 @@ test("tool budget includes malformed calls and terminates at sixty without a rep
   assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
 });
 
-
-test("draft updates preserve validated evidence, reject conflicts and keep the original immutable", (t) => {
-  const { config, connections } = fixture(t);
-  const database = new DatabaseSync(config.databasePath, { readOnly: true });
-  connections.push(database);
-  const evidence = new AnalysisEvidence(database);
-  const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
-  const drafts = new AnalysisDrafts(context, evidence.records);
-  assert.throws(() => drafts.finalize({ draft_id: "missing", verification: "已核实", updates: [] }, 2), /尚无/u);
-  const original = reportFor(context);
-  const first = drafts.submit(original, 1);
-  const request = { draft_id: first.draft_id, verification: "逐项复核本期、历史与最低点证据，保留待验证根因。", updates: [] as unknown[] };
-  assert.throws(() => drafts.finalize(request, 1), /之后的模型轮次/u);
-  assert.deepEqual(drafts.finalize(request, 2).report, { ...original, verification: request.verification });
-  assert.throws(() => drafts.finalize({ ...request, verification: " " }, 2), /verification/u);
-  const change = { op: "update_item", period: "week", kind: "MT", priority: 1,
-    changes: { issue: "本周 Performance 偏低，配置原因待验证。" } };
-  const updated = drafts.finalize({ ...request, updates: [change] }, 2);
-  assert.equal(updated.report.periods[0]!.groups[0]!.items[0]!.issue, change.changes.issue);
-  assert.deepEqual(drafts.get({ draft_id: first.draft_id }).report, original);
-  assert.throws(() => drafts.finalize({ ...request, updates: [change, change] }, 2), /重复/u);
-  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, priority: 3 }] }, 2), /不存在/u);
-  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, changes: { priority: 2 } }] }, 2), /无效/u);
-  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, changes: { evidence_ids: ["missing"] } }] }, 2), /证据/u);
-  assert.throws(() => drafts.finalize({ ...request, updates: [{ ...change, changes: { issue: "来自 q11 第 0 行" } }] }, 2), /内部/u);
-  const group = original.periods[0]!.groups[0]!;
-  const replacement = { op: "replace_group", period: "week", kind: "MT", group: {
-    no_findings_reason: "没有足够依据", evidence_ids: group.evidence_ids, items: [],
-  } };
-  assert.throws(() => drafts.finalize({ ...request, updates: [replacement, change] }, 2), /同时/u);
-  assert.throws(() => drafts.finalize({ ...request, updates: [change, replacement] }, 2), /同时/u);
-  assert.equal(drafts.finalize({ ...request, updates: [replacement] }, 2).rows.week.length, 1);
-  const reordered = { ...replacement, group: { ...replacement.group, no_findings_reason: "", items: [
-    { ...group.items[0]!, priority: 2, issue: "第二项需要检查" }, { ...group.items[0]!, priority: 1, issue: "第一项需要检查" },
-  ] } };
-  assert.equal(drafts.finalize({ ...request, updates: [reordered] }, 2).rows.week[0]!["issue"], "第一项需要检查");
-  assert.deepEqual(drafts.get({ draft_id: first.draft_id, period: "week", kind: "ST" }).report.periods[0]!.groups.map((g) => g.kind), ["ST"]);
-  const periodUpdate = { op: "update_period", period: "week", comparison: "历史与本周覆盖不同，仅比较日均。" };
-  assert.equal(drafts.finalize({ ...request, updates: [periodUpdate] }, 2).report.periods[0]!.comparison, periodUpdate.comparison);
-  assert.throws(() => drafts.finalize({ ...request, updates: [periodUpdate, periodUpdate] }, 2), /重复/u);
-  assert.throws(() => drafts.finalize({ ...request, updates: "[{" }, 2), /\$\.updates.*JSON/u);
-  assert.deepEqual(drafts.get({ draft_id: first.draft_id }).report, original, "all failed merges leave the stored draft intact");
-  drafts.submit(original, 3);
-  assert.throws(() => drafts.get({ draft_id: first.draft_id }), /过期/u);
-  assert.throws(() => drafts.finalize(request, 4), /过期/u);
-});
 
 test("loss views preserve original row references and compute scoped statistics without summing coverage", () => {
   const rows = Array.from({ length: 40 }, (_, i) => ({ kind: i % 2 ? "ST" : "MT", state_group: i % 4 < 2 ? "PM" : "Conversion",
@@ -780,6 +927,18 @@ test("analysis metrics separate model intervals and tools and record unfinished 
   assert.equal(metrics.outputTokens, 20);
   assert.equal(metrics.retryCount, 1);
   assert.deepEqual(metrics.pending, [{ kind: "model", name: "client_observed", durationMs: 300 }]);
+});
+
+test("metrics distinguish direct submissions while retaining historical draft and review phases", () => {
+  const assistant = (name: string, phase: string) => ({ at: new Date(20).toISOString(), type: "assistant", phase,
+    message: { content: [{ type: "toolCall", name }], usage: { input: 10, output: 5 } } });
+  const current = summarizeAnalysisEvents([assistant("submit_analysis", "submission"),
+    { at: new Date(25).toISOString(), type: "analysis_accepted" }], 0, 2000);
+  assert.equal(current.turns[0]!.phase, "submission");
+  assert.deepEqual(current.pending, []);
+  const legacy = summarizeAnalysisEvents([assistant("submit_analysis", "investigation"),
+    { at: new Date(25).toISOString(), type: "analysis_draft" }, assistant("finalize_analysis", "review")], 0, 30);
+  assert.deepEqual(legacy.turns.map((turn) => turn.phase), ["draft", "review"]);
 });
 
 test("parallel metrics isolate repeated IDs and exclude orchestration waits from tool work", () => {

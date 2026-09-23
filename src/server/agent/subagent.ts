@@ -60,7 +60,7 @@ export interface SubagentRunnerOptions {
   readonly catalog: AgentSkillCatalog;
   readonly parent: () => AgentSession;
   /** Captures batch context once; child context callbacks can refresh evidence catalogues. */
-  readonly prepareBatch: () => (agentId: string) => SubagentEnvironment;
+  readonly prepareBatch: () => (agentId: string, task: Static<typeof subagentParameters>["tasks"][number]) => SubagentEnvironment;
   readonly onEvent: (event: Record<string, unknown>) => void;
   readonly tryConsumeTool?: () => boolean;
   readonly remainingTools?: () => number;
@@ -113,7 +113,7 @@ export class SubagentRunner {
 
   async #runTask(
     callId: string, task: Static<typeof subagentParameters>["tasks"][number], background: string | undefined,
-    factory: (id: string) => SubagentEnvironment, signal: AbortSignal | undefined,
+    factory: ReturnType<SubagentRunnerOptions["prepareBatch"]>, signal: AbortSignal | undefined,
   ): Promise<SubagentResult> {
     const options = this.#options;
     const id = randomUUID();
@@ -158,7 +158,7 @@ export class SubagentRunner {
       }
       const parent = options.parent();
       if (!parent.model) throw new Error("父 Agent 未配置模型");
-      const environment = factory(id);
+      const environment = factory(id, task);
       if (environment.tools.some((tool) => !allowedTools.has(tool.name))) throw new Error("子 Agent 工具权限配置无效");
       const settingsManager = SettingsManager.inMemory({
         ...parent.settingsManager.getGlobalSettings(),

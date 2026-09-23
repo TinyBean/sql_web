@@ -27,7 +27,6 @@ export const AnalysisGroupSchema = Type.Object({
   items: Type.Array(AnalysisItemSchema, { maxItems: 3 }),
 }, { additionalProperties: false });
 export const AnalysisReportSchema = Type.Object({
-  verification: Type.Optional(Type.String({ minLength: 1, maxLength: 5000 })),
   periods: Type.Array(Type.Object({
     period: PeriodKeySchema, comparison: text,
     minimum_evidence: Type.String(), history_evidence: Type.String(),
@@ -39,7 +38,7 @@ export type AnalysisReport = Static<typeof AnalysisReportSchema>;
 
 /** Decode only structural fields; never guess repairs or echo report contents. */
 export function decodeAnalysisStructures(value: unknown): unknown {
-  const structural = new Set(["periods", "groups", "items", "evidence_ids", "loss_reference", "updates", "changes", "group"]);
+  const structural = new Set(["periods", "groups", "items", "evidence_ids", "loss_reference"]);
   const decode = (input: unknown, key = "", location = "$"): unknown => {
     if (structural.has(key) && typeof input === "string") {
       try { input = JSON.parse(input) as unknown; }
@@ -80,10 +79,11 @@ export function validateAnalysisReport(
 ): { report: AnalysisReport; rows: Record<PeriodKey, DashboardRow[]> } {
   const value = parseAnalysisReport(input);
   const rows = {} as Record<PeriodKey, DashboardRow[]>;
-  const checkRefs = (ids: readonly string[]): void => {
+  const checkRefs = (ids: readonly string[], period: PeriodKey): void => {
     for (const id of ids) {
       const result = evidence.get(id);
       if (!result || result.truncated) throw new Error("证据不存在或被截断：" + id);
+      if (result.owner?.period !== period) throw new Error(period + " 的证据不属于本周期：" + id);
     }
   };
   for (const key of PERIOD_KEYS) {
@@ -95,14 +95,14 @@ export function validateAnalysisReport(
     if (report.minimum_evidence !== expected.minimum.id || report.history_evidence !== expected.history.id) {
       throw new Error(key + " 的最低点或历史证据引用不匹配初始上下文");
     }
-    checkRefs([report.minimum_evidence, report.history_evidence]);
+    checkRefs([report.minimum_evidence, report.history_evidence], key);
     rows[key] = [];
     for (const kind of ["MT", "ST"] as const) {
       const groups = report.groups.filter((group) => group.kind === kind);
       if (groups.length !== 1) throw new Error(key + " 必须分别覆盖 MT 和 ST");
       const group = groups[0]!;
       assertReadableText(group.no_findings_reason, key + "/" + kind + ".no_findings_reason");
-      checkRefs(group.evidence_ids);
+      checkRefs(group.evidence_ids, key);
       if (!group.evidence_ids.includes(expected.current.id)) throw new Error(key + "/" + kind + " 缺少本期指标证据");
       if (!group.items.length && !group.no_findings_reason.trim()) throw new Error("空清单必须解释数据不足或无充分依据的原因");
       const items = [...group.items].sort((a, b) => a.priority - b.priority);
@@ -112,12 +112,12 @@ export function validateAnalysisReport(
         for (const field of ["issue", "measure", "suggested_owner"] as const) {
           assertReadableText(item[field], key + "/" + kind + ".items[" + index + "]." + field);
         }
-        checkRefs(item.evidence_ids);
+        checkRefs(item.evidence_ids, key);
         let hours: number | null = null;
         if (item.loss_reference !== null) {
           if (item.category === "performance" || item.category === "yield") throw new Error("Performance/Yield 不得折算为损失小时，loss_reference 应为 null");
           const ref = item.loss_reference;
-          checkRefs([ref.evidence_id]);
+          checkRefs([ref.evidence_id], key);
           const measured = evidence.get(ref.evidence_id)!;
           const row = measured.rows[ref.row_index];
           if (!item.evidence_ids.includes(ref.evidence_id) || measured.source !== "measure_loss" ||

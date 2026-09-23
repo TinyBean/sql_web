@@ -30,6 +30,7 @@ function summarizeAgentEvents(events: readonly Event[], startedAt: number, ended
     if (type === "session") { sessionAt = at; lastBoundary = at; modelStart = at; }
     else if (type === "model_turn_start") modelStart = at;
     else if (type === "analysis_draft") draft = true;
+    else if (type === "analysis_accepted") { accepted = true; modelStart = undefined; lastBoundary = at; }
     else if (type === "auto_retry_start") retryCount += 1;
     else if (type === "compaction_start") compactionCount += 1;
     else if (type === "subagent_result") { accepted = true; modelStart = undefined; lastBoundary = at; }
@@ -38,9 +39,13 @@ function summarizeAgentEvents(events: readonly Event[], startedAt: number, ended
       const usage = object(message["usage"]);
       const parts = Array.isArray(message["content"]) ? message["content"].map(object) : [];
       const names = parts.filter((part) => part["type"] === "toolCall").map((part) => part["name"]);
+      // Older workers labelled draft submissions as investigation; keep their original metrics.
+      const legacyPhase = names.includes("finalize_analysis") ? "review" : names.includes("submit_analysis")
+        ? (draft ? "review" : "draft") : draft ? "review_investigation" : "investigation";
+      const phase = event["phase"] === "aggregation" || event["phase"] === "submission" ? event["phase"] : legacyPhase;
       if (Number(usage["output"] ?? 0) || Number(usage["input"] ?? 0) || parts.length || message["stopReason"] === "error") {
         turns.push({ turnId: Number(event["turnId"] ?? turns.length + 1),
-          phase: names.includes("finalize_analysis") ? "review" : names.includes("submit_analysis") ? (draft ? "review" : "draft") : draft ? "review_investigation" : "investigation",
+          phase,
           durationMs: Math.max(0, at - (modelStart ?? lastBoundary)),
           inputTokens: Number(usage["input"] ?? 0), outputTokens: Number(usage["output"] ?? 0) });
       }

@@ -34,17 +34,17 @@ scripts/
 
 ## 子 Agent 委派
 
-网站对话与每日分析都提供 `subagent` 工具：`{ tasks: [{ name, task }], context? }`。一次可传入 1–3 项独立调查任务，最多同时运行 3 个，等待全部结束后按输入顺序返回结果。主 Agent 自行判断何时委派，简单问题仍直接处理。
+网站对话提供 `subagent` 工具：`{ tasks: [{ name, task }], context? }`，主 Agent 自行决定是否委派 1–3 项独立任务。每日分析则由程序固定并行启动 `week`、`month`、`quarter` 三项任务，全部结束后主 Agent 才开始汇总；每日主 Agent 不提供再次委派工具。结果始终按任务输入顺序返回。
 
 每个子 Agent 使用独立的内存会话，沿用主 Agent 的模型、上下文和输出限制；只接收任务、显式背景与应用提供的看板或每日证据目录，不复制聊天历史。它可独立读取 Skill、查询只读 SQLite、查询标准损失及使用可用的 Python 沙箱计算；不提供继续委派、修改看板、发送邮件或提交每日报告的工具，Python 图片输出也会被拒绝。最终业务动作与 PNG 由主 Agent 完成。
 
-子任务默认最多运行 180 秒、调用 12 次工具，父任务期限更短时服从父任务期限。每日主子 Agent 合计仍最多调用 60 次工具，参数错误和未知工具也计数，最后 8 次只允许主 Agent 使用。网站点击停止、每日分析超时与服务关闭都会取消关联子任务并等待清理。
+子任务默认最多运行 180 秒、调用 12 次工具，父任务期限更短时服从父任务期限。每日主子 Agent 合计最多调用 60 次工具，自动分派计一次编排调用，参数错误和未知工具也计数，最后 8 次只允许主 Agent 使用。网站点击停止、每日分析超时与服务关闭都会取消关联子任务并等待清理。
 
 结果包含 `agent_id`、`name`、`status`、`text`、`text_truncated`、`error`、`snapshots`、`evidence_ids`、`usage` 和 `duration_ms`。状态为 `completed`、`failed`、`timed_out`、`aborted` 或 `budget_exhausted`；单项失败保留其他结果，主 Agent 不能把未完成输出当作完整结论。每项结论最多返回 12,000 字符，超出时明确标记截断。
 
-网站子任务快照保存在父会话下，使用任务独立的规范名称，主 Agent 可直接读取或用于看板更新。每日主子 Agent 共享同一只读事务和冻结证据登记表；查询、快照落盘与证据登记串行完成，模型请求仍可并行，报告继续执行原有证据校验。
+网站子任务快照保存在父会话下，使用任务独立的规范名称，主 Agent 可直接读取或用于看板更新。每日主子 Agent 共享同一只读事务和冻结证据登记表；查询、快照落盘与证据登记串行完成，模型请求并行。证据记录 `owner.period` 和 `owner.agentId`：子任务仅可读取该周期的本期、最低点、历史基准及自身补查证据；提示、动态目录和压缩后的上下文均保持这一范围。Python 在解析快照前校验白名单，未知和越权名称统一拒绝且不泄露目录；写入使用任务与周期独立命名空间。日期相同也不自动共享证据。主 Agent 可读全部证据，最终报告仍须按周期引用。
 
-前端沿用一次工具调用记录，子任务明细写入服务端日志，并关联父调用与子任务 ID。每日 `metrics.json` 的 `schemaVersion` 为 2，`agents` 分别记录主子 Agent 指标，顶层 token 汇总所有 Agent；`durationMs` 为实际总耗时，`modelObservedMs` 与 `toolMs` 为可重叠的累计耗时。`toolMs` 排除委派等待，等待时间单独记为 `delegationMs`。子任务不产生网站会话，也不改变 HTTP/SSE、聊天历史或看板的数据格式。
+前端沿用一次工具调用记录，子任务明细写入服务端日志，并关联父调用与子任务 ID。每日 `metrics.json` 的 `schemaVersion` 为 2，`agents` 分别记录主子 Agent 指标，顶层 token 汇总所有 Agent；`durationMs` 为实际总耗时，`modelObservedMs` 与 `toolMs` 为可重叠的累计耗时。`toolMs` 排除委派等待，等待时间单独记为 `delegationMs`。新运行的模型阶段为调查、汇总和提交，历史草稿与复核事件仍可统计。子任务不产生网站会话，也不改变 HTTP/SSE、聊天历史或看板的数据格式。
 
 ## 默认看板
 
@@ -61,7 +61,7 @@ scripts/
 
 - `src/server/dashboard/default/template.ts`：卡片定义及构造函数，集中维护标题、布局、仪表盘、表头和统计口径；`createDefaultDashboard(now)` 可传入固定时间。
 - `src/server/dashboard/default/calculate.ts`：`calculateNumericCards(database, throughDate, syncWarnings)` 使用调用方的只读连接，返回 9 张数值卡片，不启动 Agent、不发布文件。
-- `src/server/dashboard/default/analysis/index.ts`：准备 3 张改善卡片的周期和覆盖提示，再启动临时 Agent、校验并回填报告；证据、草稿复核及审计保留在分析模块内。
+- `src/server/dashboard/default/analysis/index.ts`：准备 3 张改善卡片的周期和覆盖提示，再启动临时 Agent、校验并回填报告；证据隔离、报告校验及审计保留在分析模块内。
 
 `generateDefaultDashboard()` 位于默认看板根目录的 `run.ts`，负责子进程生命周期、超时和降级；`worker.ts` 在同一只读事务中依次生成模板、计算数值、准备分析卡片、发送基础看板、执行 Agent 分析。默认看板的 `update()` 最后校验并原子发布完整看板。
 
@@ -135,15 +135,17 @@ npm run data:daily -- --through-date 2026-09-14
 
 分析正文使用业务用户可读的中文日期、指标和数据来源说明；内部证据编号（如 `q11`）、查询行号、工具名及字段名只用于结构化引用和审计。提交校验发现这些内部标记出现在正文时，要求 Agent 保留事实和统计口径、改写后再提交。
 
-临时 Agent 复用网站的 `execute_sql`、`get_current_time`、`measure_loss` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，另保留结构化草稿提交、读取和复核工具；最多 60 次调用。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限查询失败且不保存快照。每日分析按各周期的 start/end 调用统一日期接口；报告只接受标准损失查询来源、日期范围和 MT/ST 类型均匹配的原始行，日期相同的周期可复用同一证据。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
+临时 Agent 复用网站的 `execute_sql`、`get_current_time`、`measure_loss` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，最终报告通过 `submit_analysis` 提交；最多 60 次调用。每日主 Agent 的 `execute_sql` 和 `measure_loss` 必须填写 `period`（`week`、`month` 或 `quarter`）以标记补查证据归属，子任务周期由服务端绑定，不能指定或修改。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限查询失败且不保存快照。每日分析按各周期的 start/end 调用统一日期接口；报告只接受标准损失查询来源、日期范围和 MT/ST 类型均匹配的原始行，所有证据引用必须归属报告对应周期，即使日期相同也分别登记。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
 
-自动上下文压缩已启用。每日分析的上下文上限默认 262144 token、单次输出上限默认 32768 token，均不超过模型目录上限；用 `SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW` 按实际部署容量调整、`SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS` 调整输出上限。输出还最多占上下文四分之一，提前为系统指令、工具和证据目录预留空间。压缩后保留系统中的口径与比较基准，每次请求重新提供快照目录、工具额度和草稿状态；完整证据和校验在服务端独立保存。模型将报告数组序列化成 JSON 字符串时会先规范化再严格校验，错误反馈不会重复回显整个报告。
+自动上下文压缩已启用。每日分析的上下文上限默认 262144 token、单次输出上限默认 32768 token，均不超过模型目录上限；用 `SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW` 按实际部署容量调整、`SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS` 调整输出上限。输出还最多占上下文四分之一，提前为系统指令、工具和证据目录预留空间。压缩后保留系统中的口径与比较基准，每次请求重新提供权限范围内的快照目录和工具额度，主 Agent 还会收到服务端保存的三期子任务结果与状态；完整证据和校验在服务端独立保存。模型将报告数组序列化成 JSON 字符串时会先规范化再严格校验，错误反馈不会重复回显整个报告。
 
-`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、优先级和损失证据；`submit_analysis` 校验并保存完整草稿，返回 `draft_id`，再次完整提交会使旧 ID 失效。Agent 须在后续模型轮次逐条复核数值、机台、历史结论、日均分母及措施可行性，再调用 `finalize_analysis` 提交 `draft_id`、`verification` 和 `updates`。无修改时 `updates=[]`；`update_period` 修改比较说明，`update_item` 按周期、类型、原优先级修改条目，新增、删除及重排使用 `replace_group`。重复或冲突的修改被拒绝；合并后仍执行全部原有校验，失败不改变草稿。首次有效复核返回实际修改及完整合并结果、生成新的草稿 ID；Agent 必须在后续轮次核对复核说明中的修正已落实，再以 `updates=[]` 确认，若补交修改则再次确认。该短步骤避免“说明已修改、实际漏提交”的情况。压缩后可用 `get_analysis_draft` 按周期、类型读取服务端草稿。字段错误反馈包含路径及可获取的错误位置，不猜测修复损坏 JSON。
+`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、证据周期归属、优先级、业务正文和损失证据；`submit_analysis` 验证成功即接受并结束分析，不产生草稿，也没有复核、修改合并或再次确认步骤。报告不再包含 `verification`，不再提供 `get_analysis_draft` 和 `finalize_analysis`。字段或证据错误返回模型修正重交；模型只输出正文而未提交时，最多追加两次补救提示。
+
+子任务失败、超时、额度耗尽、输出截断或证据不足时，主 Agent 在剩余时间与工具额度内补查该周期。成功周期直接用于汇总；仍须提交完整三期才接受，未能补齐则沿用整体分析不可用的降级行为。
 
 模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。空数据模板不附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
 
-每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID 和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态、轮次和工具 ID、工具耗时、完整草稿、复核修改及压缩事件）、`metrics.json`（分阶段耗时、token、错误、重试及超时未完成区间）和有效的 `report.json`。模型耗时为客户端观测的等待与生成区间，可能包括重试和压缩，不代表服务端纯推理时间。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和 `analysisArtifactDir`；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
+每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID、周期与任务归属和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态、轮次和工具 ID、工具耗时、子任务结果、最终接受报告及压缩事件）、`metrics.json`（分阶段耗时、token、错误、重试及超时未完成区间）和有效的 `report.json`。模型耗时为客户端观测的等待与生成区间，可能包括重试和压缩，不代表服务端纯推理时间。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和 `analysisArtifactDir`；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
 
 分析性能对照使用独立的旧版工作目录和一致数据库备份，不同步数据、不发布看板、不创建网站会话：
 
@@ -155,8 +157,6 @@ node --import tsx scripts/benchmark-daily-analysis.ts \
 ```
 
 旧版目录需包含原版本源码及可用依赖。对照脚本调用旧版的 `analysis/run.ts` 中的 `generateAnalyzedDashboard()`，当前版调用默认看板根目录 `run.ts` 中的 `generateDefaultDashboard()`。脚本使用当前项目的同一模型配置和凭据，通过 SQLite backup 创建数据库副本；也可用 `--snapshot /path/to/backup.sqlite` 指定已有一致备份。按“旧/新、新/旧、旧/新”顺序串行运行，保存完整报告、证据、`evaluation.json` 和 `summary.json`。性能只比较成功运行的中位数，旧版成功不足两次时不认定提速目标；质量评审单独记录，不能仅凭耗时结果认定通过。评审核对关键数值、机台、日期和措施依据，以及旧版多次出现的有效高优先级问题是否得到保留或有证据的排除。
-
-提交示例、回退边界和真实对照记录见 [临时 Agent 耗时优化与验收](docs/default-analysis-performance.md)。
 
 安装当前项目的每日 09:00 定时任务：
 

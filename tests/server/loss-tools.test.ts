@@ -99,7 +99,7 @@ test("child loss measurements keep distinct immutable snapshots readable by the 
   }
 });
 
-test("chat and daily tools share schemas, rows and views while only daily registers audit evidence", async (t) => {
+test("daily tools add period ownership while retaining chat loss parameters, rows and views", async (t) => {
   const { directory, databasePath, database, artifacts, store } = fixture(t);
   const runtime = await CodeInterpreterRuntime.create({
     pythonPath: path.join(directory, "missing-python"), bwrapPath: "/missing-bwrap", prlimitPath: "/missing-prlimit", projectRoot: directory,
@@ -113,10 +113,12 @@ test("chat and daily tools share schemas, rows and views while only daily regist
   const evidence = new AnalysisEvidence(reader, undefined, auditArtifacts);
   const chat = createAgentTools(database, artifacts, runtime).find((tool) => tool.name === "measure_loss")!;
   const daily = createAnalysisTools(evidence, runtime).find((tool) => tool.name === "measure_loss")!;
-  assert.deepEqual(chat.parameters, daily.parameters);
-  assert.equal(chat.description, daily.description);
+  assert.deepEqual(Object.fromEntries(Object.entries(daily.parameters.properties).filter(([key]) => key !== "period")), chat.parameters.properties);
+  assert.ok(daily.parameters.required?.includes("period"));
+  assert.ok(!("period" in chat.parameters.properties));
+  assert.ok(daily.description.startsWith(chat.description));
   const chatResult = await chat.execute("chat", { ...range, by_machine: true }, undefined, undefined, undefined as never);
-  const dailyResult = await daily.execute("daily", { ...range, by_machine: true }, undefined, undefined, undefined as never);
+  const dailyResult = await daily.execute("daily", { ...range, period: "week", by_machine: true }, undefined, undefined, undefined as never);
   const a = JSON.parse(chatResult.content.find((part) => part.type === "text")!.text);
   const b = JSON.parse(dailyResult.content.find((part) => part.type === "text")!.text);
   assert.deepEqual(a.view, b.view);
@@ -124,9 +126,10 @@ test("chat and daily tools share schemas, rows and views while only daily regist
   assert.deepEqual(a.range, b.range);
   assert.equal(a.evidence_id, undefined);
   assert.equal(evidence.records.get(b.evidence_id)?.source, "measure_loss");
+  assert.deepEqual(evidence.records.get(b.evidence_id)?.owner, { period: "week", agentId: "root" });
   assert.deepEqual(evidence.records.get(b.evidence_id)?.rows, JSON.parse(readFileSync(artifacts.resolveDataSnapshot(a.snapshot.name).filePath, "utf8")).rows);
   const sql = createAnalysisTools(evidence, runtime).find((tool) => tool.name === "execute_sql")!;
-  await assert.rejects(() => sql.execute("overwrite", { sql: "SELECT 0", save_as: b.snapshot.name }, undefined, undefined, undefined as never), /已固定/u);
+  await assert.rejects(() => sql.execute("overwrite", { period: "week", sql: "SELECT 0", save_as: b.snapshot.name }, undefined, undefined, undefined as never), /已固定/u);
 });
 
 test("invalid or cancelled measurements do not create snapshots", (t) => {

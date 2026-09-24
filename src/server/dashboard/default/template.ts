@@ -27,7 +27,7 @@ export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): D
     format: { unit: "%", precision: 2 },
     metricDefinition: `${kind} ${label} = AVG(${kind} 日 ${label})×100;日 ${label} = ${availability}×Performance (DUT-On)×Performance (Test Time)×Yield。` +
       (effective ? "Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))。" : "") +
-      `五项指标分别对该类型 ${label} 可计算日等权平均;OEE 不由组成项的平均值再次相乘。沿用有效 LOT、PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
+      `五项指标分别对该类型 ${label} 可计算日等权平均;OEE 不由组成项的平均值再次相乘。Availability 和 Idle 使用全部状态秒数作分母;仅 Yield 筛选 P/M/R/A/F/L 前缀 LOT。沿用 PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
   };
 }
 
@@ -70,7 +70,7 @@ export function createMachineExtremesTemplate(): DashboardTableWidget {
       { key: "oee_percent", label: "周期OEE%" }, { key: "top10_machines", label: "TOP10 机台(机台 OEE 最低)" },
     ] },
     format: { unit: "%", precision: 2 },
-    metricDefinition: "与 OEE 极值明细(周/月/季)逐项对应;周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总:运行秒数÷(有效 Availability 业务日数×86400)×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×机台TD次数)÷SUM(机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)×100;标准秒数来自当日该类型全部合格 DUT,含无匹配 Availability 的记录;MT/ST 合并为一台,按 Availability 累计时长标注主要类型,并列取 MT。按未舍入机台 OEE 升序取最低 10 台,并列按机台编号;不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计,缺日不会补零。",
+    metricDefinition: "与 OEE 极值明细(周/月/季)逐项对应;周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总:运行秒数÷整期全部状态秒数×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×机台TD次数)÷SUM(机台实际测试秒数)]×SUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)×100;两项 Performance 不筛选 LOT 前缀;标准秒数来自当日该类型全部合格 DUT,含无匹配 Availability 的记录;MT/ST 合并为一台,按 Availability 累计时长标注主要类型,并列取 MT。按未舍入机台 OEE 升序取最低 10 台,并列按机台编号;不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计,缺日不会补零。",
   };
 }
 

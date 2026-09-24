@@ -28,7 +28,7 @@ function fixture(t: TestContext) {
   insert.run("MT-02", "P1", "Conversion", "5000", "2026-01-01", 7200);
   insert.run("MT-02", "P1", "Test(Normal)", "5000", "2026-01-02", 3600);
   insert.run("ST-01", "P1", "Conversion", "7000", "2026-01-03T08:30:00", 10800);
-  // Invalid LOT, excluded platform, unknown type and out-of-range rows must not contribute.
+  // A non-Yield LOT still contributes; excluded platforms, unknown types and out-of-range rows do not.
   insert.run("MT-01", "X1", "Conversion", "5000", "2026-01-03", 360000);
   insert.run("TSPH001", "P1", "Conversion", "5000", "2026-01-03", 360000);
   insert.run("UNKNOWN", "P1", "Conversion", "1000", "2026-01-03", 360000);
@@ -44,18 +44,28 @@ test("standard losses preserve canonical filtering, inclusive dates and type-wid
   const { database, artifacts } = fixture(t);
   const measured = measureLoss(database, artifacts, range);
   assert.deepEqual(measured.rows.map((row) => [row["kind"], row["loss_hours"], row["kind_availability_days"], row["observed_days"], row["selected_days"]]), [
-    ["MT", 3, 2, 1, 3], ["ST", 3, 1, 1, 3],
+    ["MT", 103, 3, 2, 3], ["ST", 3, 1, 1, 3],
   ]);
-  assert.equal(measured.rows[0]?.["hours_per_kind_available_day"], 1.5);
-  assert.equal(measured.rows[0]?.["hours_per_selected_day"], 1);
+  assert.equal(measured.rows[0]?.["hours_per_kind_available_day"], 103 / 3);
+  assert.equal(measured.rows[0]?.["hours_per_selected_day"], 103 / 3);
   const filtered = measureLoss(database, artifacts, { ...range, states: ["Conversion"], machines: ["MT-01"], by_machine: true });
   assert.equal(filtered.rows.length, 1);
   assert.equal(filtered.rows[0]?.["machine"], "MT-01");
-  assert.equal(filtered.rows[0]?.["loss_hours"], 1);
-  assert.equal(filtered.rows[0]?.["kind_availability_days"], 2, "loss filters do not reduce the coverage denominator");
-  assert.equal(filtered.rows[0]?.["hours_per_kind_available_day"], 0.5);
+  assert.equal(filtered.rows[0]?.["loss_hours"], 101);
+  assert.equal(filtered.rows[0]?.["kind_availability_days"], 3, "loss filters do not reduce the coverage denominator");
+  assert.equal(filtered.rows[0]?.["hours_per_kind_available_day"], 101 / 3);
   assert.equal(measureLoss(database, artifacts, { ...range, states: ["Machine_Running"] }).rows.length, 0);
   assert.equal(measureLoss(database, artifacts, { ...range, machines: ["MT-01') OR 1=1 --"] }).rows.length, 0);
+});
+
+test("None LOT states remain available to canonical loss classification", (t) => {
+  const { database, artifacts, writer } = fixture(t);
+  const insert = writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES('NONE','None',?,'5000','2026-01-02',3600)");
+  for (const state of ["Assistance", "HangUp", "Temp_Up(Normal Retest)"]) insert.run(state);
+  const measured = measureLoss(database, artifacts, { ...range, machines: ["NONE"] });
+  assert.deepEqual(measured.rows.map((row) => [row["state_group"], row["loss_hours"], row["kind_availability_days"]]), [
+    ["IDLE", 2, 3], ["Other", 1, 3],
+  ]);
 });
 
 test("loss snapshots survive restoration, never replace earlier measurements, and feed dashboards", async (t) => {
@@ -67,7 +77,7 @@ test("loss snapshots survive restoration, never replace earlier measurements, an
   assert.equal(first.snapshot.name, "loss-20260101-20260103");
   assert.equal(second.snapshot.name, first.snapshot.name + "-2");
   assert.notEqual(second.snapshot.version, first.snapshot.version);
-  assert.equal(second.rows[0]?.["loss_hours"], 6);
+  assert.equal(second.rows[0]?.["loss_hours"], 206);
   const frozen = JSON.parse(readFileSync(restored.resolveDataSnapshot(first.snapshot.name).filePath, "utf8"));
   assert.deepEqual(frozen.rows, first.rows);
   assert.throws(() => store.forSession("other-test-session").resolveDataSnapshot(first.snapshot.name), /不存在/u);
@@ -82,7 +92,7 @@ test("loss snapshots survive restoration, never replace earlier measurements, an
       format: { unit: "小时", precision: 1 }, metricDefinition: "按业务日查询标准损失", warnings: [],
     },
   });
-  assert.deepEqual(result.dashboard.widgets.at(-1)?.data.map((row) => row["loss_hours"]), [3, 3]);
+  assert.deepEqual(result.dashboard.widgets.at(-1)?.data.map((row) => row["loss_hours"]), [103, 3]);
   await store.deleteSession(sessionId);
   assert.equal(existsSync(path.join(directory, "artifacts", sessionId)), false);
 });

@@ -190,6 +190,7 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
     "a",
   );
   assert.ok(availability.availabilityStateExpression);
+  assert.equal(availability.yieldLotPredicate, undefined);
   assert.equal(availability.exclusiveEndDate, "2026-09-07");
   assert.equal(
     availability.dateRangePredicate,
@@ -199,13 +200,11 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   assert.match(availability.platformPredicate, /'TSPH001'/u);
   assert.match(availability.platformPredicate, /'TSPH013'/u);
   const availabilityRows = database.prepare(`SELECT
-    ${availability.lotPredicate} AS eligible_lot,
     ${availability.kindExpression} AS kind,
     ${availability.availabilityStateExpression} AS state_group
     FROM availability_rows AS a ORDER BY a.id`).all() as Record<string, unknown>[];
   availabilityRows.forEach((row, index) => {
     const source = availabilityCases[index]!;
-    assert.equal(row["eligible_lot"] === 1, isValidOeeLotId(source.lotId));
     assert.equal(row["kind"], classifyTestOeeKind(source.step, source.machineId));
     assert.equal(row["state_group"], classifyAvailabilityState(source.finalState, source.lotId));
   });
@@ -220,11 +219,12 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   for (const row of dutCases) insertDut.run(row.lotId, row.step, row.machineId);
   const dut = getTestOeeSqlExpressions("dut", "2026-08-31", "2026-09-06", "d");
   assert.equal(dut.availabilityStateExpression, undefined);
+  assert.ok(dut.yieldLotPredicate);
   assert.equal(dut.dayExpression, "substr(d.date,1,10)");
   assert.equal(dut.machineExpression, "d.machine_id");
   assert.match(dut.platformPredicate, /d\.machine_id NOT IN/u);
   const dutRows = database.prepare(`SELECT
-    ${dut.lotPredicate} AS eligible_lot,
+    ${dut.yieldLotPredicate} AS eligible_lot,
     ${dut.kindExpression} AS kind
     FROM dut_rows AS d ORDER BY d.id`).all() as Record<string, unknown>[];
   dutRows.forEach((row, index) => {

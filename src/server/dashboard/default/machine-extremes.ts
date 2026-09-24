@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { DashboardRow, DashboardTableWidget } from "../../../shared/dashboard.ts";
 import { addDays, assertDate, type DatePeriod } from "../../database/business-dates.ts";
-import { getTestOeeSqlExpressions, getTestOeeDutCtes, TEST_OEE_DAY_SECONDS } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { getTestOeeSqlExpressions, getTestOeeDutCtes } from "../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { periodLabel } from "./periods.ts";
 import { createMachineExtremesTemplate } from "./template.ts";
 
@@ -21,14 +21,14 @@ availability_classified AS (
     ${a.kindExpression} AS kind, ${a.availabilityStateExpression} AS state_group,
     CAST(a.time_span AS REAL) AS state_seconds
   FROM oee_availability AS a
-  WHERE ${a.dateRangePredicate} AND ${a.lotPredicate} AND ${a.platformPredicate}
+  WHERE ${a.dateRangePredicate} AND ${a.platformPredicate}
 ),
 availability_period AS (
   SELECT machine, COUNT(DISTINCT day) AS availability_days,
     CASE WHEN SUM(CASE WHEN kind='MT' THEN state_seconds ELSE 0 END) >=
       SUM(CASE WHEN kind='ST' THEN state_seconds ELSE 0 END) THEN 'MT' ELSE 'ST' END AS kind,
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
-      / NULLIF(COUNT(DISTINCT day) * ${TEST_OEE_DAY_SECONDS}.0, 0) AS availability
+      / NULLIF(SUM(state_seconds), 0) AS availability
   FROM availability_classified
   WHERE kind IN ('MT','ST')
   GROUP BY machine
@@ -36,7 +36,9 @@ availability_period AS (
 ${getTestOeeDutCtes(period.start, period.end)},
 machine_dut_daily AS (
   SELECT machine, day, kind,
-    SUM(input_quantity) AS input_quantity, SUM(output_quantity) AS output_quantity,
+    SUM(input_quantity) AS input_quantity,
+    SUM(CASE WHEN yield_eligible THEN input_quantity END) AS yield_input_quantity,
+    SUM(CASE WHEN yield_eligible THEN output_quantity END) AS yield_output_quantity,
     SUM(socket_quantity) AS socket_quantity, SUM(touchdown_label) AS touchdown_count,
     SUM(test_time_seconds) AS actual_test_seconds
   FROM dut_base
@@ -46,7 +48,7 @@ machine_dut_daily AS (
 dut_period AS (
   SELECT q.machine, COUNT(DISTINCT q.day) AS dut_days,
     SUM(q.input_quantity) / NULLIF(SUM(q.socket_quantity), 0) AS dut_on,
-    SUM(q.output_quantity) / NULLIF(SUM(q.input_quantity), 0) AS final_yield,
+    SUM(q.yield_output_quantity) / NULLIF(SUM(q.yield_input_quantity), 0) AS final_yield,
     CASE WHEN COUNT(t.trimmed_mean_test_seconds) < COUNT(*) THEN NULL
       ELSE SUM(t.trimmed_mean_test_seconds * q.touchdown_count)
         / NULLIF(SUM(q.actual_test_seconds), 0) END AS test_time_performance

@@ -30,6 +30,22 @@ function fixture(t: TestContext) {
 const monthRange = { start: "2026-01-01", end: "2026-01-31" };
 const monthLow = { grain: "月", point_type: "最低", period_label: "2026-01", oee_percent: 55.55 };
 
+test("rankings use actual state totals and Yield-only LOT eligibility", (t) => {
+  const { database, a, d } = fixture(t);
+  const day = "2026-01-01";
+  a("MIX", day, 21600, "5000", "Test(Normal)", "None");
+  a("MIX", day, 21600, "5000", "PM", "Q1");
+  d("MIX", day, 100, 80, 200);
+  d("MIX", day, 100, 0, 100, "5000", "None");
+  a("NO-YIELD", day, 4000, "5000", "Test(Normal)", "None");
+  d("NO-YIELD", day, 10, 0, 20, "5000", "None");
+  a("ZERO-TOTAL", day, 0); d("ZERO-TOTAL", day, 10, 5, 10);
+  a("LOSS", day, 3600, "5000", "PM", "None"); d("LOSS", day, 10, 5, 10);
+  const table = buildMachineExtremesTable(database, [monthLow], monthRange);
+  assert.equal(table.data[0]!["top10_machines"], "1.LOSS(MT 0.00%)、2.MIX(MT 26.67%)");
+  assert.match(table.warnings.join(" "), /可计算机台 2\/4/u);
+});
+
 test("machine test time shares each daily type standard including DUT without Availability", (t) => {
   const { database, a, d } = fixture(t);
   for (const day of ["2026-01-01", "2026-01-02"]) {
@@ -45,7 +61,7 @@ test("machine test time shares each daily type standard including DUT without Av
     ELSE end_time END`);
   // Standards: Jan 1 = 30s; Jan 2 = 20s. Each machine's standard total is 50s.
   const table = buildMachineExtremesTable(database, [monthLow], monthRange);
-  assert.equal(table.data[0]!["top10_machines"], "1.B(MT 50.00%)、2.A(MT 83.33%)");
+  assert.equal(table.data[0]!["top10_machines"], "1.B(MT 100.00%)、2.A(MT 166.67%)");
   database.exec("UPDATE oee_dut_utilization SET end_time=NULL WHERE date='2026-01-02'");
   assert.equal(buildMachineExtremesTable(database, [monthLow], monthRange).data[0]!["top10_machines"], null);
 });
@@ -71,7 +87,7 @@ test("machine rankings aggregate the whole period, merge types and include end-d
 
   const table = buildMachineExtremesTable(database, [monthLow], monthRange, ["同步缺日提示"]);
   assert.deepEqual(table.data, [{
-    ...monthLow, top10_machines: "1.END(MT 5.00%)、2.B(MT 25.00%)、3.A(ST 34.09%)",
+    ...monthLow, top10_machines: "1.END(MT 10.00%)、2.A(ST 45.45%)、3.B(MT 50.00%)",
   }]);
   assert.ok(table.warnings.includes("同步缺日提示"));
   assert.match(table.warnings.join(" "), /Availability 覆盖 1–2\/31 天，DUT 覆盖 1–2\/31 天/u);
@@ -95,8 +111,8 @@ test("rankings exclude invalid and missing inputs, preserve zero OEE, and reuse 
   d("TYPE", "2026-01-01", 10, 10, 20);
 
   const table = buildMachineExtremesTable(database, [monthLow], monthRange);
-  assert.equal(table.data[0]?.["top10_machines"], "1.LOSS(MT 0.00%)、2.TYPE(ST 12.50%)、3.ADH175(ST 25.00%)");
-  assert.match(table.warnings.join(" "), /可计算机台 3\/7，展示 3 台/u);
+  assert.equal(table.data[0]?.["top10_machines"], "1.LOSS(MT 0.00%)、2.TYPE(ST 16.67%)、3.ADH175(ST 50.00%)");
+  assert.match(table.warnings.join(" "), /可计算机台 3\/8，展示 3 台/u);
 });
 
 test("top ten uses unrounded OEE, then machine identifiers for ties, and never clamps source values", (t) => {
@@ -134,7 +150,7 @@ test("rows follow grain and low/high order, preserve fleet OEE, and clip W00 and
   ]);
   for (const row of table.data) {
     assert.equal(row["oee_percent"], 51.23);
-    assert.equal(row["top10_machines"], "1.CURRENT(MT 20.00%)");
+    assert.equal(row["top10_machines"], "1.CURRENT(MT 40.00%)");
   }
   assert.match(table.warnings.join(" "), /2027-01-01 至 2027-01-01/u);
   assert.equal(table.warnings.length, 3, "shared high/low periods should share coverage notes");

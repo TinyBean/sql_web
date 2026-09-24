@@ -330,7 +330,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
     if (widget.kind !== "table") continue;
     assert.deepEqual(widget.encoding.columns, [
       { key: "kind", label: "类型" }, { key: "priority", label: "优先级" },
-      { key: "issue", label: "问题（损失源）" }, { key: "measure", label: "改善措施" },
+      { key: "issue", label: "问题(损失源)" }, { key: "measure", label: "改善措施" },
       { key: "suggested_owner", label: "建议责任人" }, { key: "loss_hours", label: "本期损失小时" },
     ]);
     assert.ok(!widget.warnings.some((w) => w.startsWith("本次分析暂不可用")));
@@ -430,7 +430,8 @@ test("unavailable models publish new metrics and empty analysis, without creatin
     publish(_file, state) {
       published = state;
       assert.equal(state.dateRange?.end, "2026-01-12");
-      assert.ok(Math.abs(Number(state.widgets[1]?.data[0]?.["overall_oee_percent"]) - 100 / 6) < 1e-10);
+      const expectedOee = (40 * 21_600 / 30_600 + 2 * 40 * 43_200 / 52_200) / 3;
+      assert.ok(Math.abs(Number(state.widgets[1]?.data[0]?.["overall_oee_percent"]) - expectedOee) < 1e-10);
       for (const widget of state.widgets.slice(9)) {
         assert.deepEqual(widget.data, []);
         assert.ok(widget.warnings.some((warning) => warning.includes("本次分析暂不可用")));

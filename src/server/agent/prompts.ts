@@ -12,7 +12,7 @@ const DATABASE_RULES = `你是一个严谨的数据库问答助手。你的任�
 7. 不要声称自己访问了未由工具提供的文件、终端或网络。只能使用当前会话已注册并启用的工具。
 `;
 
-const OEE_RULES = `15. OEE 查询继续遵循 Test OEE Skill 中的日期、LOT、MT/ST 与 Machine_Running 口径。查询标准状态损失时先阅读该 Skill 和 references，再调用 measure_loss，传入业务日闭区间 start_date/end_date，可用 states、machines 筛选或 by_machine 获取机台明细。measure_loss 自动保存完整快照，complete/summary 视图可直接分析；展示省略不代表快照截断。覆盖日数不是损失出现日数或机台天数之和，空结果不能视为零损失或完整覆盖。修改固定计算口径时使用 Skill SQL 表达式和 execute_sql。`;
+const OEE_RULES = `15. OEE 查询继续遵循 Test OEE Skill 中的日期、Yield 专用 LOT 筛选、MT/ST 与 Machine_Running 口径。Availability、Idle 和两项 Performance 不筛选 LOT 前缀，Availability 与 Idle 以全部状态秒数之和作分母。查询标准状态损失时先阅读该 Skill 和 references，再调用 measure_loss，传入业务日闭区间 start_date/end_date，可用 states、machines 筛选或 by_machine 获取机台明细。measure_loss 自动保存完整快照，complete/summary 视图可直接分析；展示省略不代表快照截断。覆盖日数不是损失出现日数或机台天数之和，空结果不能视为零损失或完整覆盖。修改固定计算口径时使用 Skill SQL 表达式和 execute_sql。`;
 
 export function websiteInvestigationPrompt(): string {
   return DATABASE_RULES + "\n" + OEE_RULES;

@@ -121,7 +121,7 @@ test("numeric calculation and analysis preparation own separate cards without st
   } finally { database.close(); }
 });
 
-test("generates numeric cards using canonical calculations, stable extrema, and empty analysis placeholders", (t) => {
+test("generates numeric cards using canonical calculations, period extrema, and empty analysis placeholders", (t) => {
   const { config } = fixture(t);
   const writer = new DatabaseSync(config.databasePath);
   for (const day of ["2026-01-01", "2026-01-08"]) {
@@ -134,7 +134,7 @@ test("generates numeric cards using canonical calculations, stable extrema, and 
     insert.run("MT-01", "P-LOT", state, "5000", "2026-01-01", seconds);
   }
   insert.run("TSPH001", "P-LOT", "Test(Normal)", "5000", "2026-01-01", 999999);
-  insert.run("EXCLUDED", "None", "Test(Normal)", "5000", "2026-01-01", 999999);
+  insert.run("NON-YIELD", "None", "Test(Normal)", "5000", "2026-01-01", 12600);
   writer.close();
   const state = readCalculatedDashboard(config.databasePath, "2026-01-08", new Date("2026-01-09T01:00:00Z"));
   assert.deepEqual(state.widgets.map((widget) => [widget.id, widget.size]), createDefaultDashboard().widgets.map((widget) => [widget.id, widget.size]));
@@ -142,12 +142,14 @@ test("generates numeric cards using canonical calculations, stable extrema, and 
   assert.equal(state.dataAsOf, "2026-01-09T01:00:00.000Z");
   const overview = state.widgets[1]!;
   assert.ok(overview.kind === "overview");
-  assert.equal(overview.data[0]?.["overall_oee_percent"], 20);
+  // Jan 1 MT: 55800 running / 68400 total; Jan 8 MT: all running.
+  const expectedOverview = (55_800 / 68_400 * 40 + 40) / 2;
+  assert.ok(Math.abs(Number(overview.data[0]?.["overall_oee_percent"]) - expectedOverview) < 1e-10);
   assert.match(overview.encoding.description ?? "", /2\/8/u);
   assert.ok(overview.warnings.some((warning) => warning.includes("NULL")));
   const weekly = state.widgets[4]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
-    ["2026-W00", 20, 20, 20], ["2026-W01", 20, null, null],
+    ["2026-W00", 36.32, null, 36.32], ["2026-W01", 40, 40, null],
   ]);
   assert.equal(state.widgets[7]?.data.length, 6);
   const machines = state.widgets[8]!;
@@ -160,7 +162,11 @@ test("generates numeric cards using canonical calculations, stable extrema, and 
       item["grain"] === row["grain"] && item["point_type"] === row["point_type"]);
     assert.equal(row["period_label"], extreme?.["period_label"]);
     assert.equal(row["oee_percent"], extreme?.["oee_percent"]);
-    assert.match(String(row["top10_machines"]), /^1\.ST-01\(ST 20\.00%\)、2\.MT-01\(MT /u);
+    // Machine period aggregation retains Jan 2's input even though its daily Socket denominator is zero.
+    const expectedMachines = row["grain"] === "周"
+      ? row["point_type"] === "最低" ? "1.ST-01(ST 40.00%)、2.MT-01(MT 69.82%)" : "1.MT-01(MT 40.00%)、2.ST-01(ST 40.00%)"
+      : "1.ST-01(ST 40.00%)、2.MT-01(MT 54.68%)";
+    assert.equal(row["top10_machines"], expectedMachines);
   }
   const actions = state.widgets[9]!;
   assert.deepEqual(actions.data, []);
@@ -172,28 +178,28 @@ test("generates numeric cards using canonical calculations, stable extrema, and 
 test("weekly trends, extrema, machine rankings and complete-week analysis share Sunday boundaries", (t) => {
   const { config } = fixture(t);
   const writer = new DatabaseSync(config.databasePath);
-  seed(writer, "2026-01-03", "MT", 20); // Saturday: W00, 20%
-  seed(writer, "2026-01-04", "MT", 40); // Sunday: W01, 10%
-  seed(writer, "2026-01-10", "MT", 10); // Saturday: W01, 40%
-  seed(writer, "2026-01-11", "MT", 80); // Sunday: W02, 5%
+  seed(writer, "2026-01-03", "MT", 20); // Saturday: W00, 40%
+  seed(writer, "2026-01-04", "MT", 40); // Sunday: W01, 20%
+  seed(writer, "2026-01-10", "MT", 10); // Saturday: W01, 80%
+  seed(writer, "2026-01-11", "MT", 80); // Sunday: W02, 10%
   writer.close();
 
   const state = readCalculatedDashboard(config.databasePath, "2026-01-11");
   const weekly = state.widgets[4]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
-    ["2026-W00", 20, null, null], ["2026-W01", 25, 25, null], ["2026-W02", 5, null, 5],
+    ["2026-W00", 40, null, null], ["2026-W01", 50, 50, null], ["2026-W02", 10, null, 10],
   ]);
   assert.equal(weekly.warnings.find((warning) => warning.startsWith("部分周：")),
     "部分周：2026-W00、2026-W02；与完整周期比较时需注意覆盖天数");
   assert.match(weekly.metricDefinition, /周日至周六/u);
   const extremes = state.widgets[7]!.data.filter((row) => row["grain"] === "周");
   assert.deepEqual(extremes.map((row) => [row["point_type"], row["period_label"], row["oee_percent"]]), [
-    ["最高", "2026-W01", 25], ["最低", "2026-W02", 5],
+    ["最高", "2026-W01", 50], ["最低", "2026-W02", 10],
   ]);
   const machines = state.widgets[8]!;
   assert.deepEqual(machines.data.filter((row) => row["grain"] === "周").map((row) => [
     row["period_label"], row["top10_machines"],
-  ]), [["2026-W02", "1.MT-01(MT 5.00%)"], ["2026-W01", "1.MT-01(MT 16.00%)"]]);
+  ]), [["2026-W02", "1.MT-01(MT 10.00%)"], ["2026-W01", "1.MT-01(MT 32.00%)"]]);
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W01（2026-01-04 至 2026-01-10）")));
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
   assert.match(state.widgets[9]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
@@ -208,8 +214,8 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
   writer.close();
   const state = readCalculatedDashboard(config.databasePath, "2026-01-02");
   assert.deepEqual(state.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").map((widget) => widget.data[0]), [
-    { overall_oee_percent: 20, avg_availability_percent: 50, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
-    { overall_oee_percent: 10, avg_availability_percent: 50, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
+    { overall_oee_percent: 40, avg_availability_percent: 100, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
+    { overall_oee_percent: 20, avg_availability_percent: 100, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
   ]);
 });
 

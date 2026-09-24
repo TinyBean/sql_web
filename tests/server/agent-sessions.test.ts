@@ -106,7 +106,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /数据库结构和字段含义由适用的 Skill 提供/u);
   assert.match(piSession.systemPrompt, /<available_skills>/u);
   assert.match(piSession.systemPrompt, /<name>test-oee-calculator<\/name>/u);
-  assert.match(piSession.systemPrompt, /<description>使用固定 LOT、PCIe 平台排除、MT\/ST/u);
+  assert.match(piSession.systemPrompt, /<description>使用 Yield 专用 LOT 筛选、PCIe 平台排除、MT\/ST/u);
   assert.doesNotMatch(piSession.systemPrompt, /## Test OEE 固定计算口径/u);
   assert.doesNotMatch(piSession.systemPrompt, /test_oee_calculator__get_sql_expressions/u);
   assert.doesNotMatch(piSession.systemPrompt, /Machine_Running、全部机台 Availability/u);

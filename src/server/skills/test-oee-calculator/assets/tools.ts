@@ -23,7 +23,7 @@ export function createTools(): ToolDefinition[] {
     name: "get_default_sql",
     label: "获取默认 Test OEE / Effective OEE SQL",
     description:
-      "生成完整的默认 Test OEE 和 Effective OEE SQLite 查询。查询排除平台名称包含 PCIe 的机台，在业务日+MT/ST 粒度汇总 Availability、Idle、Performance (DUT-On)、Performance (Test Time) 和 Yield，以 Availability 为主左连接 DUT。Idle 累计原始 final_state 中包含大写子串 IDLE 的所有状态秒数，沿用 Availability 的过滤和分母。Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；分别用 Availability 或 Effective Availability 乘两个 Performance 因子及 Yield 得到日 Test OEE / Effective OEE，再各自等权平均可计算日得到多日结果及独立覆盖计数。工具只返回 SQL，不连接数据库。",
+      "生成完整的默认 Test OEE 和 Effective OEE SQLite 查询。查询排除平台名称包含 PCIe 的机台，在业务日+MT/ST 粒度汇总 Availability、Idle、Performance (DUT-On)、Performance (Test Time) 和 Yield，以 Availability 为主左连接 DUT。Availability 分母为同日同类型全部 TIME_SPAN 之和；LOT 前缀筛选仅用于 Yield，Availability、Idle 和两项 Performance 保留所有 LOT。结果包含 yield_rows、yield_input_quantity、yield_output_quantity 用于核对 Yield 样本。Idle 累计原始 final_state 中包含大写子串 IDLE 的所有状态秒数，沿用 Availability 的过滤和分母。Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；分别用 Availability 或 Effective Availability 乘两个 Performance 因子及 Yield 得到日 Test OEE / Effective OEE，再各自等权平均可计算日得到多日结果及独立覆盖计数。工具只返回 SQL，不连接数据库。",
     executionMode: "sequential",
     parameters: Type.Object({
       start_date: Type.String({
@@ -78,7 +78,7 @@ export function createTools(): ToolDefinition[] {
     name: "get_sql_expressions",
     label: "获取 Test OEE SQL 规则",
     description:
-      "返回 Test OEE / Effective OEE 固定规则和闭区间业务日范围对应的 SQLite 表达式，供自定义 execute_sql 原样复用，包括 LOT、PCIe 平台排除、MT/ST、Availability 状态和原始 final_state 包含 IDLE 的 idlePredicate，以及 DUT 的 TD_Label 和测试秒数。idlePredicate 仅在 availability 来源返回，区分大小写并包含 IDLE_NoWIP、IDLE_WaitARV、IDLE_NoTask 等变体，不使用派生状态。date 是 08:30 至次日 08:30 的业务日标签；工具不连接数据库，也不固定聚合方式或最终公式。",
+      "返回 Test OEE / Effective OEE 固定规则和闭区间业务日范围对应的 SQLite 表达式，供自定义 execute_sql 原样复用，包括仅 DUT 来源返回的 Yield 专用 yieldLotPredicate、PCIe 平台排除、MT/ST、Availability 状态和原始 final_state 包含 IDLE 的 idlePredicate，以及 DUT 的 TD_Label 和测试秒数。yieldLotPredicate 只用于 Yield 条件聚合，禁止过滤共享 DUT 或 Availability 数据。idlePredicate 仅在 availability 来源返回，区分大小写并包含 IDLE_NoWIP、IDLE_WaitARV、IDLE_NoTask 等变体，不使用派生状态。date 是 08:30 至次日 08:30 的业务日标签；工具不连接数据库，也不固定聚合方式或最终公式。",
     executionMode: "sequential",
     parameters: Type.Object({
       source: Type.Union([Type.Literal("availability"), Type.Literal("dut")], {
@@ -116,7 +116,7 @@ export function createTools(): ToolDefinition[] {
     name: "validate_lot_ids",
     label: "筛选 Test OEE 批次",
     description:
-      "按固定 P/M/R/A/F/L 前缀规则判定少量 LOT_ID 是否符合 Test OEE 条件。大范围数据应使用 get_sql_expressions 返回的条件在 execute_sql 中筛选。",
+      "按固定 P/M/R/A/F/L 前缀规则判定少量 LOT_ID 是否符合 Yield 条件，结果不代表其他 OEE 组成项的记录资格。大范围数据应使用 get_sql_expressions 的 DUT yieldLotPredicate 在 execute_sql 中仅对 Yield 条件聚合。",
     executionMode: "sequential",
     parameters: Type.Object({
       lot_ids: Type.Array(Type.String(), {

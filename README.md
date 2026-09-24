@@ -69,7 +69,7 @@ Performance (DUT-On) 为 `SUM(IN_QTY)/SUM(DUT_NUM)`；Performance (Test Time) �
 
 Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；Effective OEE 复用已有逐日 SQL，以 Effective Availability 替换 Availability。每张 Effective OEE 概览的主值和组成项均对该类型日 Effective OEE 非 NULL 的业务日等权平均，覆盖计数独立于 Test OEE。已有会话继续使用各自保存的看板。每个看板最多允许 14 张卡片，默认 12 张仍留有两个新增位置。
 
-机台 TOP10 表格按周最低、周最高、月最低、月最高、季最低、季最高排序，周期及周期 OEE 直接沿用极值明细，每行展示该周期 OEE 最低的至多 10 台机台。机台 OEE 使用整期汇总：运行秒数÷（该机台有效 Availability 业务日数×86400）×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×该机台TD次数)÷SUM(该机台实际测试秒数)]×SUM(OUT_QTY)÷SUM(IN_QTY)，区别于周期 OEE 的日类型等权平均。机台 Test Time 复用同日同类型全部合格 DUT 的标准时间，不按机台单独截尾。同一机台的 MT/ST 数据合并，按 Availability 累计时长标注主要类型，并列取 MT；按未舍入 OEE 升序排名，并列按机台编号。查询保留完整周期末日的 DUT 数据，缺失或零分母为 NULL，不参与排名；表格提示各周期的机台数量和数据覆盖情况。
+机台 TOP10 表格按周最低、周最高、月最低、月最高、季最低、季最高排序，周期及周期 OEE 直接沿用极值明细，每行展示该周期 OEE 最低的至多 10 台机台。机台 OEE 使用整期汇总：运行秒数÷该机台整期全部状态秒数×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×该机台TD次数)÷SUM(该机台实际测试秒数)]×SUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)，仅 Yield 使用 P/M/R/A/F/L 前缀筛选，Availability 和两项 Performance 保留所有 LOT，区别于周期 OEE 的日类型等权平均。机台 Test Time 复用同日同类型全部合格 DUT 的标准时间，不按机台单独截尾。同一机台的 MT/ST 数据合并，按 Availability 累计时长标注主要类型，并列取 MT；按未舍入 OEE 升序排名，并列按机台编号。查询保留完整周期末日的 DUT 数据，缺失或零分母为 NULL，不参与排名；表格提示各周期的机台数量和数据覆盖情况。
 
 新会话首次展示时锁定当时的默认版本，从 revision 0 开始；首次保存时将其写入该会话的 baseline 和 current，重置会恢复该会话的 baseline。已打开的空会话也保留其初始版本，且仍不创建持久化产物。已有会话可通过对话更新自己的卡片。
 
@@ -435,9 +435,9 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 
 - `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝。
 - `execute_sql` 默认直接返回最多 200 行；需要 Python 计算、统计或绘图时，使用可选 `save_as` 将最多 100,000 行、32 MiB 的完整结果保存为会话级冻结快照，同时只返回元数据和最多 20 行预览。后续通过逻辑名称引用快照，不经过模型搬运完整结果。
-- `measure_loss` 在新建和恢复的会话中默认可用，与每日分析共用实现。必填 `start_date`、`end_date` 为业务日闭区间，可选 `states`、`machines`、`by_machine`；标准 LOT、PCIe、MT/ST 和状态规则与每日分析一致。每次成功查询自动保存完整快照，名称为 `loss-YYYYMMDD-YYYYMMDD`，重名追加序号，恢复后继续避免覆盖。返回明细或有展示预算的摘要，快照可直接供 Python 和看板使用；空结果不代表零损失，覆盖天数按类型统计，不随损失筛选缩小。Python 不可用时仍可查询。
+- `measure_loss` 在新建和恢复的会话中默认可用，与每日分析共用实现。必填 `start_date`、`end_date` 为业务日闭区间，可选 `states`、`machines`、`by_machine`；标准 PCIe、MT/ST 和状态规则与每日分析一致，不筛选 LOT 前缀（此前缀筛选仅用于 Yield）。每次成功查询自动保存完整快照，名称为 `loss-YYYYMMDD-YYYYMMDD`，重名追加序号，恢复后继续避免覆盖。返回明细或有展示预算的摘要，快照可直接供 Python 和看板使用；空结果不代表零损失，覆盖天数按类型统计，不随损失筛选缩小。Python 不可用时仍可查询。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
-- `test-oee-calculator` 被加载后，当前会话才会注册 SQL 表达式、LOT 校验、MT/ST 分类和 Availability 状态分类工具；这些工具不连接数据库。数据库派生的比率与乘积必须在同一条 SQL 或可信的 `code_interpreter` 调用中完成，纯比率计算器仅保留为规则测试基准。
+- `test-oee-calculator` 被加载后，当前会话才会注册 SQL 表达式、Yield LOT 校验、MT/ST 分类和 Availability 状态分类工具；这些工具不连接数据库。数据库派生的比率与乘积必须在同一条 SQL 或可信的 `code_interpreter` 调用中完成，纯比率计算器仅保留为规则测试基准。
 - 新增 Skill 必须沿用同一目录约定：根目录只放 `SKILL.md` 等元数据，直接执行的脚本放入 `scripts/`，静态资源和代码放入 `assets/`，按需读取的说明文档放入 `references/`。Catalog 只从 `assets/tools.js` 或 `assets/tools.ts` 加载 Skill 专有工具，不兼容根目录 `tools.*`。
 - Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 不接收或持有数据库连接；启动时只扫描元数据并调用无参工具工厂进行校验，不会把专有工具注册到全局或暴露给新会话。需要数据的业务 Skill 自主管理只读连接。
 - `code_interpreter` 接收 `code`、可选的 `snapshot` 逻辑名称和可选 `user_input`，不接收或执行 SQL。传入快照时，服务端把该会话的完整冻结数据只读挂载为 `input_data.database`，并提供 `snapshot_rows` 作为 `list[dict]` 行对象列表；每行可用 `row["列名"]` 访问，无需也不应再与 `columns` 做 `zip`。`input_data` 同时支持属性和方括号访问。未传快照时 `input_data.database` 为 `None`、`snapshot_rows` 为空，可执行不依赖数据库的纯 Python。`user_input` 单独出现在 `input_data.user`，只用于用户明确提供的参数。快照查询达到 100,000 行或 32 MiB 上限时不会保存，不允许基于截断数据生成结论。

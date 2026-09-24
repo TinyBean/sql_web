@@ -4,7 +4,7 @@
 `R_OEE_MT_TOP_AVAILABILITY` 对应本地表 `oee_availability`，用于 Availability 和 Idle；Performance (DUT-On)、Performance (Test Time) 和 Yield
 使用本地表 `oee_dut_utilization`。
 
-Idle 的分子来自原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和可用秒数分母沿用 Availability。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
+Idle 的分子来自原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和总状态秒数分母沿用 Availability，不应用 LOT 前缀筛选。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
 
 ## 数据库结构
 
@@ -126,7 +126,7 @@ CREATE TABLE oee_import_windows (
 oee_availability:
 
 - tool_name(TOOL_NAME):机台号
-- lot_id(LOT_ID):物料批次号
+- lot_id(LOT_ID):物料批次号；参与状态分类，不用于筛选 Availability 或 Idle
 - final_state(FINAL_STATE):机台状态
 - step(STEP):步骤
 - date(DATE):ISO 格式的业务日标签；标签日当天 08:30 至次日 08:30
@@ -136,12 +136,12 @@ oee_availability:
 oee_dut_utilization:
 
 - machine_id(MACHINE_ID):机台号
-- lot_id(LOT_ID):物料批次号
+- lot_id(LOT_ID):物料批次号；P/M/R/A/F/L 前缀仅用于 Yield，两项 Performance 不受此前缀筛选影响
 - touchdown_index(TOUCHDOWN_INDEX):touchdown 序号；非零整数用于生成 TD_Label=1
 - start_time(START_TIME):单次测试开始时间戳
 - end_time(END_TIME):单次测试结束时间戳；与 START_TIME 的差转换为测试秒数
 - in_qty(IN_QTY):实际的 Socket 使用数量；用于计算 Performance (DUT-On) 分子
-- out_qty(OUT_QTY):好品数量(包含复测)
+- out_qty(OUT_QTY):好品数量(包含复测)；Yield 对符合 LOT 前缀条件的 OUT_QTY 和 IN_QTY 分别求和后相除
 - test_stage(TEST_STAGE):1st 表示初测,Rescreen 表示复测
 - dut_num(DUT_NUM):Socket 数量；用于计算 Performance (DUT-On) 分母
 - step_id(STEP_ID):步骤

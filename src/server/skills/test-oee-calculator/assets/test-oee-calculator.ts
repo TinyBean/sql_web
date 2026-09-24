@@ -25,7 +25,8 @@ export interface TestOeeSqlExpressions {
   readonly dayExpression: string;
   readonly machineExpression: string;
   readonly dateRangePredicate: string;
-  readonly lotPredicate: string;
+  /** DUT-only eligibility for Yield; never a filter on the shared population. */
+  readonly yieldLotPredicate?: string;
   readonly platformPredicate: string;
   readonly kindExpression: string;
   readonly availabilityStateExpression?: string;
@@ -122,7 +123,6 @@ export interface RatioProductResult {
 export const VALID_OEE_LOT_PREFIXES = ["P", "M", "R", "A", "F", "L"] as const;
 export const MAX_RULE_BATCH_SIZE = 200;
 export const MAX_RATIO_ITEMS = 20;
-export const TEST_OEE_DAY_SECONDS = 86_400;
 export const TEST_TIME_TRIM_PERCENT = 0.2;
 export const TEST_TIME_TRIM_FRACTION = 0.002;
 export const TEST_TIME_TRIM_PERCENT_PER_TAIL = 0.1;
@@ -402,7 +402,6 @@ export function getTestOeeSqlExpressions(
       dayExpression: `substr(${dateColumn},1,10)`,
       machineExpression: machineColumn,
       dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
-      lotPredicate: validLotSql(lotIdColumn),
       platformPredicate: eligiblePlatformSql(machineColumn),
       kindExpression: kindSql(
         sqlColumn("step", tableAlias),
@@ -429,7 +428,7 @@ export function getTestOeeSqlExpressions(
     dayExpression: `substr(${dateColumn},1,10)`,
     machineExpression: machineColumn,
     dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
-    lotPredicate: validLotSql(lotIdColumn),
+    yieldLotPredicate: validLotSql(lotIdColumn),
     platformPredicate: eligiblePlatformSql(machineColumn),
     kindExpression: kindSql(
       sqlColumn("step_id", tableAlias),
@@ -452,15 +451,19 @@ export function getTestOeeSqlExpressions(
   };
 }
 
-/** Shared DUT populations: standards include eligible DUT even without matching Availability. */
+/** Performance uses every LOT, even without matching Availability; only Yield checks LOT eligibility. */
 export function getTestOeeDutCtes(startDate: string, endDate: string): string {
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
+  if (dut.yieldLotPredicate === undefined) {
+    throw new TestOeeInputError("DUT Yield LOT 表达式不完整");
+  }
   return `dut_base AS (
   SELECT
     d.id,
     ${dut.machineExpression} AS machine,
     ${dut.dayExpression} AS day,
     ${dut.kindExpression} AS kind,
+    ${dut.yieldLotPredicate} AS yield_eligible,
     CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
     CAST(NULLIF(trim(d.out_qty),'') AS REAL) AS output_quantity,
     CAST(NULLIF(trim(d.dut_num),'') AS REAL) AS socket_quantity,
@@ -468,7 +471,6 @@ export function getTestOeeDutCtes(startDate: string, endDate: string): string {
     ${dut.testTimeSecondsExpression} AS test_time_seconds
   FROM oee_dut_utilization AS d
   WHERE ${dut.dateRangePredicate}
-    AND ${dut.lotPredicate}
     AND ${dut.platformPredicate}
 ),
 dut_daily_aggregate AS (
@@ -476,6 +478,9 @@ dut_daily_aggregate AS (
     day,
     kind,
     COUNT(*) AS dut_rows,
+    SUM(CASE WHEN yield_eligible THEN 1 ELSE 0 END) AS yield_rows,
+    SUM(CASE WHEN yield_eligible THEN input_quantity END) AS yield_input_quantity,
+    SUM(CASE WHEN yield_eligible THEN output_quantity END) AS yield_output_quantity,
     SUM(input_quantity) AS input_quantity,
     SUM(output_quantity) AS output_quantity,
     SUM(socket_quantity) AS socket_quantity,
@@ -546,7 +551,6 @@ availability_classified AS (
     CAST(a.time_span AS REAL) AS state_seconds
   FROM oee_availability AS a
   WHERE ${availability.dateRangePredicate}
-    AND ${availability.lotPredicate}
     AND ${availability.platformPredicate}
 ),
 availability_daily AS (
@@ -558,16 +562,16 @@ availability_daily AS (
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
       AS machine_running_seconds,
     SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
-    COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS} AS available_seconds,
+    SUM(state_seconds) AS available_seconds,
     CASE
-      WHEN COUNT(DISTINCT machine)=0 THEN NULL
+      WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
       ELSE SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
-        / (COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS}.0)
+        / SUM(state_seconds)
     END AS availability,
     CASE
-      WHEN COUNT(DISTINCT machine)=0 THEN NULL
+      WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
       ELSE SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END)
-        / (COUNT(DISTINCT machine) * ${TEST_OEE_DAY_SECONDS}.0)
+        / SUM(state_seconds)
     END AS idle
   FROM availability_classified
   WHERE kind IN ('MT','ST')
@@ -589,6 +593,9 @@ dut_daily AS (
     q.day,
     q.kind,
     q.dut_rows,
+    q.yield_rows,
+    q.yield_input_quantity,
+    q.yield_output_quantity,
     q.input_quantity,
     q.output_quantity,
     q.socket_quantity,
@@ -607,8 +614,8 @@ dut_daily AS (
       ELSE t.trimmed_mean_test_seconds * q.touchdown_count / q.actual_test_seconds
     END AS test_time_performance,
     CASE
-      WHEN q.input_quantity IS NULL OR q.input_quantity=0 THEN NULL
-      ELSE q.output_quantity / q.input_quantity
+      WHEN q.yield_input_quantity IS NULL OR q.yield_input_quantity=0 THEN NULL
+      ELSE q.yield_output_quantity / q.yield_input_quantity
     END AS final_yield
   FROM dut_daily_aggregate AS q
   LEFT JOIN duration_trimmed AS t ON t.day=q.day AND t.kind=q.kind
@@ -623,6 +630,9 @@ daily_results AS (
     a.idle_seconds,
     a.available_seconds,
     d.dut_rows,
+    d.yield_rows,
+    d.yield_input_quantity,
+    d.yield_output_quantity,
     d.input_quantity,
     d.output_quantity,
     d.socket_quantity,
@@ -659,6 +669,9 @@ SELECT
   r.idle_seconds,
   r.available_seconds,
   r.dut_rows,
+  r.yield_rows,
+  r.yield_input_quantity,
+  r.yield_output_quantity,
   r.input_quantity,
   r.output_quantity,
   r.socket_quantity,

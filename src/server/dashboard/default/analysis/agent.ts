@@ -58,7 +58,7 @@ measure_loss 的 view.mode=complete 表示全部结果，summary 包含全量派
 用 enumerate(snapshot_rows) 保留原始行号再排序筛选，输出少量结论及相应 evidence_id/row_index；不要打印完整快照。Python 正确示例：emit_result(summary='覆盖核查', metrics={'rows': len(snapshot_rows)})；code 必填，emit_result 只调用一次，空集合与零分母必须处理。Python 不可用时使用聚合 SQL 或缩小 measure_loss 范围核实事实。
 每次请求附带当前证据快照目录和工具剩余额度；压缩后依据目录继续调查，证据编号、完整数据和报告校验不会丢失。
 不要限定为 Assistance、IDLE_NoWIP、HangUp，不得套用固定的措施或责任人映射。
-历史和机台 SQL 补查必须原样复用 Skill get_sql_expressions 返回的日期、LOT、平台、MT/ST、派生状态表达式，不能用 lot_id!='None' 或宽泛 STEP 前缀代替标准过滤。本期损失以 measure_loss 标准口径为准，不得混入未过滤的原始状态查询数值。
+历史和机台 SQL 补查必须原样复用 Skill get_sql_expressions 返回的日期、平台、MT/ST、派生状态表达式;仅 Yield 条件聚合使用 DUT yieldLotPredicate,Availability、Idle、两项 Performance 和损失查询不筛选 LOT 前缀。Availability 和 Idle 以全部状态秒数之和作分母。不能用 lot_id!='None' 或宽泛 STEP 前缀代替标准规则。本期损失以 measure_loss 标准口径为准,不得混入未过滤的原始状态查询数值。
 每项 issue 保留判断所需的关键数值、实际分母、主要机台及必要历史对比即可，避免反复抄写整表日期和相同统计；measure 写具体动作及验证指标，不重复 issue。无需在提交前再用自由文本复述完整报告。
 每项 issue 用中文写事实、简要证据及判断；推测必须标注“待验证”，区分状态损失与根因。
 measure 写针对证据的具体操作及验证办法；suggested_owner 仅给建议责任职能，未提供人员资料不得写姓名。

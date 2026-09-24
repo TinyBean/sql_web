@@ -66,7 +66,7 @@ export function measureLoss(
       ${e.availabilityStateExpression} AS state_group, a.tool_name AS machine,
       CAST(a.time_span AS REAL) AS seconds
     FROM oee_availability a
-    WHERE ${e.dateRangePredicate} AND ${e.lotPredicate} AND ${e.platformPredicate}
+    WHERE ${e.dateRangePredicate} AND ${e.platformPredicate}
   ), coverage AS (
     SELECT kind, COUNT(DISTINCT day) AS available_days FROM facts GROUP BY kind
   ), losses AS (SELECT kind, state_group, ${scope.byMachine ? "machine," : ""}
@@ -106,7 +106,7 @@ export function createMeasureLossTool(
   return defineTool({
     name: MEASURE_LOSS_TOOL_NAME,
     label: "查询标准实测损失",
-    description: "Query non-Machine_Running Availability losses for an inclusive business-day range using canonical date/LOT/PCIe/MT/ST rules. Read the Test OEE Skill and references first. Optional states/machines narrow losses, never type-wide coverage days; by_machine adds machine detail. Rows include loss_hours, observed_days (loss occurrence days), kind_availability_days (all covered days of that type), selected_days and daily averages. Empty rows do not prove zero loss or complete coverage. Always save a complete snapshot under a unique date-based name, up to 100,000 rows or 32 MiB; exceeding either limit fails without saving. Returns complete rows for small results or bounded summaries/rankings. snapshot.name can be passed to code_interpreter or update_dashboard. row_index refers to the original snapshot row. Daily analysis also returns an evidence_id for audited report references; derived totals cannot supply loss_reference.",
+    description: "Query non-Machine_Running Availability losses for an inclusive business-day range using canonical date/PCIe/MT/ST rules, with no LOT prefix filter (LOT eligibility applies only to Yield). Read the Test OEE Skill and references first. Optional states/machines narrow losses, never type-wide coverage days; by_machine adds machine detail. Rows include loss_hours, observed_days (loss occurrence days), kind_availability_days (all covered days of that type), selected_days and daily averages. Empty rows do not prove zero loss or complete coverage. Always save a complete snapshot under a unique date-based name, up to 100,000 rows or 32 MiB; exceeding either limit fails without saving. Returns complete rows for small results or bounded summaries/rankings. snapshot.name can be passed to code_interpreter or update_dashboard. row_index refers to the original snapshot row. Daily analysis also returns an evidence_id for audited report references; derived totals cannot supply loss_reference.",
     promptSnippet: "按业务日范围查询标准损失，保存完整快照并返回明细或摘要",
     executionMode: "sequential",
     parameters: measureLossParameters,

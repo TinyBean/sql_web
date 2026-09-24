@@ -195,7 +195,7 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   const machineCard = card(machineTable.id);
   assert.equal(machineCard.style.gridColumn, "span 12");
   assert.deepEqual([...machineCard.querySelectorAll("th")].map((cell) => cell.textContent), [
-    "粒度", "极值", "周期", "周期OEE%", "TOP10 机台（机台 OEE 最低）",
+    "粒度", "极值", "周期", "周期OEE%", "TOP10 机台(机台 OEE 最低)",
   ]);
   assert.equal(machineCard.querySelectorAll("tbody tr").length, 6);
   const lists = [...machineCard.querySelectorAll("tbody tr td:last-child")];

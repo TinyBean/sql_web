@@ -30,14 +30,17 @@ test("0.2 percent trimming handles 999/1000/2000 samples, boundary ties and sepa
     f.d(day, 1); f.d(day, 100);
     for (let i = 2; i < count; i++) f.d(day, 10);
     f.d(day, 30, "1", "ST");
+    // The high duration belongs to a non-Yield LOT but still affects trimming and total seconds.
+    f.db.prepare("UPDATE oee_dut_utilization SET lot_id='None' WHERE date=? AND end_time='2026-01-02T00:01:39.500Z'").run(day);
     const [mt, st] = f.rows(day);
     assert.equal(mt!["valid_duration_rows"], count);
     assert.equal(mt!["trimmed_rows_each_tail"], trimmed);
     assert.equal(mt!["actual_test_seconds"], count * 10 + 81);
     assert.equal(mt!["touchdown_count"], count);
+    assert.equal(mt!["yield_rows"], count - 1);
     const expected = trimmed === 0 ? 1 : count * 10 / (count * 10 + 81);
     assert.ok(Math.abs(Number(mt!["test_time_performance"]) - expected) < 1e-12);
-    assert.ok(Math.abs(Number(mt!["daily_test_oee"]) - .2 * expected) < 1e-12);
+    assert.ok(Math.abs(Number(mt!["daily_test_oee"]) - .4 * expected) < 1e-12);
     assert.equal(mt!["dut_on"], .5);
     assert.equal(mt!["performance"], mt!["dut_on"]);
     assert.equal(st!["trimmed_mean_test_seconds"], 30);
@@ -46,7 +49,7 @@ test("0.2 percent trimming handles 999/1000/2000 samples, boundary ties and sepa
   const overview = f.db.prepare(getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-03", "overview").sql).get()!;
   const expectedTime = (1 + 10000 / 10081 + 20000 / 20081) / 3;
   assert.ok(Math.abs(Number(overview["mt_test_time_percent"]) - expectedTime * 100) < 1e-10);
-  assert.ok(Math.abs(Number(overview["mt_oee_percent"]) - expectedTime * 20) < 1e-10);
+  assert.ok(Math.abs(Number(overview["mt_oee_percent"]) - expectedTime * 40) < 1e-10);
   assert.equal(overview["st_test_time_percent"], 100);
   assert.equal(overview["mt_dut_on_percent"], overview["mt_performance_percent"]);
   const trends = f.db.prepare(getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-03", "trends").sql).all();
@@ -87,19 +90,22 @@ test("missing aggregates and zero totals are null, with no clamping or invented 
   const overview = f.db.prepare(getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-04", "overview").sql).get()!;
   assert.equal(overview["mt_calculable_day_count"], 1);
   assert.equal(overview["mt_test_time_percent"], 200);
-  assert.equal(overview["mt_availability_percent"], 50);
+  assert.equal(overview["mt_availability_percent"], 100);
 });
 
-test("LOT and PCIe exclusions and business-day labels apply before trimming", (t) => {
+test("PCIe and date rules apply before trimming while non-Yield LOTs remain in Performance", (t) => {
   const f = fixture(t); const day = "2026-01-01";
   f.a(day); f.d(day + "T00:00:00.000Z", 10);
   f.d(day, 10000); f.db.exec("UPDATE oee_dut_utilization SET machine_id='TSPH001' WHERE id=2");
   f.d(day, 20000); f.db.exec("UPDATE oee_dut_utilization SET lot_id='None' WHERE id=3");
   f.d(day, 30000); f.db.exec("UPDATE oee_dut_utilization SET step_id='x' WHERE id=4");
   const mt = f.rows(day)[0]!;
-  assert.equal(mt["dut_rows"], 1);
-  assert.equal(mt["trimmed_mean_test_seconds"], 10);
+  assert.equal(mt["dut_rows"], 2);
+  assert.equal(mt["trimmed_mean_test_seconds"], 10005);
   assert.equal(mt["test_time_performance"], 1);
+  assert.equal(mt["yield_rows"], 1);
+  assert.equal(mt["yield_input_quantity"], 10);
+  assert.equal(mt["yield_output_quantity"], 8);
   // Actual timestamps belong to Jan 1/2, while the business label alone determines the group.
   assert.equal(f.rows("2026-01-02")[0]!["daily_test_oee"], null);
 });

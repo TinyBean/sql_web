@@ -308,26 +308,28 @@ test("keeps existing saved dashboards and their reset baseline", (t) => {
   assert.deepEqual(restarted.loadOrInitialize(SESSION_B).widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
 });
 
-test("the thirteen-card default allows one addition and fourteen-card tool reordering, but rejects a fifteenth", async (t) => {
+test("the thirteen-card default allows additions up to twenty-card tool reordering, but rejects a twenty-first", async (t) => {
   const { dashboard, artifacts } = fixture(t);
   const snapshot = createSnapshot(artifacts, SESSION_A, "extra metrics", [{ date: "2026-09-01", mt: 90, st: 80 }]);
   const dateRange = { start: "2026-09-01", end: "2026-09-01" };
-  assert.equal(dashboard.apply(SESSION_A, {
-    action: "upsert", baseRevision: 0, snapshot, dateRange, widget: lineRequest("extra-a"),
-  }).dashboard.widgets.length, 14);
+  const extras = ["extra-a", "extra-b", "extra-c", "extra-d", "extra-e", "extra-f", "extra-g"];
+  for (const [index, id] of extras.entries()) {
+    const result = dashboard.apply(SESSION_A, { action: "upsert", baseRevision: index, snapshot, dateRange, widget: lineRequest(id) });
+    assert.equal(result.dashboard.widgets.length, 13 + index + 1);
+  }
   const update = createDashboardTools(dashboard, SESSION_A).find((tool) => tool.name === "update_dashboard")!;
   const widgetIds = dashboard.loadOrInitialize(SESSION_A).widgets.map((widget) => widget.id).reverse();
-  const arguments_ = { action: "reorder", base_revision: 1, widget_ids: widgetIds };
+  const arguments_ = { action: "reorder", base_revision: extras.length, widget_ids: widgetIds };
   assert.equal(Value.Check(update.parameters, arguments_), true);
-  assert.equal(Value.Check(update.parameters, { ...arguments_, widget_ids: [...widgetIds, "extra-c"] }), false);
-  await update.execute("reorder-fourteen", arguments_ as never, undefined, undefined, undefined as never);
+  assert.equal(Value.Check(update.parameters, { ...arguments_, widget_ids: [...widgetIds, "extra-h"] }), false);
+  await update.execute("reorder-twenty", arguments_ as never, undefined, undefined, undefined as never);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_A).widgets.map((widget) => widget.id), widgetIds);
   assert.throws(() => dashboard.apply(SESSION_A, {
-    action: "upsert", baseRevision: 2, snapshot, dateRange, widget: lineRequest("extra-b"),
-  }), /最多包含 14 个组件/u);
-  assert.equal(dashboard.loadOrInitialize(SESSION_A).revision, 2);
+    action: "upsert", baseRevision: extras.length + 1, snapshot, dateRange, widget: lineRequest("extra-h"),
+  }), /最多包含 20 个组件/u);
+  assert.equal(dashboard.loadOrInitialize(SESSION_A).revision, extras.length + 1);
   // Updating an existing card at capacity still works.
   assert.equal(dashboard.apply(SESSION_A, {
-    action: "upsert", baseRevision: 2, snapshot, dateRange, widget: lineRequest("extra-a"),
-  }).dashboard.widgets.length, 14);
+    action: "upsert", baseRevision: extras.length + 1, snapshot, dateRange, widget: lineRequest("extra-a"),
+  }).dashboard.widgets.length, 20);
 });

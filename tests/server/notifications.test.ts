@@ -8,8 +8,8 @@ import type { EmailConfig, EmailInput, EmailResult } from "../../src/server/emai
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 
 const email: EmailConfig = { host: "127.0.0.1", port: 25, fromAddress: "sender@example.com", fromName: "通知" };
-const content = { subject: "周改善表", text: "通知正文", html: "<p>通知正文</p>" };
-const request = { messageType: "weekly-improvement", buildEmail: () => content };
+const content = { subject: "日改善表", text: "通知正文", html: "<p>通知正文</p>" };
+const request = { messageType: "daily-improvement", buildEmail: () => content };
 const accepted: EmailResult = { kind: "email", status: "accepted", messageId: "<test@example.com>",
   accepted: ["Cheng.Wu@sdsscn.com"], rejected: [], response: "250 Cheng.Wu@sdsscn.com queued",
   errorCode: null, message: "untrusted reply Cheng.Wu@sdsscn.com" };
@@ -27,7 +27,7 @@ function fixture(t: TestContext) {
 }
 
 function config(to: readonly string[] = ["Cheng.Wu@sdsscn.com"], groups: readonly string[] = []) {
-  return { groups: {}, routes: { "weekly-improvement": { enabled: true, to, groups } } };
+  return { groups: {}, routes: { "daily-improvement": { enabled: true, to, groups } } };
 }
 
 test("personal, group and mixed routes reload on every call, deduplicate and remain message-specific", async (t) => {
@@ -66,7 +66,7 @@ test("missing, absent and disabled routes skip without loading SMTP, rendering c
   const noContent = { ...request, buildEmail() { assert.fail("must not render"); } };
   assert.equal((await notify(noContent, f.context)).status, "skipped");
   assert.deepEqual(readdirSync(f.directory), []);
-  for (const routes of [{}, { "weekly-improvement": { enabled: false, groups: ["unknown"], to: ["invalid"] } }]) {
+  for (const routes of [{}, { "daily-improvement": { enabled: false, groups: ["unknown"], to: ["invalid"] } }]) {
     f.save({ groups: {}, routes });
     assert.equal((await notify(noContent, f.context)).status, "skipped");
   }
@@ -78,7 +78,7 @@ test("invalid config, unknown groups, invalid addresses and recipient limits fai
   const invalid = [null, {}, { groups: [], routes: {} }, config([], ["unknown"]), config([], ["toString"]),
     config([]), config(["invalid-private-address"]), config(["a@example.com\r\nBcc: secret@example.com"]),
     config(Array.from({ length: 51 }, (_, i) => `p${i}@example.com`)),
-    { ...config(), routes: { "weekly-improvement": { enabled: "true", to: [], groups: [] } } }];
+    { ...config(), routes: { "daily-improvement": { enabled: "true", to: [], groups: [] } } }];
   for (const value of invalid) {
     f.save(value);
     const result = await notify(request, f.context);

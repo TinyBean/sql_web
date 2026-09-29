@@ -5,7 +5,7 @@ import type { DashboardState, DashboardTableWidget } from "../../../../shared/da
 import { SessionArtifactStore } from "../../../tool/artifact-store.ts";
 import type { DefaultDashboardAnalysisConfig } from "../config.ts";
 import { readDailyOee, coverageWarnings } from "../data.ts";
-import { dashboardPeriods, periodLabel, isPartialPeriod, PERIOD_KEYS, PERIOD_GRAINS } from "../periods.ts";
+import { dashboardPeriods, periodLabel, isPartialPeriod, ANALYSIS_PERIOD_KEYS, PERIOD_GRAINS } from "../periods.ts";
 import { createAnalysisTemplate } from "../template.ts";
 import { AnalysisEvidence } from "./evidence.ts";
 import { applyAnalysisReport } from "./report.ts";
@@ -14,20 +14,21 @@ export function prepareAnalysisCards(
   database: DatabaseSync, throughDate: string, syncWarnings: readonly string[] = [],
 ): DashboardTableWidget[] {
   const periods = dashboardPeriods(throughDate);
-  return PERIOD_KEYS.map((key) => {
+  return ANALYSIS_PERIOD_KEYS.map((key) => {
     const period = periods[key];
-    const grain = PERIOD_GRAINS[key];
     const template = createAnalysisTemplate(key);
-    const label = periodLabel(key === "week" ? period.start : period.end, grain);
     const periodText = period.start + " 至 " + period.end;
+    const grain = PERIOD_GRAINS[key];
+    const label = key === "day" ? period.end : periodLabel(key === "week" ? period.start : period.end, PERIOD_GRAINS[key]);
+    const subtitle = key === "day" ? "最新业务日 · " + period.end : (key === "week" ? "最近完整周" : grain + "累计") + " · " + periodText;
     const warnings = [...syncWarnings, ...coverageWarnings(readDailyOee(database, period)),
       "本次分析暂不可用：尚未生成临时 Agent 报告", "责任人列为职能建议，需管理层确认后指派到人"];
-    if (key !== "week" && isPartialPeriod(period, grain)) {
+    if (key !== "day" && key !== "week" && isPartialPeriod(period, PERIOD_GRAINS[key])) {
       warnings.push("本期为截至 " + throughDate + " 的部分" + grain + "，损失小时不可与完整周期直接对比");
     }
     return {
       ...template, title: template.title + "（" + label + "）",
-      subtitle: (key === "week" ? "最近完整周" : grain + "累计") + " · " + periodText + " · 临时 Agent 分析",
+      subtitle: subtitle + " · 临时 Agent 分析",
       metricDefinition: periodText + " 的" + template.metricDefinition, warnings,
     };
   });

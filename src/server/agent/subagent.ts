@@ -68,6 +68,8 @@ export interface SubagentRunnerOptions {
   readonly signal?: AbortSignal;
   /** Internal test seam, never exposed to the model. */
   readonly timeoutMs?: number;
+  /** Raises the per-batch task cap for programmatic callers; the interactive tool stays at 3. */
+  readonly maxTasksPerBatch?: number;
 }
 
 const allowedTools = new Set(["execute_sql", "get_current_time", "measure_loss", "code_interpreter"]);
@@ -96,8 +98,9 @@ export class SubagentRunner {
   }
 
   async run(callId: string, params: Static<typeof subagentParameters>, signal?: AbortSignal): Promise<SubagentResult[]> {
-    if (params.tasks.length < 1 || params.tasks.length > 3 || params.tasks.some((task) => !task.name.trim() || !task.task.trim())) {
-      throw new Error("subagent 需要 1–3 个名称和任务均非空的子任务");
+    const maxTasks = this.#options.maxTasksPerBatch ?? 3;
+    if (params.tasks.length < 1 || params.tasks.length > maxTasks || params.tasks.some((task) => !task.name.trim() || !task.task.trim())) {
+      throw new Error(`subagent 需要 1–${maxTasks} 个名称和任务均非空的子任务`);
     }
     if (this.#batches.size) throw new Error("当前 Agent 已有子任务批次运行中");
     const factory = this.#options.prepareBatch();

@@ -2,15 +2,15 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { parseDashboardState, type DashboardRow, type DashboardState } from "../../../../shared/dashboard.ts";
 import { type AnalysisContext, type Evidence } from "./evidence.ts";
-import { PERIOD_KEYS, type PeriodKey } from "../periods.ts";
+import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { createAnalysisTemplate } from "../template.ts";
 
-const ANALYSIS_KEYS = new Map(PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
+const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
 const readableDescription = "面向业务用户的中文说明，用实际日期、指标和数据来源解释结论，不含 q11 等内部证据编号、查询行号、工具名或字段名。";
 const text = Type.String({ minLength: 1, maxLength: 1800, description: readableDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
-export const PeriodKeySchema = Type.Union([Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
+export const PeriodKeySchema = Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
 export const AnalysisKindSchema = Type.Union([Type.Literal("MT"), Type.Literal("ST")]);
 export const AnalysisItemSchema = Type.Object({
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
@@ -31,7 +31,7 @@ export const AnalysisReportSchema = Type.Object({
     period: PeriodKeySchema, comparison: text,
     minimum_evidence: Type.String(), history_evidence: Type.String(),
     groups: Type.Array(AnalysisGroupSchema, { minItems: 2, maxItems: 2 }),
-  }, { additionalProperties: false }), { minItems: 3, maxItems: 3 }),
+  }, { additionalProperties: false }), { minItems: 4, maxItems: 4 }),
 }, { additionalProperties: false });
 
 export type AnalysisReport = Static<typeof AnalysisReportSchema>;
@@ -61,7 +61,7 @@ export function parseAnalysisReport(value: unknown): AnalysisReport {
   const decoded = decodeAnalysisStructures(value);
   if (!Value.Check(AnalysisReportSchema, decoded)) {
     const first = [...Value.Errors(AnalysisReportSchema, decoded)][0];
-    throw new Error("报告字段或结构无效：" + (first ? first.instancePath + " " + first.message : "请提交完整三期、每期 MT/ST 两组"));
+    throw new Error("报告字段或结构无效：" + (first ? first.instancePath + " " + first.message : "请提交完整四期（日/周/月/季）、每期 MT/ST 两组"));
   }
   return decoded;
 }
@@ -86,7 +86,7 @@ export function validateAnalysisReport(
       if (result.owner?.period !== period) throw new Error(period + " 的证据不属于本周期：" + id);
     }
   };
-  for (const key of PERIOD_KEYS) {
+  for (const key of ANALYSIS_PERIOD_KEYS) {
     const reports = value.periods.filter((report) => report.period === key);
     if (reports.length !== 1) throw new Error("每个周期必须且只能提交一次：" + key);
     const report = reports[0]!;

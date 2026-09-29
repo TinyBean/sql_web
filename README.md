@@ -34,7 +34,7 @@ scripts/
 
 ## 子 Agent 委派
 
-网站对话提供 `subagent` 工具：`{ tasks: [{ name, task }], context? }`，主 Agent 自行决定是否委派 1–3 项独立任务。每日分析则由程序固定并行启动 `week`、`month`、`quarter` 三项任务，全部结束后主 Agent 才开始汇总；每日主 Agent 不提供再次委派工具。结果始终按任务输入顺序返回。
+网站对话提供 `subagent` 工具：`{ tasks: [{ name, task }], context? }`，主 Agent 自行决定是否委派 1–3 项独立任务。每日分析则由程序固定并行启动 `day`、`week`、`month`、`quarter` 四项任务，全部结束后主 Agent 才开始汇总；每日主 Agent 不提供再次委派工具。结果始终按任务输入顺序返回。
 
 每个子 Agent 使用独立的内存会话，沿用主 Agent 的模型、上下文和输出限制；只接收任务、显式背景与应用提供的看板或每日证据目录，不复制聊天历史。它可独立读取 Skill、查询只读 SQLite、查询标准损失及使用可用的 Python 沙箱计算；不提供继续委派、修改看板、发送邮件或提交每日报告的工具，Python 图片输出也会被拒绝。最终业务动作与 PNG 由主 Agent 完成。
 
@@ -48,14 +48,14 @@ scripts/
 
 ## 默认看板
 
-新会话使用固定的 12 张看板卡片，按以下顺序展示：
+新会话使用固定的 13 张看板卡片，按以下顺序展示：
 
 1. 四张半宽 OEE 概览：第一排从左到右为 MT Effective OEE、MT Test OEE，第二排为 ST Effective OEE、ST Test OEE。每张上方展示 32px 主百分比，下方以 2×2 仪表盘展示四个组成项；Effective OEE 使用 Effective Availability，Test OEE 使用 Availability，其他组成项均为 Performance (DUT-On)、Performance (Test Time)、Yield。
 2. OEE 周趋势、月趋势、季趋势（含最高/最低点，业务周为周日至周六，年初首个周日之前为 W00）。
 3. OEE 极值明细、与各极值周期对应的机台 OEE 最低 TOP10 表格。
-4. 周、月、季改善措施与责任人清单，每张清单包含 MT/ST 两类。
+4. 日、周、月、季改善措施与责任人清单，每张清单包含 MT/ST 两类；日清单覆盖最新业务日。
 
-当前看板是 ID 为 `default` 的看板模块。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用空数据模板。模板保留 12 张卡片的布局、编码和统计口径，概览指标为 NULL、趋势和表格为空，并提示等待每日更新。模板的业务日期范围为空，`dataAsOf` 记录模板创建时间，不代表已有业务数据；不再内置历史数据。已有有效发布快照仍原样读取。
+当前看板是 ID 为 `default` 的看板模块。网站优先读取每日任务生成的 `.data/default-dashboard.json`，无需重新编译或重启；文件缺失或无效时记录日志并使用空数据模板。模板保留 13 张卡片的布局、编码和统计口径，概览指标为 NULL、趋势和表格为空，并提示等待每日更新。模板的业务日期范围为空，`dataAsOf` 记录模板创建时间，不代表已有业务数据；不再内置历史数据。已有有效发布快照仍原样读取。
 
 默认看板按三个职责组织：
 
@@ -125,25 +125,25 @@ npm run data:daily -- --through-date 2026-09-14
 
 两个接口均成功时，即使数据缺失也继续执行看板更新并传递同步警告；默认看板发布已有结果，缺失指标保留 NULL。任何接口硬失败都会跳过全部看板，已完成的数据库导入仍保留审计记录。单个看板的计算、验证或写入失败会保留其旧快照并继续更新后续看板，已发布的其他看板不回滚；每个看板的全部卡片一次性原子发布。
 
-每日调度由 `scripts/scheduling/daily-update.ts` 维护。命令结果包含总体 `status`、`throughDate`、`database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、`reason` 及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；正常跳过不计为警告。CLI 不再重复输出默认看板的顶层 `published`、`dataAsOf` 和分析字段；消费者应在 `dashboards` 中按 `dashboardId` 读取。默认看板的 `details.notification` 记录周改善表邮件状态；通知异常保留 `published: true`，计为警告，不回滚快照。dry-run 也不再输出默认看板路径和周期详情。
+每日调度由 `scripts/scheduling/daily-update.ts` 维护。命令结果包含总体 `status`、`throughDate`、`database` 同步结果和按注册顺序排列的 `dashboards` 结果，每项记录 `dashboardId`、`status`、`published`、`dataAsOf`、`reason` 及模块详情 `details`。存在任何硬失败时退出 `1`，否则有警告时退出 `2`，其余退出 `0`；正常跳过不计为警告。CLI 不再重复输出默认看板的顶层 `published`、`dataAsOf` 和分析字段；消费者应在 `dashboards` 中按 `dashboardId` 读取。默认看板的 `details.notification` 记录日改善表邮件状态；通知异常保留 `published: true`，计为警告，不回滚快照。dry-run 也不再输出默认看板路径和周期详情。
 
 ### 临时 Agent 改善分析
 
 指标生成与 Agent 查询在独立子进程的同一个只读 SQLite 事务内运行。子进程先交回基础指标，再使用内存会话和设置、项目 `.data/agent` 的模型凭据启动分析；模型沿用 `SQL_WEB_PROVIDER` / `SQL_WEB_MODEL`（当前为 `local-vllm / zai-org/GLM-5.3-Flash`）。不产生网站会话。
 
-分析分别覆盖最近完整周、当月累计、当季累计的 MT/ST，每类型最多三项。保留原六列：**类型、优先级、问题（损失源）、改善措施、建议责任人、本期损失小时**。问题文本包含简要事实和判断；推测需标注待验证，责任人仅为建议职能。Agent 可查询所有状态、机台及 Performance/Yield；损失小时由程序从 `measure_loss` 的本期同类型实测证据取值，Performance/Yield 等无法对应实测时间的问题保持 `null`。
+分析分别覆盖最新业务日（即截止业务日当日）、最近完整周、当月累计、当季累计的 MT/ST，每类型最多三项。日的最低点基准为年内可计算日等权 OEE 最低的那一天，历史基准为年初至前一日。保留原六列：**类型、优先级、问题（损失源）、改善措施、建议责任人、本期损失小时**。问题文本包含简要事实和判断；推测需标注待验证，责任人仅为建议职能。Agent 可查询所有状态、机台及 Performance/Yield；损失小时由程序从 `measure_loss` 的本期同类型实测证据取值，Performance/Yield 等无法对应实测时间的问题保持 `null`。
 
 分析正文使用业务用户可读的中文日期、指标和数据来源说明；内部证据编号（如 `q11`）、查询行号、工具名及字段名只用于结构化引用和审计。提交校验发现这些内部标记出现在正文时，要求 Agent 保留事实和统计口径、改写后再提交。
 
-临时 Agent 复用网站的 `execute_sql`、`get_current_time`、`measure_loss` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，最终报告通过 `submit_analysis` 提交；最多 60 次调用。每日主 Agent 的 `execute_sql` 和 `measure_loss` 必须填写 `period`（`week`、`month` 或 `quarter`）以标记补查证据归属，子任务周期由服务端绑定，不能指定或修改。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限查询失败且不保存快照。每日分析按各周期的 start/end 调用统一日期接口；报告只接受标准损失查询来源、日期范围和 MT/ST 类型均匹配的原始行，所有证据引用必须归属报告对应周期，即使日期相同也分别登记。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
+临时 Agent 复用网站的 `execute_sql`、`get_current_time`、`measure_loss` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，最终报告通过 `submit_analysis` 提交；最多 60 次调用。每日主 Agent 的 `execute_sql` 和 `measure_loss` 必须填写 `period`（`day`、`week`、`month` 或 `quarter`）以标记补查证据归属，子任务周期由服务端绑定，不能指定或修改。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限查询失败且不保存快照。每日分析按各周期的 start/end 调用统一日期接口；报告只接受标准损失查询来源、日期范围和 MT/ST 类型均匹配的原始行，所有证据引用必须归属报告对应周期，即使日期相同也分别登记。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
 
-自动上下文压缩已启用。每日分析的上下文上限默认 262144 token、单次输出上限默认 32768 token，均不超过模型目录上限；用 `SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW` 按实际部署容量调整、`SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS` 调整输出上限。输出还最多占上下文四分之一，提前为系统指令、工具和证据目录预留空间。压缩后保留系统中的口径与比较基准，每次请求重新提供权限范围内的快照目录和工具额度，主 Agent 还会收到服务端保存的三期子任务结果与状态；完整证据和校验在服务端独立保存。模型将报告数组序列化成 JSON 字符串时会先规范化再严格校验，错误反馈不会重复回显整个报告。
+自动上下文压缩已启用。每日分析的上下文上限默认 262144 token、单次输出上限默认 32768 token，均不超过模型目录上限；用 `SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW` 按实际部署容量调整、`SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS` 调整输出上限。输出还最多占上下文四分之一，提前为系统指令、工具和证据目录预留空间。压缩后保留系统中的口径与比较基准，每次请求重新提供权限范围内的快照目录和工具额度，主 Agent 还会收到服务端保存的四期子任务结果与状态；完整证据和校验在服务端独立保存。模型将报告数组序列化成 JSON 字符串时会先规范化再严格校验，错误反馈不会重复回显整个报告。
 
-`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含三期及每期 MT/ST，校验最低点/历史/本期引用、证据周期归属、优先级、业务正文和损失证据；`submit_analysis` 验证成功即接受并结束分析，不产生草稿，也没有复核、修改合并或再次确认步骤。报告不再包含 `verification`，不再提供 `get_analysis_draft` 和 `finalize_analysis`。字段或证据错误返回模型修正重交；模型只输出正文而未提交时，最多追加两次补救提示。
+`SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS` 默认 600000（10 分钟）。报告必须包含四期（日/周/月/季）及每期 MT/ST，校验最低点/历史/本期引用、证据周期归属、优先级、业务正文和损失证据；`submit_analysis` 验证成功即接受并结束分析，不产生草稿，也没有复核、修改合并或再次确认步骤。报告不再包含 `verification`，不再提供 `get_analysis_draft` 和 `finalize_analysis`。字段或证据错误返回模型修正重交；模型只输出正文而未提交时，最多追加两次补救提示。
 
-子任务失败、超时、额度耗尽、输出截断或证据不足时，主 Agent 在剩余时间与工具额度内补查该周期。成功周期直接用于汇总；仍须提交完整三期才接受，未能补齐则沿用整体分析不可用的降级行为。
+子任务失败、超时、额度耗尽、输出截断或证据不足时，主 Agent 在剩余时间与工具额度内补查该周期。成功周期直接用于汇总；仍须提交完整四期才接受，未能补齐则沿用整体分析不可用的降级行为。
 
-模型不可用、超时或未提交有效报告时，仍发布最新指标，清空三张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。空数据模板不附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
+模型不可用、超时或未提交有效报告时，仍发布最新指标，清空四张改善清单并显示“本次分析暂不可用”，退出码为 `2`；同步硬失败、指标计算失败或发布失败为 `1`。空数据模板不附带固定改善建议，已保存的历史会话不受影响。`--dry-run` 不创建 Agent。
 
 每次运行在 `.data/daily-analysis/<运行 ID>/` 保存 `run.json`（模型、状态、耗时、失败原因）、`base-dashboard.json`、`context.json`、`evidence.jsonl`（SQL、参数、完整结果、证据 ID、周期与任务归属和快照描述）、`analysis-data/`（快照及目录）、`events.jsonl`（含实际 token 预算、沙箱状态、轮次和工具 ID、工具耗时、子任务结果、最终接受报告及压缩事件）、`metrics.json`（分阶段耗时、token、错误、重试及超时未完成区间）和有效的 `report.json`。模型耗时为客户端观测的等待与生成区间，可能包括重试和压缩，不代表服务端纯推理时间。默认看板结果的 `details` 包含 `analysisStatus`、`analysisReason`、`analysisRunId` 和 `analysisArtifactDir`；运行 ID 与每日日志关联。证据可能包含业务明细，目录及文件仅供当前用户读写。
 
@@ -400,11 +400,11 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 
 ## 每日邮件通知与发送群组
 
-每日任务仅在本次默认看板分析成功（`analysisStatus: completed`）且快照发布成功后发送周改善措施表。定时任务和手动 `npm run data:daily` 使用同一流程；每次成功都会发送，包括相同截止业务日的手动重跑，不按天或周去重。分析失败、超时、同步硬失败或发布失败时不发送；`--dry-run` 不读取通知规则、不发送，也不创建通知产物。
+每日任务仅在本次默认看板分析成功（`analysisStatus: completed`）且快照发布成功后发送日改善措施表（不再发送周改善措施表）。定时任务和手动 `npm run data:daily` 使用同一流程；每次成功都会发送，包括相同截止业务日的手动重跑，不按天去重。分析失败、超时、同步硬失败或发布失败时不发送；`--dry-run` 不读取通知规则、不发送，也不创建通知产物。
 
-收件人配置保存在项目 `.data/notifications.json`，不纳入 Git。新部署可将下方 JSON 示例保存为该文件，并配置上文 SMTP。示例启用 `weekly-improvement`，通过群组发送给 `Cheng.Wu@sdsscn.com`。文件不存在、没有对应规则或 `enabled: false` 时正常跳过；不会自动创建配置或发送历史快照。
+收件人配置保存在项目 `.data/notifications.json`，不纳入 Git。新部署可将下方 JSON 示例保存为该文件，并配置上文 SMTP。示例启用 `daily-improvement`，通过群组发送给 `Cheng.Wu@sdsscn.com`。文件不存在、没有对应规则或 `enabled: false` 时正常跳过；不会自动创建配置或发送历史快照。
 
-配置包含 `groups`（群组名到邮箱数组）和 `routes`（信息类型到发送规则）。每条规则必须填写 `enabled`、`groups`、`to`；不使用的收件方式填写空数组。以下示例把周表收件人放入可维护的群组：
+配置包含 `groups`（群组名到邮箱数组）和 `routes`（信息类型到发送规则）。每条规则必须填写 `enabled`、`groups`、`to`；不使用的收件方式填写空数组。以下示例把日表收件人放入可维护的群组：
 
 ```json
 {
@@ -412,7 +412,7 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
     "oee-improvement": ["Cheng.Wu@sdsscn.com"]
   },
   "routes": {
-    "weekly-improvement": {
+    "daily-improvement": {
       "enabled": true,
       "groups": ["oee-improvement"],
       "to": []
@@ -423,9 +423,9 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 
 可在 `groups` 中维护多个群组；一条规则可以选择多个群组，并在 `to` 中追加个人邮箱。群组只包含邮箱，不嵌套群组。发送前合并地址、校验邮箱并去重，沿用现有邮箱规范化规则（域名转小写、本地部分保留大小写），合并后限 1–50 人，超限不拆分发送。规则文件每次发送前重新读取，修改后下一次任务生效，无需重启网站。收件地址只来自这些显式配置，不从分析文字或建议责任人推测。
 
-目前只有 `weekly-improvement` 接入自动发送。后续增加信息类型时，调用通用通知模块并在 `routes` 中配置相应规则即可；仅添加规则不会产生新的定时任务。网页群组管理、对话群组选择及月季表自动发送尚未接入。
+目前只有 `daily-improvement` 接入自动发送。后续增加信息类型时，调用通用通知模块并在 `routes` 中配置相应规则即可；仅添加规则不会产生新的定时任务。网页群组管理、对话群组选择及周月季表自动发送尚未接入。
 
-邮件包含本次已发布周表的 MT/ST 六列、最近完整周的起止日期、截止业务日、统计口径与数据覆盖提示，同时提供 HTML 和纯文本正文。缺失损失小时显示“—”，没有建议时保留原因，责任人仍为待人工确认的职能建议。无需重新调用模型；邮件不包含附件或月季表。
+邮件包含本次已发布日表的 MT/ST 六列、统计业务日、截止业务日、统计口径与数据覆盖提示，同时提供 HTML 和纯文本正文。缺失损失小时显示“—”，没有建议时保留原因，责任人仍为待人工确认的职能建议。无需重新调用模型；邮件不包含附件或周月季表。
 
 `details.notification` 包含 `status`、`reason`、`messageId`、`recipientCount`、`acceptedCount`、`rejectedCount`、`errorCode`。状态为 `accepted`、`partial`、`failed`、`unknown` 或 `skipped`；`accepted` 只表示 SMTP 接受，不保证实际送达。启用规则但 JSON/结构无效、引用未知群组、邮箱无效、收件人数不合要求或 SMTP 未配置时记录失败。失败、部分接受或结果未知都不自动重试，不影响已发布的看板；每日结果为 `completed_with_warnings`（无其他硬失败时退出 `2`）。结果未知时先核实收件情况再决定是否手动重跑，重跑会再次向该规则的全部收件人发送。
 

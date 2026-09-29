@@ -3,7 +3,7 @@ import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { AppDatabase, assertReadOnlyQuery, type SqlParameter } from "../../../database/database.ts";
 import { MAX_QUERY_ARTIFACT_BYTES, normalizeDataSnapshotName, type DataSnapshotDescriptor, type SessionArtifactStore } from "../../../tool/artifact-store.ts";
 import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
-import { dashboardPeriods, weekLabel, PERIOD_KEYS, type PeriodKey } from "../periods.ts";
+import { dashboardPeriods, weekLabel, ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
 import type { LossMeasurement, LossScope } from "../../../tool/loss-tools.ts";
 import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
@@ -159,16 +159,38 @@ export class AnalysisEvidence {
       truncated: false,
     });
     const comparisons = {} as AnalysisContext["comparisons"];
-    for (const key of PERIOD_KEYS) {
-      const grain = { week: "周", month: "月", quarter: "季" }[key];
-      const minimum = state.widgets.find((widget) => widget.id === "oee-extremes-table-2026")?.data
-        .find((row) => row["grain"] === grain && row["point_type"] === "最低");
-      const label = minimum?.["period_label"];
+    for (const key of ANALYSIS_PERIOD_KEYS) {
       const days: string[] = [];
-      for (let day = periods.trend.start; day <= throughDate; day = addDays(day, 1)) {
-        const dayLabel = key === "week" ? weekLabel(day) : key === "month" ? day.slice(0, 7) :
-          day.slice(0, 4) + "-Q" + Math.ceil(Number(day.slice(5, 7)) / 3);
-        if (dayLabel === label) days.push(day);
+      if (key === "day") {
+        // The extremes table only covers week/month/quarter; the lowest day comes
+        // from the same equal-weight average over this run's frozen source rows.
+        const dailyAverages = new Map<string, { sum: number; count: number }>();
+        for (const row of source.rows) {
+          const value = row["daily_test_oee"];
+          if (typeof value !== "number") continue;
+          const day = String(row["day"]);
+          const entry = dailyAverages.get(day) ?? { sum: 0, count: 0 };
+          entry.sum += value;
+          entry.count += 1;
+          dailyAverages.set(day, entry);
+        }
+        let lowest: { day: string; mean: number } | undefined;
+        for (const [day, { sum, count }] of dailyAverages) {
+          const mean = sum / count;
+          // Rows are day-ordered, so strict comparison keeps the earliest day on ties.
+          if (lowest === undefined || mean < lowest.mean) lowest = { day, mean };
+        }
+        if (lowest) days.push(lowest.day);
+      } else {
+        const grain = { week: "周", month: "月", quarter: "季" }[key];
+        const minimum = state.widgets.find((widget) => widget.id === "oee-extremes-table-2026")?.data
+          .find((row) => row["grain"] === grain && row["point_type"] === "最低");
+        const label = minimum?.["period_label"];
+        for (let day = periods.trend.start; day <= throughDate; day = addDays(day, 1)) {
+          const dayLabel = key === "week" ? weekLabel(day) : key === "month" ? day.slice(0, 7) :
+            day.slice(0, 4) + "-Q" + Math.ceil(Number(day.slice(5, 7)) / 3);
+          if (dayLabel === label) days.push(day);
+        }
       }
       comparisons[key] = {
         current: slice(key, periods[key]),

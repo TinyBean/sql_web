@@ -15,7 +15,7 @@ import { createNotificationDispatcher, type NotificationDispatcher } from "../..
 import { sendEmail } from "../../src/server/email.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import { smtpServer, decodedBody } from "../helpers/smtp.ts";
-import { weeklyDashboard } from "../helpers/weekly-dashboard.ts";
+import { dailyDashboard } from "../helpers/daily-dashboard.ts";
 
 const plan = dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z"));
 const database: DailyDatabaseDependencies = { openStore: () => ({
@@ -29,13 +29,13 @@ function fixture(t: TestContext) {
   const logs: unknown[] = [];
   const logger: AppLogger = { info: (...args) => { logs.push(args); }, warn: (...args) => { logs.push(args); },
     error: (...args) => { logs.push(args); }, child() { return this; } };
-  const state = weeklyDashboard(plan.throughDate);
+  const state = dailyDashboard(plan.throughDate);
   const generated: DefaultDashboardResult = { state, analysisStatus: "completed", analysisReason: null,
     analysisRunId: "run-test", analysisArtifactDir: path.join(directory, "analysis") };
   const saveRoute = () => {
     mkdirSync(path.dirname(config.notificationOptions.configPath), { recursive: true });
     writeFileSync(config.notificationOptions.configPath, JSON.stringify({ groups: {}, routes: {
-      "weekly-improvement": { enabled: true, groups: [], to: ["Cheng.Wu@sdsscn.com", "missing@example.com"] },
+      "daily-improvement": { enabled: true, groups: [], to: ["Cheng.Wu@sdsscn.com", "missing@example.com"] },
     } }));
   };
   return { directory, config, logger, logs, state, generated, saveRoute };

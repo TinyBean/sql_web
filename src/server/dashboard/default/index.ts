@@ -4,7 +4,7 @@ import type { DefaultDashboardAnalysisConfig } from "./config.ts";
 import type { generateDefaultDashboard } from "./run.ts";
 import { readDefaultDashboard, writeDefaultDashboard } from "./store.ts";
 import { skippedNotification, type NotificationDispatcher, type NotificationResult } from "../../notifications.ts";
-import { createWeeklyImprovementEmail, WEEKLY_IMPROVEMENT_NOTIFICATION } from "./weekly-email.ts";
+import { createDailyImprovementEmail, DAILY_IMPROVEMENT_NOTIFICATION } from "./daily-email.ts";
 
 export interface DefaultDashboardOptions {
   readonly defaultDashboardPath?: string;
@@ -52,8 +52,8 @@ export function createDefaultDashboardDefinition(
           if (details.analysisStatus === "completed") {
             try {
               notification = await notify({
-                messageType: WEEKLY_IMPROVEMENT_NOTIFICATION,
-                buildEmail: () => createWeeklyImprovementEmail(state, context.throughDate),
+                messageType: DAILY_IMPROVEMENT_NOTIFICATION,
+                buildEmail: () => createDailyImprovementEmail(state, context.throughDate),
               }, context);
             } catch {
               // A notification failure must never turn a successful publication into published:false.

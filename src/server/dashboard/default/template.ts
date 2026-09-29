@@ -2,7 +2,7 @@ import {
   parseDashboardState, type DashboardState, type DashboardOverviewWidget,
   type DashboardLineWidget, type DashboardTableWidget,
 } from "../../../shared/dashboard.ts";
-import { PERIOD_KEYS, PERIOD_GRAINS, type PeriodKey } from "./periods.ts";
+import { PERIOD_KEYS, ANALYSIS_PERIOD_KEYS, PERIOD_GRAINS, type PeriodKey } from "./periods.ts";
 
 const WAITING = "尚未更新,等待每日任务生成数据";
 const empty = () => ({ subtitle: WAITING, data: [], warnings: [WAITING] });
@@ -31,7 +31,7 @@ export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): D
   };
 }
 
-export function createTrendTemplate(key: PeriodKey): DashboardLineWidget {
+export function createTrendTemplate(key: typeof PERIOD_KEYS[number]): DashboardLineWidget {
   const grain = PERIOD_GRAINS[key];
   const name = { week: "weekly", month: "monthly", quarter: "quarterly" }[key];
   return {
@@ -90,7 +90,7 @@ export function createAnalysisTemplate(key: PeriodKey): DashboardTableWidget {
 const CARD_TEMPLATES = [
   ...(["MT", "ST"] as const).flatMap((kind) => [createOverviewTemplate(kind, true), createOverviewTemplate(kind, false)]),
   ...PERIOD_KEYS.map(createTrendTemplate), createExtremesTemplate(), createMachineExtremesTemplate(),
-  ...PERIOD_KEYS.map(createAnalysisTemplate),
+  ...ANALYSIS_PERIOD_KEYS.map(createAnalysisTemplate),
 ];
 export const DEFAULT_CARD_IDS: readonly string[] = CARD_TEMPLATES.map((widget) => widget.id);
 

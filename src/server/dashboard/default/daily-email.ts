@@ -1,25 +1,25 @@
 import type { DashboardState } from "../../../shared/dashboard.ts";
 import type { NotificationEmail } from "../../notifications.ts";
-import { dashboardPeriods, weekLabel } from "./periods.ts";
+import { dashboardPeriods } from "./periods.ts";
 import { createAnalysisTemplate } from "./template.ts";
 
-export const WEEKLY_IMPROVEMENT_NOTIFICATION = "weekly-improvement";
+export const DAILY_IMPROVEMENT_NOTIFICATION = "daily-improvement";
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;").replaceAll("\n", "<br>");
 }
 
-export function createWeeklyImprovementEmail(state: DashboardState, throughDate: string): NotificationEmail {
-  const template = createAnalysisTemplate("week");
+export function createDailyImprovementEmail(state: DashboardState, throughDate: string): NotificationEmail {
+  const template = createAnalysisTemplate("day");
   const card = state.widgets.find((widget) => widget.id === template.id);
   if (!card || card.kind !== "table" || card.warnings.some((warning) => warning.startsWith("本次分析暂不可用"))) {
-    throw new Error("本次周改善措施表不可用");
+    throw new Error("本次日改善措施表不可用");
   }
-  const period = dashboardPeriods(throughDate).week;
-  const title = "周改善措施表（" + weekLabel(period.start) + "）";
+  const period = dashboardPeriods(throughDate).day;
+  const title = "日改善措施表（" + period.end + "）";
   const description = [
-    "统计周期：" + period.start + " 至 " + period.end + "（周日至周六）",
+    "统计业务日：" + period.end,
     "截止业务日：" + throughDate, card.subtitle,
   ];
   const columns = template.encoding.columns;

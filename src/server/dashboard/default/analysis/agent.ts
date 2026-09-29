@@ -9,7 +9,7 @@ import { loadAgentSkillCatalog } from "../../../agent/skill-catalog.ts";
 import { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
 import type { DefaultDashboardAnalysisConfig } from "../config.ts";
 import { AnalysisEvidence, type AnalysisContext, type Evidence } from "./evidence.ts";
-import { PERIOD_KEYS, type PeriodKey } from "../periods.ts";
+import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { AnalysisReportSchema, parseAnalysisReport, validateAnalysisReport } from "./report.ts";
 import { analysisBudget, AnalysisToolCallBudget, MAX_ANALYSIS_TOOL_CALLS } from "./budget.ts";
 import { SubagentRunner, type SubagentResult } from "../../../agent/subagent.ts";
@@ -40,14 +40,14 @@ function summary(evidence: Evidence) {
 
 export function analysisPrompt(context: AnalysisContext, period?: PeriodKey): string {
   const child = period !== undefined;
-  const keys = period ? [period] : PERIOD_KEYS;
+  const keys = period ? [period] : ANALYSIS_PERIOD_KEYS;
   const comparisons = Object.fromEntries(keys.map((key) => [key, {
     current: summary(context.comparisons[key].current),
     minimum: summary(context.comparisons[key].minimum),
     history: summary(context.comparisons[key].history),
   }]));
-  return `${child ? "仅分析分配的一个周期及其对应最低点、历史基准,返回该周期 comparison、minimum_evidence、history_evidence、groups(MT/ST)候选内容及原始证据引用。不得调查其他周期或读取其他任务的证据。" : "程序已并行分派周、月、季分析。汇总子任务结果,直接调用 submit_analysis 提交完整三期报告。对非 completed、text_truncated=true 或证据不足的周期,在剩余时间与额度内补查;不能把失败或中途输出当完整结论。查询工具必须填写结果所属 period;不得跨周期引用证据,即使日期相同。成功结果直接用于汇总,不安排额外复核轮次。"}
-${child ? "只完成下方 periods 指定的一个周期" : "报告包含最近完整周、当月累计、当季累计"},各期分别覆盖 MT/ST,每类型最多三项建议。
+  return `${child ? "仅分析分配的一个周期及其对应最低点、历史基准,返回该周期 comparison、minimum_evidence、history_evidence、groups(MT/ST)候选内容及原始证据引用。不得调查其他周期或读取其他任务的证据。" : "程序已并行分派日、周、月、季分析。汇总子任务结果,直接调用 submit_analysis 提交完整四期报告。对非 completed、text_truncated=true 或证据不足的周期,在剩余时间与额度内补查;不能把失败或中途输出当完整结论。查询工具必须填写结果所属 period;不得跨周期引用证据,即使日期相同。成功结果直接用于汇总,不安排额外复核轮次。"}
+${child ? "只完成下方 periods 指定的一个周期" : "报告包含最新业务日、最近完整周、当月累计、当季累计"},各期分别覆盖 MT/ST,每类型最多三项建议。
 结合年内对应粒度 Overall OEE 最低点及历史数据,解释问题是否持续、改善或新出现;
 comparison 中写比较结论、覆盖差异及可比性。minimum_evidence/history_evidence 填下面相应 evidence_id,
 group.evidence_ids 必须含本期 current.evidence_id。没有可计算最低点/历史时明确说明,不能虚构对比。
@@ -155,10 +155,11 @@ async function runSession(
   let parent: AgentSession;
   const subagents = new SubagentRunner({
     cwd: config.cwd, agentDir: config.agentDir, catalog, parent: () => parent, signal, deadline,
+    maxTasksPerBatch: ANALYSIS_PERIOD_KEYS.length,
     tryConsumeTool: () => toolBudget.take(true), remainingTools: () => toolBudget.remainingForChildren,
     onEvent: (event) => onEvent({ ...event, ...(event["type"] === "tool_call" ? { number: toolBudget.used } : {}) }),
     prepareBatch: () => (agentId, task) => {
-      if (!PERIOD_KEYS.includes(task.name as PeriodKey)) throw new Error("无效的分析周期");
+      if (!ANALYSIS_PERIOD_KEYS.includes(task.name as PeriodKey)) throw new Error("无效的分析周期");
       const period = task.name as PeriodKey;
       const scope = evidence.scope(context, period, agentId);
       return {
@@ -172,8 +173,8 @@ async function runSession(
   const tools = [
     ...createAnalysisTools(evidence, interpreter),
     defineTool({
-      name: "submit_analysis", label: "提交三期分析报告", executionMode: "sequential",
-      description: "Submit the complete week/month/quarter report once. Validates structure, period ownership and all evidence references, then accepts immediately. No draft, review or confirmation step. Fix validation errors and resubmit if rejected. Narrative must be business-readable Chinese; keep evidence references in structured fields.",
+      name: "submit_analysis", label: "提交四期分析报告", executionMode: "sequential",
+      description: "Submit the complete day/week/month/quarter report once. Validates structure, period ownership and all evidence references, then accepts immediately. No draft, review or confirmation step. Fix validation errors and resubmit if rejected. Narrative must be business-readable Chinese; keep evidence references in structured fields.",
       parameters: AnalysisReportSchema, prepareArguments: parseAnalysisReport,
       async execute(_id, params) {
         signal.throwIfAborted();
@@ -232,7 +233,7 @@ async function runSession(
     if (!toolBudget.take()) throw new Error("已达到 60 次工具调用上限");
     onEvent({ type: "tool_call", name: "subagent", toolCallId: callId, number: toolBudget.used, turnId: 0, source: "program" });
     try {
-      childResults = await subagents.run(callId, { tasks: PERIOD_KEYS.map((period) => ({
+      childResults = await subagents.run(callId, { tasks: ANALYSIS_PERIOD_KEYS.map((period) => ({
         name: period, task: "完成 " + period + " 周期的 MT/ST 改善分析,使用本周期及对应最低点、历史基准,返回候选报告内容与证据引用。",
       })) }, signal);
       onEvent({ type: "tool_result", name: "subagent", toolCallId: callId, turnId: 0, source: "program",
@@ -243,11 +244,11 @@ async function runSession(
       throw error;
     }
     signal.throwIfAborted();
-    await session.prompt("三期子任务已结束,结果在上下文 subagent_results 中。请汇总成功结果,补齐失败或不完整周期,直接调用 submit_analysis 提交完整三期报告。");
+    await session.prompt("四期子任务已结束,结果在上下文 subagent_results 中。请汇总成功结果,补齐失败或不完整周期,直接调用 submit_analysis 提交完整四期报告。");
     // Tool schema/references failures are returned to the model in the same turn.
     // A model that stops with prose instead of submitting gets two repair turns.
     for (let repair = 0; !accepted && !exhausted && !modelError && !signal.aborted && repair < 2; repair += 1) {
-      await session.prompt("尚未提交有效报告。请根据错误修正或补齐,调用 submit_analysis 提交三期各 MT/ST 完整报告,不要仅文本回复。");
+      await session.prompt("尚未提交有效报告。请根据错误修正或补齐,调用 submit_analysis 提交四期各 MT/ST 完整报告,不要仅文本回复。");
     }
     if (!accepted) {
       signal.throwIfAborted();

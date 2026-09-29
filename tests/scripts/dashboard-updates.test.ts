@@ -183,5 +183,5 @@ test("shared registration loads initial snapshots without requiring an update ag
   const registry = createDashboardRegistry();
   assert.deepEqual(registry.list().map((definition) => definition.id), ["default"]);
   assert.equal(registry.list()[0]?.update, undefined);
-  assert.equal(registry.loadInitial().widgets.length, 12);
+  assert.equal(registry.loadInitial().widgets.length, 13);
 });

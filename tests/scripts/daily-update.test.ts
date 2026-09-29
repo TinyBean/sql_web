@@ -171,7 +171,8 @@ test("generates numeric cards using canonical calculations, period extrema, and 
   const actions = state.widgets[9]!;
   assert.deepEqual(actions.data, []);
   assert.ok(actions.warnings.some((warning) => warning.includes("本次分析暂不可用")));
-  assert.match(actions.subtitle ?? "", /2025-12-28 至 2026-01-03/u);
+  assert.match(actions.subtitle ?? "", /最新业务日 · 2026-01-08/u);
+  assert.match(state.widgets[10]!.subtitle ?? "", /最近完整周 · 2025-12-28 至 2026-01-03/u);
   assert.doesNotMatch(JSON.stringify(state), /W36|09-14|484\/514/u);
 });
 
@@ -202,7 +203,8 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
   ]), [["2026-W02", "1.MT-01(MT 10.00%)"], ["2026-W01", "1.MT-01(MT 32.00%)"]]);
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W01（2026-01-04 至 2026-01-10）")));
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
-  assert.match(state.widgets[9]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
+  assert.match(state.widgets[9]!.subtitle, /最新业务日 · 2026-01-11/u);
+  assert.match(state.widgets[10]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
 });
 
 test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable days", (t) => {
@@ -222,7 +224,7 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
 test("empty and cross-year dashboards contain null metrics and accurate period warnings", (t) => {
   const { config } = fixture(t);
   const empty = readCalculatedDashboard(config.databasePath, "2027-01-01");
-  assert.equal(empty.widgets.length, 12);
+  assert.equal(empty.widgets.length, 13);
   assert.equal(empty.widgets[1]?.data[0]?.["overall_oee_percent"], null);
   assert.equal(empty.widgets[7]?.data.length, 0);
   assert.equal(empty.widgets[8]?.kind, "table");
@@ -230,9 +232,10 @@ test("empty and cross-year dashboards contain null metrics and accurate period w
   assert.equal(empty.widgets[9]?.data.length, 0);
   assert.ok(empty.widgets[1]?.warnings.some((warning) => warning.includes("2027-01-01")));
   assert.equal(empty.widgets[4]?.data[0]?.["period_label"], "2027-W00");
-  assert.match(empty.widgets[9]!.subtitle, /2026-12-20 至 2026-12-26/u);
+  assert.match(empty.widgets[9]!.subtitle, /最新业务日 · 2027-01-01/u);
+  assert.match(empty.widgets[10]!.subtitle, /2026-12-20 至 2026-12-26/u);
   assert.match(empty.widgets[4]!.title, /2027/u);
-  assert.match(empty.widgets[10]!.warnings.join(" "), /部分月/u);
+  assert.match(empty.widgets[11]!.warnings.join(" "), /部分月/u);
 });
 
 function result(status: SyncResult["status"], dataset: "availability" | "dut_utilization"): SyncResult {
@@ -266,7 +269,7 @@ test("hard sync failures preserve the published default and still attempt the ot
   assert.equal(readFileSync(config.defaultDashboardPath, "utf8"), "old snapshot");
 });
 
-test("sync warnings publish all twelve cards with data coverage warnings", async (t) => {
+test("sync warnings publish all thirteen cards with data coverage warnings", async (t) => {
   const { config } = fixture(t);
   let published = false;
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
@@ -276,7 +279,7 @@ test("sync warnings publish all twelve cards with data coverage warnings", async
     },
     publish(filePath, state) {
       assert.equal(filePath, config.defaultDashboardPath);
-      assert.equal(state.widgets.length, 12);
+      assert.equal(state.widgets.length, 13);
       assert.ok(state.widgets[1]?.warnings.some((warning) => warning.includes("同步存在")));
       published = true;
     },

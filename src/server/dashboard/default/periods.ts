@@ -1,12 +1,16 @@
 import { addDays, assertDate, latestCompleteWeek, type DatePeriod } from "../../database/business-dates.ts";
 
 export const PERIOD_KEYS = ["week", "month", "quarter"] as const;
-export type PeriodKey = typeof PERIOD_KEYS[number];
-export const PERIOD_GRAINS = { week: "周", month: "月", quarter: "季" } as const;
+export type PeriodKey = typeof PERIOD_KEYS[number] | "day";
+/** Analysis periods add the latest business day on top of the numeric-card grains. */
+export const ANALYSIS_PERIOD_KEYS = ["day", ...PERIOD_KEYS] as const;
+export type AnalysisPeriodKey = typeof ANALYSIS_PERIOD_KEYS[number];
+export const PERIOD_GRAINS = { day: "日", week: "周", month: "月", quarter: "季" } as const;
 
 export interface DashboardPeriods {
   readonly year: string;
   readonly trend: DatePeriod;
+  readonly day: DatePeriod;
   readonly week: DatePeriod;
   readonly month: DatePeriod;
   readonly quarter: DatePeriod;
@@ -23,6 +27,7 @@ export function dashboardPeriods(throughDate: string): DashboardPeriods {
   return {
     year,
     trend: { start: yearStart, end: throughDate },
+    day: { start: throughDate, end: throughDate },
     week,
     month: { start: throughDate.slice(0, 7) + "-01", end: throughDate },
     quarter: { start: year + "-" + String(quarterMonth).padStart(2, "0") + "-01", end: throughDate },

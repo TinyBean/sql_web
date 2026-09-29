@@ -162,7 +162,11 @@ test("one overview SQL snapshot saves two independent type cards without changin
   const sessionId = "test-oee-overview-session";
   const artifacts = new ArtifactStore(directory);
   const store = new SessionDashboardStore(artifacts, () => createDefaultDashboard());
-  const baseline = store.loadOrInitialize(sessionId);
+  const initial = store.loadOrInitialize(sessionId);
+  // Free capacity so two additions stay within the fourteen-card cap.
+  const baseline = store.apply(sessionId, {
+    action: "remove", baseRevision: initial.revision, widgetId: "improvement-actions-quarter-2026",
+  }).dashboard;
   const snapshot = artifacts.forSession(sessionId).createDataSnapshot("type-overviews", (fileDescriptor) => {
     writeSync(fileDescriptor, JSON.stringify({ columns, rows, rowCount: 1, truncated: false }));
     return { columns, rowCount: 1 };

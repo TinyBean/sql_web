@@ -26,6 +26,7 @@ const DEFAULT_WIDGET_IDS = [
   "oee-trend-quarterly-2026",
   "oee-extremes-table-2026",
   "mt-st-components-2026",
+  "improvement-actions-day-2026",
   "improvement-actions-week-2026",
   "improvement-actions-month-2026",
   "improvement-actions-quarter-2026",
@@ -95,7 +96,7 @@ test("previews a default dashboard without creating session artifacts", (t) => {
   assert.equal(existsSync(sessionDirectory), false);
 });
 
-test("initializes and restores the pinned twelve-card dashboard per session", (t) => {
+test("initializes and restores the pinned thirteen-card dashboard per session", (t) => {
   const { dashboard, artifacts } = fixture(t);
   const first = dashboard.loadOrInitialize(SESSION_A);
   assert.equal(first.revision, 0);
@@ -244,14 +245,14 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.deepEqual(updated?.data, [{ oee_pct: 23.95 }]);
 });
 
-test("empty templates retain the twelve-card layout and isolate each snapshot", () => {
+test("empty templates retain the thirteen-card layout and isolate each snapshot", () => {
   const now = new Date("2026-09-22T01:00:00.000Z");
   const state = createDefaultDashboard(now);
   assert.equal(state.dataAsOf, now.toISOString());
   assert.deepEqual(state.dateRange, { start: null, end: null });
   assert.deepEqual(state.widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
   assert.deepEqual(state.widgets.map((widget) => widget.size), [
-    "medium", "medium", "medium", "medium", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium",
+    "medium", "medium", "medium", "medium", "wide", "wide", "wide", "medium", "wide", "medium", "medium", "medium", "medium",
   ]);
   for (const widget of state.widgets) {
     assert.ok(widget.warnings.some((warning) => warning.includes("等待每日任务")));
@@ -278,7 +279,7 @@ test("an edit before initialization uses the pinned baseline and reset restores 
     baseRevision: 0,
     widgetId: "oee-trend-weekly-2026",
   }).dashboard;
-  assert.equal(edited.widgets.length, 11);
+  assert.equal(edited.widgets.length, 12);
   const later = new Date("2026-09-23T01:00:00Z");
   const restarted = new SessionDashboardStore(artifacts, () => createDefaultDashboard(later));
   assert.deepEqual(restarted.loadOrPreview(SESSION_A), edited);
@@ -307,27 +308,26 @@ test("keeps existing saved dashboards and their reset baseline", (t) => {
   assert.deepEqual(restarted.loadOrInitialize(SESSION_B).widgets.map((widget) => widget.id), DEFAULT_WIDGET_IDS);
 });
 
-test("the twelve-card default allows two additions and fourteen-card tool reordering, but rejects a fifteenth", async (t) => {
+test("the thirteen-card default allows one addition and fourteen-card tool reordering, but rejects a fifteenth", async (t) => {
   const { dashboard, artifacts } = fixture(t);
   const snapshot = createSnapshot(artifacts, SESSION_A, "extra metrics", [{ date: "2026-09-01", mt: 90, st: 80 }]);
   const dateRange = { start: "2026-09-01", end: "2026-09-01" };
-  for (const [index, id] of ["extra-a", "extra-b"].entries()) {
-    const result = dashboard.apply(SESSION_A, { action: "upsert", baseRevision: index, snapshot, dateRange, widget: lineRequest(id) });
-    assert.equal(result.dashboard.widgets.length, 13 + index);
-  }
+  assert.equal(dashboard.apply(SESSION_A, {
+    action: "upsert", baseRevision: 0, snapshot, dateRange, widget: lineRequest("extra-a"),
+  }).dashboard.widgets.length, 14);
   const update = createDashboardTools(dashboard, SESSION_A).find((tool) => tool.name === "update_dashboard")!;
   const widgetIds = dashboard.loadOrInitialize(SESSION_A).widgets.map((widget) => widget.id).reverse();
-  const arguments_ = { action: "reorder", base_revision: 2, widget_ids: widgetIds };
+  const arguments_ = { action: "reorder", base_revision: 1, widget_ids: widgetIds };
   assert.equal(Value.Check(update.parameters, arguments_), true);
   assert.equal(Value.Check(update.parameters, { ...arguments_, widget_ids: [...widgetIds, "extra-c"] }), false);
   await update.execute("reorder-fourteen", arguments_ as never, undefined, undefined, undefined as never);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_A).widgets.map((widget) => widget.id), widgetIds);
   assert.throws(() => dashboard.apply(SESSION_A, {
-    action: "upsert", baseRevision: 3, snapshot, dateRange, widget: lineRequest("extra-c"),
+    action: "upsert", baseRevision: 2, snapshot, dateRange, widget: lineRequest("extra-b"),
   }), /最多包含 14 个组件/u);
-  assert.equal(dashboard.loadOrInitialize(SESSION_A).revision, 3);
+  assert.equal(dashboard.loadOrInitialize(SESSION_A).revision, 2);
   // Updating an existing card at capacity still works.
   assert.equal(dashboard.apply(SESSION_A, {
-    action: "upsert", baseRevision: 3, snapshot, dateRange, widget: lineRequest("extra-a"),
+    action: "upsert", baseRevision: 2, snapshot, dateRange, widget: lineRequest("extra-a"),
   }).dashboard.widgets.length, 14);
 });

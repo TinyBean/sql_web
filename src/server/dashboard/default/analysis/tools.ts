@@ -5,7 +5,7 @@ import type { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
 import { createAgentTools, createExecuteSqlTool, executeSqlParameters } from "../../../tool/database-tools.ts";
 import { createMeasureLossTool, measureLossParameters, MEASURE_LOSS_TOOL_NAME } from "../../../tool/loss-tools.ts";
 import type { AnalysisEvidence, AnalysisEvidenceScope, Evidence, EvidenceOwner } from "./evidence.ts";
-import { PERIOD_KEYS, type PeriodKey } from "../periods.ts";
+import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { PeriodKeySchema } from "./report.ts";
 
 /** Full rows stay on disk and in the audit registry, not in model messages. */
@@ -36,7 +36,7 @@ export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: Cod
       return { period: scope.period, agentId: scope.agentId };
     }
     const period = "period" in params ? params.period : undefined;
-    if (!PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：week、month 或 quarter");
+    if (!ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：day、week、month 或 quarter");
     return { period: period as PeriodKey, agentId: "root" };
   };
   const storeFor = (owner: EvidenceOwner) => sharedArtifacts.scoped(owner.agentId + "/" + owner.period);

@@ -50,6 +50,19 @@ export interface DefaultTestOeeSql {
   readonly sql: string;
 }
 
+export interface MachineDailyTestOeeSql {
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly exclusiveEndDate: string;
+  readonly dailyGrain: readonly ["day", "machine", "kind"];
+  readonly trimPercent: 1;
+  readonly trimFraction: 0.01;
+  readonly trimPercentPerTail: 0.5;
+  readonly trimFractionPerTail: 0.005;
+  readonly testTimeUpperLimit: 1;
+  readonly sql: string;
+}
+
 export type TestOeeDashboardView = "overview" | "trends";
 
 export interface DefaultTestOeeDashboardSql {
@@ -457,11 +470,18 @@ export function getTestOeeSqlExpressions(
 }
 
 /** Exclude Q/E before Performance and trimming, even without matching Availability; Yield applies its own whitelist. */
-export function getTestOeeDutCtes(startDate: string, endDate: string): string {
+export function getTestOeeDutCtes(
+  startDate: string,
+  endDate: string,
+  grain: "day_kind" | "machine_day_kind" = "day_kind",
+): string {
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
   if (dut.yieldLotPredicate === undefined) {
     throw new TestOeeInputError("DUT Yield LOT 表达式不完整");
   }
+  const machineColumn = grain === "machine_day_kind" ? "machine,\n    " : "";
+  const group = grain === "machine_day_kind" ? "day, machine, kind" : "day, kind";
+  const trimDivisor = grain === "machine_day_kind" ? 200 : 1000;
   return `dut_base AS (
   SELECT
     d.id,
@@ -481,7 +501,7 @@ export function getTestOeeDutCtes(startDate: string, endDate: string): string {
 ),
 dut_daily_aggregate AS (
   SELECT
-    day,
+    ${machineColumn}day,
     kind,
     COUNT(*) AS dut_rows,
     SUM(CASE WHEN yield_eligible THEN 1 ELSE 0 END) AS yield_rows,
@@ -494,38 +514,106 @@ dut_daily_aggregate AS (
     SUM(test_time_seconds) AS actual_test_seconds
   FROM dut_base
   WHERE kind IN ('MT','ST')
-  GROUP BY day, kind
+  GROUP BY ${group}
 ),
 duration_ranked AS (
   SELECT
     id,
-    day,
+    ${machineColumn}day,
     kind,
     test_time_seconds,
     ROW_NUMBER() OVER (
-      PARTITION BY day, kind ORDER BY test_time_seconds, id
+      PARTITION BY ${group} ORDER BY test_time_seconds, id
     ) AS low_rank,
     ROW_NUMBER() OVER (
-      PARTITION BY day, kind ORDER BY test_time_seconds DESC, id DESC
+      PARTITION BY ${group} ORDER BY test_time_seconds DESC, id DESC
     ) AS high_rank,
-    COUNT(*) OVER (PARTITION BY day, kind) AS duration_count
+    COUNT(*) OVER (PARTITION BY ${group}) AS duration_count
   FROM dut_base
   WHERE kind IN ('MT','ST') AND test_time_seconds IS NOT NULL
 ),
 duration_trimmed AS (
   SELECT
-    day,
+    ${machineColumn}day,
     kind,
     MAX(duration_count) AS valid_duration_rows,
-    MAX(CAST(duration_count / 1000 AS INTEGER)) AS trimmed_rows_each_tail,
+    MAX(CAST(duration_count / ${trimDivisor} AS INTEGER)) AS trimmed_rows_each_tail,
     AVG(CASE
-      WHEN low_rank>CAST(duration_count / 1000 AS INTEGER)
-        AND high_rank>CAST(duration_count / 1000 AS INTEGER)
+      WHEN low_rank>CAST(duration_count / ${trimDivisor} AS INTEGER)
+        AND high_rank>CAST(duration_count / ${trimDivisor} AS INTEGER)
       THEN test_time_seconds
     END) AS trimmed_mean_test_seconds
   FROM duration_ranked
-  GROUP BY day, kind
+  GROUP BY ${group}
 )`;
+}
+
+/** v3 machine-day rule: each machine/type has its own 1% trimmed mean and Test Time is capped at 1. */
+export function getMachineDailyTestOeeSql(startDate: string, endDate: string): MachineDailyTestOeeSql {
+  const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
+  const sql = `WITH
+availability_classified AS (
+  SELECT ${availability.dayExpression} AS day, ${availability.machineExpression} AS machine,
+    ${availability.kindExpression} AS kind,
+    ${availability.availabilityStateExpression} AS state_group,
+    ${availability.idlePredicate} AS is_idle, CAST(a.time_span AS REAL) AS state_seconds
+  FROM oee_availability AS a
+  WHERE ${availability.dateRangePredicate}
+    AND ${availability.sourceLotPredicate} AND ${availability.platformPredicate}
+),
+availability_daily AS (
+  SELECT day, machine, kind, COUNT(*) AS availability_rows,
+    SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END) AS machine_running_seconds,
+    SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
+    SUM(state_seconds) AS available_seconds,
+    SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
+      / NULLIF(SUM(state_seconds), 0) AS availability,
+    SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END)
+      / NULLIF(SUM(state_seconds), 0) AS idle
+  FROM availability_classified
+  WHERE kind IN ('MT','ST')
+  GROUP BY day, machine, kind
+),
+availability_effective AS (
+  SELECT *, availability + idle / NULLIF(1 + (1 - idle - availability), 0) AS effective_availability
+  FROM availability_daily
+),
+${getTestOeeDutCtes(startDate, endDate, "machine_day_kind")},
+dut_daily_raw AS (
+  SELECT q.*, t.valid_duration_rows, t.trimmed_rows_each_tail, t.trimmed_mean_test_seconds,
+    q.input_quantity / NULLIF(q.socket_quantity, 0) AS dut_on,
+    t.trimmed_mean_test_seconds * q.touchdown_count / NULLIF(q.actual_test_seconds, 0)
+      AS raw_test_time_performance,
+    q.yield_output_quantity / NULLIF(q.yield_input_quantity, 0) AS final_yield
+  FROM dut_daily_aggregate AS q
+  LEFT JOIN duration_trimmed AS t ON t.day=q.day AND t.machine=q.machine AND t.kind=q.kind
+),
+dut_daily AS (
+  SELECT *, CASE WHEN raw_test_time_performance>1 THEN 1.0
+    ELSE raw_test_time_performance END AS test_time_performance
+  FROM dut_daily_raw
+)
+SELECT a.*, d.dut_rows, d.yield_rows, d.yield_input_quantity, d.yield_output_quantity,
+  d.input_quantity, d.output_quantity, d.socket_quantity, d.touchdown_count, d.actual_test_seconds,
+  d.valid_duration_rows, d.trimmed_rows_each_tail, d.trimmed_mean_test_seconds,
+  d.dut_on, d.dut_on AS performance, d.raw_test_time_performance, d.test_time_performance, d.final_yield,
+  a.availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_test_oee,
+  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_effective_oee
+FROM availability_effective AS a
+LEFT JOIN dut_daily AS d ON d.day=a.day AND d.machine=a.machine AND d.kind=a.kind
+ORDER BY a.day, a.machine, a.kind`;
+  return {
+    startDate,
+    endDate,
+    exclusiveEndDate: availability.exclusiveEndDate,
+    dailyGrain: ["day", "machine", "kind"],
+    trimPercent: 1,
+    trimFraction: 0.01,
+    trimPercentPerTail: 0.5,
+    trimFractionPerTail: 0.005,
+    testTimeUpperLimit: 1,
+    sql,
+  };
 }
 
 export function getDefaultTestOeeSql(startDate: string, endDate: string): DefaultTestOeeSql {

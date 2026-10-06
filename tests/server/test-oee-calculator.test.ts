@@ -524,6 +524,7 @@ test("publishes deterministic database-free Skill tools", async () => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
     "get_default_sql",
+    "get_machine_daily_sql",
     "get_default_dashboard_sql",
     "get_sql_expressions",
     "validate_lot_ids",
@@ -549,6 +550,13 @@ test("publishes deterministic database-free Skill tools", async () => {
   assert.match(defaultSql.sql, /AVG\(r\.daily_test_oee\) OVER/u);
   assert.deepEqual(defaultSql.dailyGrain, ["day", "kind"]);
   assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");
+  const machineSql = await executeTool(byName.get("get_machine_daily_sql")!, {
+    start_date: "2026-08-31",
+    end_date: "2026-09-06",
+  }) as { dailyGrain: readonly string[]; trimPercent: number; testTimeUpperLimit: number };
+  assert.deepEqual(machineSql.dailyGrain, ["day", "machine", "kind"]);
+  assert.equal(machineSql.trimPercent, 1);
+  assert.equal(machineSql.testTimeUpperLimit, 1);
   const dashboardSql = await executeTool(byName.get("get_default_dashboard_sql")!, {
     start_date: "2026-08-31",
     end_date: "2026-09-06",

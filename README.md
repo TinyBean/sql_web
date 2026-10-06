@@ -67,6 +67,8 @@ scripts/
 
 Performance (DUT-On) 为 `SUM(IN_QTY)/SUM(DUT_NUM)`；Performance (Test Time) 按业务日和 MT/ST 分别计算：`TrimmedMean(测试秒数, 0.2)×SUM(TD_Label)/SUM(测试秒数)`。测试秒数是 END_TIME 与 START_TIME 的差；非零有效整数 TOUCHDOWN_INDEX 的 TD_Label 为 1，否则为 NULL。截尾总比例为 0.2%，两端各删除 `floor(n/1000)` 条，仅影响均值；两个总和各自保留全部非空值。小于 1000 条且所有 TD 有效时 Test Time 为 100%。日 OEE 为 Availability×Performance (DUT-On)×Performance (Test Time)×Yield，多日仍等权平均日 OEE；概览五项统一使用该类型 OEE 可计算日。零分母和必要聚合值缺失保持 NULL，不限制结果上限。旧 `performance` 字段仅为 DUT-On 的兼容别名。
 
+机台天明细另使用 v3 口径：Skill 工具 `test_oee_calculator__get_machine_daily_sql` 按业务日、机台、MT/ST 独立计算 `TrimmedMean(测试秒数, 1)×SUM(TD_Label)/SUM(测试秒数)`，总截尾 1%，两端各删除 `floor(n/200)` 条，仅将 Test Time 超过 1 的结果取为 1。工具返回封顶前后比率、样本及组成项，并按相同粒度以 Availability 为主左连接 DUT；缺失和零分母保持 NULL。该机台天公式与上述日类型概览及下述整期机台排名分别维护。
+
 Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))；Effective OEE 复用已有逐日 SQL，以 Effective Availability 替换 Availability。每张 Effective OEE 概览的主值和组成项均对该类型日 Effective OEE 非 NULL 的业务日等权平均，覆盖计数独立于 Test OEE。已有会话继续使用各自保存的看板。每个看板最多允许 20 张卡片，默认 13 张仍留有七个新增位置。
 
 机台 TOP10 表格按周最低、周最高、月最低、月最高、季最低、季最高排序，周期及周期 OEE 直接沿用极值明细，每行展示该周期 OEE 最低的至多 10 台机台。机台 OEE 使用整期汇总：运行秒数÷该机台整期全部状态秒数×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×该机台TD次数)÷SUM(该机台实际测试秒数)]×SUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)，所有数据先排除 LOT 首字符为大写 Q/E 的记录，仅 Yield 再使用 P/M/R/A/F/L 前缀筛选，Availability 和两项 Performance 保留其余 LOT，区别于周期 OEE 的日类型等权平均。机台 Test Time 复用同日同类型全部合格 DUT 的标准时间，不按机台单独截尾。同一机台的 MT/ST 数据合并，按 Availability 累计时长标注主要类型，并列取 MT；按未舍入 OEE 升序排名，并列按机台编号。查询保留完整周期末日的 DUT 数据，缺失或零分母为 NULL，不参与排名；表格提示各周期的机台数量和数据覆盖情况。

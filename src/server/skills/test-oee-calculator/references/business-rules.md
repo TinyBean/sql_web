@@ -113,6 +113,28 @@ Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))
 - 数据库已有全部源字段，无需新增 IE 标准时间表；`DUT_NUM` 直接作为 Socket 分母，不额外乘 768。
 - 任一分母为 0 或必要输入为 `NULL` 时，对应比率及日 OEE 为 `NULL`，不是 0%。
 
+### 机台天维度 Performance (Test Time)
+
+《OEE_Agent需求及逻辑v3.docx》为机台天明细新增独立口径。查询机台每天的 Test Time 或 OEE 时使用 `get_machine_daily_sql`；MT、ST 分别在 **业务日 + 机台 + 类型** 内计算，不与其他机台、日期或类型共用标准时间。
+
+```text
+机台天原始 Test Time = TrimmedMean(Time_Span, 1) × SUM(TD_Label) / SUM(Time_Span)
+
+机台天 Performance (Test Time) = 原始 Test Time > 1 时取 1，否则保留原值
+```
+
+| 查询粒度 | 截尾标准时间的样本范围 | 总截尾比例 | 每端删除行数 | Test Time 上限 |
+|---|---|---|---|---|
+| 日类型汇总 | 同业务日、同 MT/ST 的全部有效 DUT | 0.2% | `floor(n/1000)` | 不封顶 |
+| 机台天明细 | 同业务日、同机台、同 MT/ST 的有效 DUT | 1% | `floor(n/200)` | 1（100%） |
+
+- `TrimmedMean(Time_Span, 1)` 的参数表示总共截去 **1%**，不是 100% 或每端 1%；两端各截去 0.5%。n 只统计该组非空测试秒数；按秒数和事实表 id 排序，每端删除 `floor(n/200)` 行，边界同值按行数删除。199 条不截尾，200 条每端删除 1 条，400 条每端删除 2 条。
+- 时间戳差、`TD_Label`、Q/E 排除、PCIe、MT/ST 与 Yield 专用 LOT 筛选沿用前述规则。截尾只影响均值；TD 次数与实际测试秒数各自保留该组全部非空值，不把截去的行从总和移除，也不筛成共同非空样本。小于 200 条且时间与 TD 全部有效时，该因子为 100%，不能据此断言没有效率损失。
+- 先计算 `raw_test_time_performance`，再用 `CASE WHEN raw_test_time_performance>1 THEN 1.0 ELSE raw_test_time_performance END` 得到 `test_time_performance`。零分母、无有效时间或无有效 TD 时保持 `NULL`，不得补 0 或 100%；负值按原公式保留，不额外下限裁剪。仅封顶这一因子，不封顶 DUT-On、Yield 或 OEE。
+- Availability 按同业务日、同机台、同类型的全部有效状态秒数作分母；Idle、Effective Availability、DUT-On 和 Yield 使用相同粒度。Availability 为主，按 `day + machine + kind` 左连接 DUT；缺少匹配 DUT 的机台天保留空指标。DUT-only 机台天不单独输出，也不参与其他机台的截尾标准时间。
+- 结果中的秒数、数量、`valid_duration_rows`、`trimmed_rows_each_tail`、均值与封顶前后值用于审计；两种日 OEE 使用封顶后的 Test Time。结果全部为原始比率，展示百分数时才乘 100。
+- 工具只输出存在有效 Availability 的机台日类型，不生成无数据日期。空结果或缺少业务日必须报告覆盖不足。文档仅新增机台天公式，未定义其周/月/季聚合；不得平均机台天 OEE 代替既有日类型概览，也不得将这一公式直接套入整期机台排名。
+
 ### 日结果和多日结果
 
 ```text
@@ -136,7 +158,7 @@ Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))
 ### 其他默认值
 
 - Yield 包含所有 `test_stage`，包括 `1st`、`Rescreen` 和 `2ndRescreen`。
-- 不限制比率上限，不舍入中间值，也不静默修正负值或其他源数据异常。
+- 除机台天 Performance (Test Time) 的 100% 上限外，不限制比率上限，不舍入中间值，也不静默修正负值或其他源数据异常。
 
 ### 概览字段映射与核对
 
@@ -208,6 +230,8 @@ OEE 保持 `AVG(日 Availability × 日 Performance (DUT-On) × 日 Performance 
 任何计数不足都必须在回答中说明。无数据的业务日结果保持 `NULL`，多日 `AVG` 不把它当作 0；同时必须明确警告平均值只覆盖了哪些可计算业务日。不得把“查询范围正确”和“数据覆盖完整”混为一谈。
 
 ## 机台 TOP10
+
+本节描述周/月/季整期机台排名，与 v3 新增的机台天明细口径分别维护；机台天工具不自动改变本节的整期聚合规则。
 
 机台 OEE 保留整期汇总：Availability × DUT-On × Test Time × Yield。所有数据先排除 Q/E。机台 Availability = 整期运行秒数÷整期全部状态秒数；两项 Performance 保留其余 LOT，Yield 仅汇总符合白名单前缀条件的投入与产出数量。机台周期 Test Time = `SUM(当天同类型标准秒数 × 该机台当天同类型 TD 次数) / SUM(该机台实际测试秒数)`。标准秒数来自当天该类型排除 Q/E 后的全部合格 DUT 记录，包括没有匹配 Availability 的 DUT，不能按机台重新计算截尾均值。周期中所需日类型标准缺失时该机台 Test Time 为 NULL，不参与排名。MT/ST 仍合并为一台，以 Availability 累计秒数标注主要类型，并列取 MT。
 

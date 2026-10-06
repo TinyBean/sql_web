@@ -6,6 +6,7 @@ import {
   classifyTestOeeKinds,
   getDefaultTestOeeDashboardSql,
   getDefaultTestOeeSql,
+  getMachineDailyTestOeeSql,
   getTestOeeSqlExpressions,
   MAX_RULE_BATCH_SIZE,
   validateTestOeeLotIds,
@@ -38,6 +39,30 @@ export function createTools(): ToolDefinition[] {
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
       const result = getDefaultTestOeeSql(params.start_date, params.end_date);
+      signal?.throwIfAborted();
+      return jsonResult(result);
+    },
+  });
+
+  const getMachineDailySqlTool = defineTool({
+    name: "get_machine_daily_sql",
+    label: "获取机台天 Test OEE / Effective OEE SQL",
+    description:
+      "生成业务日+机台+MT/ST 粒度的固定 SQLite 查询，以 Availability 为主按三项键左连接 DUT。Performance (Test Time) 按同日同机台同类型 DUT 秒数做 1% 截尾均值，两端各删除 floor(n/200) 条，再乘全部 TD 次数除以全部实际秒数；仅该因子超过 1 时取 1，缺失和零分母保持 NULL。结果包含截尾样本、均值、TD、实际秒数、封顶前 raw_test_time_performance、封顶后 test_time_performance、其他组成项及日 Test OEE / Effective OEE。复用 Q/E 排除、PCIe、MT/ST、Yield 专用 LOT 和业务日规则。结果为原始比率；只返回存在有效 Availability 的机台日类型，不生成缺失日期，不定义周/月/季聚合。全类型日概览与趋势使用 get_default_sql 的 0.2% 口径，不能平均机台日结果代替。工具只返回 SQL，不连接数据库。",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      start_date: Type.String({
+        description: "业务日闭区间的开始日，格式 YYYY-MM-DD；当天 08:30 至次日 08:30。",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      }),
+      end_date: Type.String({
+        description: "业务日闭区间的结束日，格式 YYYY-MM-DD。",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      const result = getMachineDailyTestOeeSql(params.start_date, params.end_date);
       signal?.throwIfAborted();
       return jsonResult(result);
     },
@@ -191,6 +216,7 @@ export function createTools(): ToolDefinition[] {
 
   return [
     getDefaultSqlTool,
+    getMachineDailySqlTool,
     getDefaultDashboardSqlTool,
     getSqlExpressionsTool,
     validateLotIdsTool,

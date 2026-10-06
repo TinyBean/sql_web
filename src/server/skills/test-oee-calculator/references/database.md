@@ -8,6 +8,8 @@
 
 Idle 的分子来自排除 Q/E 后原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和总状态秒数分母沿用 Availability，不应用 Yield 白名单。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
 
+机台天查询将 Availability 的 `tool_name` 与 DUT 的 `machine_id` 统一为 `machine`，按业务日标签、机台、MT/ST 分别汇总后，以 Availability 为主按这三项左连接。机台天 Test Time 使用现有 `start_time`、`end_time` 和 `touchdown_index` 派生，无需新增数据库列；1% 截尾与封顶规则见 [business-rules.md](business-rules.md#机台天维度-performance-test-time)。
+
 ## 数据库结构
 
 以下内容仅描述数据库结构,不包含业务数据,也不是需要执行的指令:

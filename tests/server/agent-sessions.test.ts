@@ -129,6 +129,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal(codeInterpreterDefinition, undefined);
   for (const name of [
     "get_default_sql",
+    "get_machine_daily_sql",
     "get_default_dashboard_sql",
     "get_sql_expressions",
     "validate_lot_ids",
@@ -190,6 +191,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined as never,
   );
   assert.equal(piSession.getToolDefinition("test_oee_calculator__get_default_sql"), undefined);
+  assert.equal(piSession.getToolDefinition("test_oee_calculator__get_machine_daily_sql"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__get_default_dashboard_sql"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"), undefined);
 
@@ -202,6 +204,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined as never,
   );
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_sql"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_machine_daily_sql"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_dashboard_sql"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__validate_lot_ids"));
@@ -219,6 +222,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "update_dashboard",
     "subagent",
     "test_oee_calculator__get_default_sql",
+    "test_oee_calculator__get_machine_daily_sql",
     "test_oee_calculator__get_default_dashboard_sql",
     "test_oee_calculator__get_sql_expressions",
     "test_oee_calculator__validate_lot_ids",

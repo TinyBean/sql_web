@@ -58,6 +58,24 @@ test("standard losses preserve canonical filtering, inclusive dates and type-wid
   assert.equal(measureLoss(database, artifacts, { ...range, machines: ["MT-01') OR 1=1 --"] }).rows.length, 0);
 });
 
+test("Q/E losses and Q/E-only days are excluded before coverage and user scope filters", (t) => {
+  const { database, artifacts, writer } = fixture(t);
+  const baseline = measureLoss(database, artifacts, range).rows;
+  const byMachine = measureLoss(database, artifacts, { ...range, machines: ["ST-01"], by_machine: true }).rows;
+  const insert = writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)");
+  for (const [lot, day] of [["Q1", "2026-01-01"], ["E1", "2026-01-02"]] as const) {
+    insert.run("ST-01", lot, "Conversion", "7000", day, 360_000);
+    insert.run("ST-01", lot, "Test(Normal)", "7000", day, 360_000);
+    insert.run("EXCLUDED", lot, "IDLE", "5000", day, 360_000);
+  }
+  const facts = writer.prepare("SELECT * FROM oee_availability ORDER BY id").all();
+  assert.deepEqual(measureLoss(database, artifacts, range).rows, baseline);
+  assert.deepEqual(measureLoss(database, artifacts, { ...range, machines: ["ST-01"], by_machine: true }).rows, byMachine);
+  assert.deepEqual(measureLoss(database, artifacts, { ...range, machines: ["EXCLUDED"] }).rows, []);
+  assert.deepEqual(measureLoss(database, artifacts, { ...range, states: ["IDLE"] }).rows, []);
+  assert.deepEqual(writer.prepare("SELECT * FROM oee_availability ORDER BY id").all(), facts);
+});
+
 test("None LOT states remain available to canonical loss classification", (t) => {
   const { database, artifacts, writer } = fixture(t);
   const insert = writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES('NONE','None',?,'5000','2026-01-02',3600)");

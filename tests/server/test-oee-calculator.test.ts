@@ -253,6 +253,25 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   );
 });
 
+test("source LOT predicates exclude only uppercase Q/E at the first character with or without aliases", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    database.exec("CREATE TABLE lot_rows(id INTEGER PRIMARY KEY, lot_id TEXT NOT NULL)");
+    const lots = ["Q1", "E1", "Q", "E", "q1", "e1", " Q1", " E1",
+      "P1", "M1", "R1", "A1", "F1", "L1", "None", "X1", "AQ1", "PE1", ""];
+    const insert = database.prepare("INSERT INTO lot_rows(lot_id) VALUES(?)");
+    for (const lot of lots) insert.run(lot);
+    for (const source of ["availability", "dut"] as const) {
+      for (const alias of [undefined, "facts"]) {
+        const expressions = getTestOeeSqlExpressions(source, "2026-01-01", "2026-01-01", alias);
+        const rows = database.prepare(`SELECT lot_id FROM lot_rows ${alias ?? ""}
+          WHERE ${expressions.sourceLotPredicate} ORDER BY id`).all();
+        assert.deepEqual(rows.map((row) => row["lot_id"]), lots.slice(4));
+      }
+    }
+  } finally { database.close(); }
+});
+
 test("generated date predicate includes the complete end date", () => {
   const database = new DatabaseSync(":memory:");
   database.exec(`CREATE TABLE rows (date TEXT NOT NULL);
@@ -544,9 +563,10 @@ test("publishes deterministic database-free Skill tools", async () => {
     start_date: "2026-08-31",
     end_date: "2026-09-06",
     table_alias: "d",
-  }) as { kindExpression: string; dateRangePredicate: string };
+  }) as { kindExpression: string; dateRangePredicate: string; sourceLotPredicate: string };
   assert.match(sqlExpressions.kindExpression, /d\.step_id/u);
   assert.match(sqlExpressions.dateRangePredicate, /substr\(d\.date,1,10\)/u);
+  assert.equal(sqlExpressions.sourceLotPredicate, "substr(d.lot_id,1,1) NOT IN ('Q','E')");
   assert.deepEqual(await executeTool(byName.get("validate_lot_ids")!, {
     lot_ids: ["P1", "X1"],
   }), [

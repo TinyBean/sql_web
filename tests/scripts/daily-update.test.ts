@@ -135,6 +135,20 @@ test("generates numeric cards using canonical calculations, period extrema, and 
   }
   insert.run("TSPH001", "P-LOT", "Test(Normal)", "5000", "2026-01-01", 999999);
   insert.run("NON-YIELD", "None", "Test(Normal)", "5000", "2026-01-01", 12600);
+  const insertExcludedDut = writer.prepare(`INSERT INTO oee_dut_utilization
+    (machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date,touchdown_index,start_time,end_time)
+    VALUES(?,?,'100000','100000','1st','200000',?,?,'1','2026-01-01T00:00:00.000Z','2026-01-02T00:00:00.000Z')`);
+  // Excluded rows must not change cards, coverage, period extrema or rankings.
+  for (const [kind, step] of [["MT", "5000"], ["ST", "7000"]] as const) {
+    for (const lot of ["Q1", "E1"]) {
+      for (const day of ["2026-01-01", "2026-01-03"]) {
+        insert.run(kind + "-01", lot, "IDLE", step, day, 1_000_000);
+        insert.run(kind + "-EXCLUDED", lot, "Test(Normal)", step, day, 1_000_000);
+        insertExcludedDut.run(kind + "-01", lot, step, day);
+        insertExcludedDut.run(kind + "-EXCLUDED", lot, step, day);
+      }
+    }
+  }
   writer.close();
   const state = readCalculatedDashboard(config.databasePath, "2026-01-08", new Date("2026-01-09T01:00:00Z"));
   assert.deepEqual(state.widgets.map((widget) => [widget.id, widget.size]), createDefaultDashboard().widgets.map((widget) => [widget.id, widget.size]));

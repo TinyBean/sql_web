@@ -106,26 +106,82 @@ test("Idle predicates match IDLE anywhere in the raw state with and without tabl
   assert.equal(getTestOeeSqlExpressions("dut", day, day).idlePredicate, undefined);
 });
 
-test("only Yield filters LOT prefixes; Performance and state totals include None, X, Q and E", (t) => {
+test("all components exclude Q/E while non-Yield None and X LOTs remain eligible", (t) => {
   const f = fixture(t);
   for (const [kind, step] of [["MT", "5000"], ["ST", "7000"]] as const) {
     const day = "2026-01-01";
     f.a(day, "Test(Normal)", 18_000, { machine: kind, step, lot: "None" });
     f.a(day, "IDLE", 9_000, { machine: kind, step, lot: "X1" });
-    f.a(day, "PM", 9_000, { machine: kind, step, lot: "Q1" });
+    f.a(day, "PM", 9_000, { machine: kind, step, lot: "X2" });
     f.d(day, { kind, lot: "P1", input: 80, output: 60, sockets: 100 });
     f.d(day, { kind, lot: "M1", input: 20, output: 20, sockets: 100 });
-    for (const lot of ["None", "X1", "Q1", "E1"]) {
+    for (const lot of ["None", "X1"]) {
       f.d(day, { kind, lot, input: 25, output: 0, sockets: 100, td: "0", seconds: 20 });
     }
     const row = f.rows(day).find((row) => row["kind"] === kind)!;
     assertValues(row, {
       available_seconds: 36_000, availability: .5, idle: .25, effective_availability: .7,
-      dut_rows: 6, input_quantity: 200, output_quantity: 80, socket_quantity: 600,
+      availability_rows: 3, machine_count: 1,
+      dut_rows: 4, input_quantity: 150, output_quantity: 80, socket_quantity: 400,
       yield_rows: 2, yield_input_quantity: 100, yield_output_quantity: 80,
-      valid_duration_rows: 6, actual_test_seconds: 100, touchdown_count: 2,
-      trimmed_mean_test_seconds: 100 / 6, dut_on: 1 / 3, test_time_performance: 1 / 3,
-      final_yield: .8, daily_test_oee: 2 / 45, daily_effective_oee: 14 / 225,
+      valid_duration_rows: 4, actual_test_seconds: 60, touchdown_count: 2,
+      trimmed_mean_test_seconds: 15, dut_on: .375, test_time_performance: .5,
+      final_yield: .8, daily_test_oee: .075, daily_effective_oee: .105,
+    });
+  }
+  const day = "2026-01-01";
+  const daily = f.rows(day);
+  const overview = f.overview(day);
+  const trends = f.trends(day);
+  for (const [kind, step] of [["MT", "5000"], ["ST", "7000"]] as const) {
+    for (const lot of ["Q1", "E1"]) {
+      for (const state of ["Test(Normal)", "IDLE", "PM"]) {
+        f.a(day, state, 100_000, { machine: kind, step, lot });
+      }
+      f.a(day, "IDLE", 100_000, { machine: kind + "-EXCLUDED", step, lot });
+      f.d(day, { kind, lot, input: 100_000, output: 100_000, sockets: 200_000, seconds: 100_000 });
+    }
+  }
+  const availabilityFacts = f.db.prepare("SELECT * FROM oee_availability ORDER BY id").all();
+  const dutFacts = f.db.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
+  assert.deepEqual(f.rows(day), daily);
+  assert.deepEqual(f.overview(day), overview);
+  assert.deepEqual(f.trends(day), trends);
+  assert.deepEqual(f.db.prepare("SELECT * FROM oee_availability ORDER BY id").all(), availabilityFacts);
+  assert.deepEqual(f.db.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), dutFacts);
+});
+
+test("Q/E-only days have no valid coverage and keep missing metrics null", (t) => {
+  const f = fixture(t);
+  for (const [kind, step] of [["MT", "5000"], ["ST", "7000"]] as const) {
+    f.a("2026-01-01", "Test(Normal)", 1_000, { machine: kind, step });
+    f.d("2026-01-01", { kind });
+    for (const lot of ["Q1", "E1"]) {
+      f.a("2026-01-02", "Test(Normal)", 1_000, { machine: kind, step, lot });
+      f.a("2026-01-02", "IDLE", 1_000, { machine: kind, step, lot });
+      f.d("2026-01-02", { kind, lot });
+    }
+  }
+  for (const row of f.rows("2026-01-01", "2026-01-02").filter((row) => row["day"] === "2026-01-02")) {
+    assertValues(row, {
+      availability_rows: 0, machine_count: 0, available_seconds: null, idle_seconds: null,
+      dut_rows: null, yield_rows: null, valid_duration_rows: null, touchdown_count: null,
+      actual_test_seconds: null, trimmed_mean_test_seconds: null,
+      availability: null, idle: null, effective_availability: null, dut_on: null,
+      test_time_performance: null, final_yield: null, daily_test_oee: null, daily_effective_oee: null,
+      calculable_day_count: 1, effective_calculable_day_count: 1, selected_day_count: 2,
+    });
+  }
+  const overview = f.overview("2026-01-01", "2026-01-02");
+  const excludedOverview = f.overview("2026-01-02");
+  for (const kind of ["mt", "st"]) {
+    assertValues(overview, {
+      [`${kind}_availability_day_count`]: 1, [`${kind}_dut_day_count`]: 1,
+      [`${kind}_calculable_day_count`]: 1, [`${kind}_effective_calculable_day_count`]: 1,
+    });
+    assertValues(excludedOverview, {
+      [`${kind}_availability_day_count`]: 0, [`${kind}_dut_day_count`]: 0,
+      [`${kind}_oee_percent`]: null, [`${kind}_effective_oee_percent`]: null,
     });
   }
 });
@@ -173,7 +229,7 @@ test("zero state totals are undefined and negative totals are not clamped", (t) 
   }
 });
 
-test("Idle includes every LOT and loss-only machine while preserving PCIe, date and classification rules", (t) => {
+test("Idle includes non-Q/E LOTs and loss-only machines while preserving PCIe, date and classification rules", (t) => {
   const f = fixture(t);
   const day = "2026-01-01";
   f.a(day, "Test(Normal)", 43_200);

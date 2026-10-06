@@ -34,7 +34,7 @@ test("rankings use actual state totals and Yield-only LOT eligibility", (t) => {
   const { database, a, d } = fixture(t);
   const day = "2026-01-01";
   a("MIX", day, 21600, "5000", "Test(Normal)", "None");
-  a("MIX", day, 21600, "5000", "PM", "Q1");
+  a("MIX", day, 21600, "5000", "PM", "X1");
   d("MIX", day, 100, 80, 200);
   d("MIX", day, 100, 0, 100, "5000", "None");
   a("NO-YIELD", day, 4000, "5000", "Test(Normal)", "None");
@@ -44,6 +44,29 @@ test("rankings use actual state totals and Yield-only LOT eligibility", (t) => {
   const table = buildMachineExtremesTable(database, [monthLow], monthRange);
   assert.equal(table.data[0]!["top10_machines"], "1.LOSS(MT 0.00%)、2.MIX(MT 26.67%)");
   assert.match(table.warnings.join(" "), /可计算机台 2\/4/u);
+});
+
+test("rankings, primary type, shared test standard and coverage ignore Q/E-only records", (t) => {
+  const { database, a, d } = fixture(t);
+  for (const [machine, step] of [["MT-01", "5000"], ["ST-01", "7000"]] as const) {
+    a(machine, "2026-01-01", 43200, step);
+    d(machine, "2026-01-01", 10, 8, 20, step);
+  }
+  const baseline = buildMachineExtremesTable(database, [monthLow], monthRange);
+  assert.equal(baseline.data[0]!["top10_machines"], "1.MT-01(MT 40.00%)、2.ST-01(ST 40.00%)");
+  for (const lot of ["Q1", "E1"]) {
+    for (const [machine, step] of [["MT-01", "7000"], ["ST-01", "5000"], [lot + "-ONLY", "5000"]] as const) {
+      a(machine, "2026-01-02", 1_000_000, step, "PM", lot);
+      d(machine, "2026-01-02", 100_000, 100_000, 200_000, step, lot);
+    }
+    d(lot + "-DUT-ONLY", "2026-01-01", 100_000, 100_000, 200_000, "5000", lot);
+  }
+  database.exec("UPDATE oee_dut_utilization SET end_time='2026-01-02T00:00:00.000Z' WHERE lot_id IN ('Q1','E1')");
+  assert.deepEqual(buildMachineExtremesTable(database, [monthLow], monthRange), baseline);
+  const excludedPeriod = { start: "2026-01-02", end: "2026-01-31" };
+  const excluded = buildMachineExtremesTable(database, [monthLow], excludedPeriod);
+  assert.equal(excluded.data[0]!["top10_machines"], null);
+  assert.match(excluded.warnings.join(" "), /可计算机台 0\/0/u);
 });
 
 test("machine test time shares each daily type standard including DUT without Availability", (t) => {

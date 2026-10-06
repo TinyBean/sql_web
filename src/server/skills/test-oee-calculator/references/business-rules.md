@@ -4,9 +4,15 @@
 
 以下规则由纯工具和 SQL 生成器统一实现。除非用户明确要求修改，否则不要手工重写。
 
+### 全部计算的 Q/E 源数据排除
+
+Availability 和 DUT 在计算任何指标、状态损失、覆盖统计和机台排名前，均使用 `sourceLotPredicate` 排除 `LOT_ID` 首字符为大写 `Q` 或 `E` 的记录：`substr(lot_id,1,1) NOT IN ('Q','E')`。直接判断原值首字符，不去除空格、不转换大小写；小写 q/e 和非首字符 Q/E 不受此规则排除。筛选仅发生在只读 SQL 的基础数据 WHERE 条件，不删除原始文件或数据库记录。
+
+Test Time 的截尾样本数、截尾均值、TD 次数与实际测试秒数均来自排除 Q/E 后的 DUT。覆盖日数和机台数也只统计排除后的有效记录；仅含 Q/E 的业务日或机台不形成有效覆盖，缺失指标保持 `NULL`。损失查询的类型覆盖先按该基础范围统计，再应用用户指定的状态或机台筛选。
+
 ### Yield 专用 LOT 筛选
 
-仅 Yield 的分子和分母保留首字符为 `P`、`M`、`R`、`A`、`F` 或 `L` 的 `LOT_ID`。Availability、Idle、两项 Performance 和状态损失查询不应用此前缀筛选，包括 `None` 和其他前缀的记录仍参与这些指标。日期、PCIe 排除和 MT/ST 分类规则继续适用于各项指标。
+在统一排除 Q/E 的基础上，仅 Yield 的分子和分母保留首字符为 `P`、`M`、`R`、`A`、`F` 或 `L` 的 `LOT_ID`。Availability、Idle、两项 Performance 和状态损失查询不应用该 Yield 白名单，`None`、`X` 等其余前缀的记录仍参与这些指标。日期、PCIe 排除和 MT/ST 分类规则继续适用于各项指标。
 
 DUT 的 `yieldLotPredicate` 仅用于 Yield 的条件聚合，不得放入共享 DUT 或 Availability 的 WHERE 条件。没有符合 LOT 条件的 DUT 记录时，`yield_rows=0`，Yield 分子、分母和比率为 `NULL`，不能借用全部 DUT 数量或补零；Yield 分母为零时也无法计算。
 
@@ -97,7 +103,7 @@ Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))
 
 其中：
 
-- `available_seconds` 为经过日期、PCIe 和 MT/ST 规则过滤后的全部 Availability 状态秒数之和，包括全部 loss，不按 LOT 前缀筛选，不使用机台数×86400。总秒数为零时 Availability 和 Idle 均为 `NULL`；负值照公式计算，不修正。`machine_count` 为该范围的不重复机台数，仅用于覆盖说明。
+- `available_seconds` 为经过日期、Q/E 排除、PCIe 和 MT/ST 规则过滤后的全部 Availability 状态秒数之和，包括全部 loss，不应用 Yield 白名单，不使用机台数×86400。总秒数为零时 Availability 和 Idle 均为 `NULL`；负值照公式计算，不修正。`machine_count` 为该范围的不重复机台数，仅用于覆盖说明。
 - Idle 沿用 Availability 的全部过滤、日类型粒度和总状态秒数分母，累加原始 `final_state` 中包含大写子串 `IDLE` 的所有状态秒数，使用 `instr(final_state,'IDLE')>0`，区分大小写且不限子串位置；包含 `IDLE_NoWIP`、`IDLE_WaitARV`、`IDLE_NoTask(...)` 等变体，不使用派生 `state_group`。有效 Availability 记录中没有任何包含 `IDLE` 的状态时，`idle_seconds` 为 0，分母非零时 `idle` 为 0；没有有效 Availability 记录时两者为 `NULL`。
 - Effective Availability 的分母 `1 + (1 - Idle - Availability)` 为 0 或必要输入缺失时，Effective Availability 和日 Effective OEE 为 `NULL`，不影响原 Test OEE。分母为负时照公式计算，不封顶、不修正源值。
 - `Time_Span` 来自 DUT 的 `END_TIME - START_TIME`，单位为秒，使用 `unixepoch(..., 'subsec')` 保留小数秒。时间戳为空或无法解析时为 `NULL`。
@@ -191,7 +197,7 @@ OEE 保持 `AVG(日 Availability × 日 Performance (DUT-On) × 日 Performance 
 - `machine_count`：有效 Availability 记录中的不重复机台数，仅用于覆盖统计。
 - `available_seconds`：有效 Availability 记录的全部状态秒数之和，作为 Availability 和 Idle 的分母。
 - `idle_seconds` / `idle`：原始状态包含 `IDLE` 的累计秒数及其占 `available_seconds` 的比率。
-- `dut_rows`：当天该类型的全部有效 DUT 记录数，不应用 LOT 前缀筛选；为 `NULL` 表示 Availability 日类型没有匹配 DUT 日类型。
+- `dut_rows`：当天该类型排除 Q/E 后的全部有效 DUT 记录数，不应用 Yield 白名单；为 `NULL` 表示 Availability 日类型没有匹配 DUT 日类型。
 - `input_quantity`、`output_quantity`、`socket_quantity`：全部有效 DUT 的数量汇总，其中前者与 Socket 数量用于 DUT-On，不作为 Yield 的分子分母。
 - `yield_rows`、`yield_input_quantity`、`yield_output_quantity`：仅符合 Yield LOT 条件的记录数及投入、产出数量；没有符合条件的记录时数量汇总为 `NULL`。
 - `touchdown_count`、`actual_test_seconds`、`trimmed_mean_test_seconds`：Test Time 的 TD 次数、实际测试总秒数、截尾标准秒数。
@@ -203,9 +209,9 @@ OEE 保持 `AVG(日 Availability × 日 Performance (DUT-On) × 日 Performance 
 
 ## 机台 TOP10
 
-机台 OEE 保留整期汇总：Availability × DUT-On × Test Time × Yield。机台 Availability = 整期运行秒数÷整期全部状态秒数；两项 Performance 保留所有 LOT，Yield 仅汇总符合前缀条件的投入与产出数量。机台周期 Test Time = `SUM(当天同类型标准秒数 × 该机台当天同类型 TD 次数) / SUM(该机台实际测试秒数)`。标准秒数来自当天该类型全部合格 DUT 记录，包括没有匹配 Availability 的 DUT，不能按机台重新计算截尾均值。周期中所需日类型标准缺失时该机台 Test Time 为 NULL，不参与排名。MT/ST 仍合并为一台，以 Availability 累计秒数标注主要类型，并列取 MT。
+机台 OEE 保留整期汇总：Availability × DUT-On × Test Time × Yield。所有数据先排除 Q/E。机台 Availability = 整期运行秒数÷整期全部状态秒数；两项 Performance 保留其余 LOT，Yield 仅汇总符合白名单前缀条件的投入与产出数量。机台周期 Test Time = `SUM(当天同类型标准秒数 × 该机台当天同类型 TD 次数) / SUM(该机台实际测试秒数)`。标准秒数来自当天该类型排除 Q/E 后的全部合格 DUT 记录，包括没有匹配 Availability 的 DUT，不能按机台重新计算截尾均值。周期中所需日类型标准缺失时该机台 Test Time 为 NULL，不参与排名。MT/ST 仍合并为一台，以 Availability 累计秒数标注主要类型，并列取 MT。
 
-历史快照保留原结果和原口径；采用新分母或 Yield 专用 LOT 筛选时必须从事实数据重新查询，不能只改标签或沿用旧快照数值。缺失 Test Time 不反推、不补 100%；默认看板更新需重算所有指标和分析。
+历史看板、报告和快照保留原结果和原口径，本次规则变更不主动重算。后续查询及常规刷新采用 Q/E 排除；采用新分母、Q/E 排除或 Yield 专用 LOT 筛选时必须从事实数据重新查询，不能只改标签或沿用旧快照数值。缺失 Test Time 不反推、不补 100%；默认看板更新需重算所有指标和分析。
 
 ## 临时口径
 

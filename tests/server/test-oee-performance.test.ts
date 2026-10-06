@@ -11,12 +11,12 @@ function fixture(t: TestContext) {
   const availability = db.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,'P1','Test(Normal)',?,?,43200)");
   const dut = db.prepare(`INSERT INTO oee_dut_utilization
     (machine_id,lot_id,step_id,date,in_qty,out_qty,dut_num,test_stage,touchdown_index,start_time,end_time)
-    VALUES(?,'P1',?,?,'10','8','20','1st',?,?,?)`);
+    VALUES(?,?,?,?,'10','8','20','1st',?,?,?)`);
   return {
     db,
     a(day: string, kind = "MT") { availability.run(kind, kind === "MT" ? "5000" : "7000", day); },
-    d(day: string, seconds: number | null, td: string | null = "1", kind = "MT") {
-      dut.run(kind, kind === "MT" ? "5000" : "7000", day, td, "2026-01-01T23:59:59.500Z",
+    d(day: string, seconds: number | null, td: string | null = "1", kind = "MT", lot = "P1") {
+      dut.run(kind, lot, kind === "MT" ? "5000" : "7000", day, td, "2026-01-01T23:59:59.500Z",
         seconds === null ? "invalid" : new Date(Date.parse("2026-01-01T23:59:59.500Z") + seconds * 1000).toISOString());
     },
     rows(start: string, end = start) { return db.prepare(getDefaultTestOeeSql(start, end).sql).all(); },
@@ -55,6 +55,28 @@ test("0.2 percent trimming handles 999/1000/2000 samples, boundary ties and sepa
   const trends = f.db.prepare(getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-03", "trends").sql).all();
   assert.equal(trends[1]!["mt_test_time_percent"], 10000 / 10081 * 100);
   assert.equal(trends[1]!["st_test_time_percent"], 100);
+});
+
+test("Q/E exclusion precedes trimming and preserves the 999/1000 valid-sample boundary", (t) => {
+  const f = fixture(t);
+  for (const [day, count, trimmed] of [["2026-01-01", 999, 0], ["2026-01-02", 1000, 1]] as const) {
+    for (const kind of ["MT", "ST"]) {
+      f.a(day, kind);
+      f.d(day, 1, "1", kind);
+      f.d(day, 100, "1", kind);
+      for (let i = 2; i < count; i++) f.d(day, 10, "1", kind);
+    }
+    const baseline = f.rows(day);
+    for (const row of baseline) {
+      assert.equal(row["valid_duration_rows"], count);
+      assert.equal(row["trimmed_rows_each_tail"], trimmed);
+    }
+    for (const kind of ["MT", "ST"]) {
+      f.d(day, 0, "1", kind, "Q1");
+      f.d(day, 100_000, "1", kind, "E1");
+    }
+    assert.deepEqual(f.rows(day), baseline);
+  }
 });
 
 test("time differences keep fractional seconds across midnight and independent null populations", (t) => {

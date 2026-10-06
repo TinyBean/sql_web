@@ -21,7 +21,7 @@ availability_classified AS (
     ${a.kindExpression} AS kind, ${a.availabilityStateExpression} AS state_group,
     CAST(a.time_span AS REAL) AS state_seconds
   FROM oee_availability AS a
-  WHERE ${a.dateRangePredicate} AND ${a.platformPredicate}
+  WHERE ${a.dateRangePredicate} AND ${a.sourceLotPredicate} AND ${a.platformPredicate}
 ),
 availability_period AS (
   SELECT machine, COUNT(DISTINCT day) AS availability_days,

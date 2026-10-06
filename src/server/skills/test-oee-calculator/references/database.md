@@ -4,7 +4,9 @@
 `R_OEE_MT_TOP_AVAILABILITY` 对应本地表 `oee_availability`，用于 Availability 和 Idle；Performance (DUT-On)、Performance (Test Time) 和 Yield
 使用本地表 `oee_dut_utilization`。
 
-Idle 的分子来自原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和总状态秒数分母沿用 Availability，不应用 LOT 前缀筛选。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
+两个事实表在指标、损失、覆盖及机台排名计算前均排除 `lot_id` 首字符为大写 Q/E 的记录，使用公共 SQL 表达式 `sourceLotPredicate`，原始数据保留。仅 Yield 再使用 P/M/R/A/F/L 白名单。
+
+Idle 的分子来自排除 Q/E 后原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和总状态秒数分母沿用 Availability，不应用 Yield 白名单。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
 
 ## 数据库结构
 

@@ -25,6 +25,8 @@ export interface TestOeeSqlExpressions {
   readonly dayExpression: string;
   readonly machineExpression: string;
   readonly dateRangePredicate: string;
+  /** Shared source filter for all OEE components, losses and coverage. */
+  readonly sourceLotPredicate: string;
   /** DUT-only eligibility for Yield; never a filter on the shared population. */
   readonly yieldLotPredicate?: string;
   readonly platformPredicate: string;
@@ -391,6 +393,7 @@ export function getTestOeeSqlExpressions(
   const exclusiveEndDate = nextIsoDate(endDate);
   const dateColumn = sqlColumn("date", tableAlias);
   const lotIdColumn = sqlColumn("lot_id", tableAlias);
+  const sourceLotPredicate = `substr(${lotIdColumn},1,1) NOT IN ('Q','E')`;
   if (source === "availability") {
     const machineColumn = sqlColumn("tool_name", tableAlias);
     return {
@@ -402,6 +405,7 @@ export function getTestOeeSqlExpressions(
       dayExpression: `substr(${dateColumn},1,10)`,
       machineExpression: machineColumn,
       dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
+      sourceLotPredicate,
       platformPredicate: eligiblePlatformSql(machineColumn),
       kindExpression: kindSql(
         sqlColumn("step", tableAlias),
@@ -428,6 +432,7 @@ export function getTestOeeSqlExpressions(
     dayExpression: `substr(${dateColumn},1,10)`,
     machineExpression: machineColumn,
     dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
+    sourceLotPredicate,
     yieldLotPredicate: validLotSql(lotIdColumn),
     platformPredicate: eligiblePlatformSql(machineColumn),
     kindExpression: kindSql(
@@ -451,7 +456,7 @@ export function getTestOeeSqlExpressions(
   };
 }
 
-/** Performance uses every LOT, even without matching Availability; only Yield checks LOT eligibility. */
+/** Exclude Q/E before Performance and trimming, even without matching Availability; Yield applies its own whitelist. */
 export function getTestOeeDutCtes(startDate: string, endDate: string): string {
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
   if (dut.yieldLotPredicate === undefined) {
@@ -471,6 +476,7 @@ export function getTestOeeDutCtes(startDate: string, endDate: string): string {
     ${dut.testTimeSecondsExpression} AS test_time_seconds
   FROM oee_dut_utilization AS d
   WHERE ${dut.dateRangePredicate}
+    AND ${dut.sourceLotPredicate}
     AND ${dut.platformPredicate}
 ),
 dut_daily_aggregate AS (
@@ -551,6 +557,7 @@ availability_classified AS (
     CAST(a.time_span AS REAL) AS state_seconds
   FROM oee_availability AS a
   WHERE ${availability.dateRangePredicate}
+    AND ${availability.sourceLotPredicate}
     AND ${availability.platformPredicate}
 ),
 availability_daily AS (

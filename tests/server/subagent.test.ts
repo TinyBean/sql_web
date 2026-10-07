@@ -14,6 +14,7 @@ import { createDefaultDashboard } from "../../src/server/dashboard/default/templ
 import { AnalysisToolCallBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { createAgentTools } from "../../src/server/tool/database-tools.ts";
+import { oeeSkillSessionOptions } from "../../src/server/agent/oee-skill-runtime.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
 
 interface RequestBody {
@@ -82,6 +83,7 @@ async function fixture(t: TestContext, respond: (body: RequestBody) => unknown |
     const runner = new SubagentRunner({ cwd: directory, agentDir, parent: () => parent, catalog,
       onEvent: (event) => events.push(event),
       prepareBatch: () => (id) => ({ systemPrompt: "只读调查", context: () => ({ marker: "provided-context" }),
+        skillOptions: oeeSkillSessionOptions(database, artifacts.forSession(created.id).scoped(id)),
         tools: createAgentTools(database, artifacts.forSession(created.id).scoped(id), interpreter, new Set(), undefined, true) }),
       ...overrides });
     runners.push(runner);
@@ -153,6 +155,9 @@ test("Skill activation is local to one child and unregistered recursion never ex
     if (task === "reader") {
       if (!results.length) return call("read", { path: skillPath });
       assert.ok(body.tools.some((tool) => tool.function.name === "test_oee_calculator__get_sql_expressions"));
+      assert.ok(body.tools.some((tool) => tool.function.name === "test_oee_calculator__rank_machines"));
+      if (results.length === 1) return call("test_oee_calculator__rank_machines", { start_date: "2026-01-01", end_date: "2026-01-01", kind: "MT", metric: "loss_hours" });
+      assert.match(results[1]!.content, /机台数据不足/u);
       return "已读取口径";
     }
     assert.ok(!body.tools.some((tool) => tool.function.name.startsWith("test_oee_calculator__")));
@@ -165,6 +170,8 @@ test("Skill activation is local to one child and unregistered recursion never ex
   assert.deepEqual(result.map((entry) => entry.status), ["completed", "completed"]);
   assert.ok(env.events.some((event) => event["type"] === "tool_call" && event["name"] === "read"));
   assert.equal(env.parent.getToolDefinition("test_oee_calculator__get_sql_expressions"), undefined);
+  assert.equal(env.parent.getToolDefinition("test_oee_calculator__rank_machines"), undefined);
+  assert.equal(result[0]!.snapshots.length, 1);
   assert.equal(existsSync(env.parent.sessionFile!), false);
 });
 

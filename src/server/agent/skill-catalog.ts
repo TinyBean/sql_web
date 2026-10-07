@@ -28,7 +28,14 @@ interface SkillLoadedEntryData {
   readonly name: string;
 }
 
-type SkillToolFactory = () => readonly ToolDefinition[];
+type SkillToolFactory = (context?: unknown) => readonly ToolDefinition[];
+
+export interface SkillSessionOptions {
+  /** Contexts are owned by one session extension, never retained by the catalog. */
+  readonly contexts?: Readonly<Record<string, unknown>>;
+  /** Apply caller-specific evidence policies before publishing local tool names. */
+  readonly decorateTool?: (skillName: string, definition: ToolDefinition) => ToolDefinition;
+}
 
 interface CatalogSkill {
   readonly skill: Skill;
@@ -44,7 +51,7 @@ export interface AgentSkillCatalog {
   readonly resources: LoadSkillsResult;
   readonly skillNames: readonly string[];
   readonly publishedToolNames: readonly string[];
-  createSessionExtension(cwd: string): InlineExtension;
+  createSessionExtension(cwd: string, options?: SkillSessionOptions): InlineExtension;
 }
 
 export interface LoadAgentSkillCatalogOptions {
@@ -119,9 +126,11 @@ function validateToolDefinitions(
 
 function definitionsForRegistration(
   catalogSkill: CatalogSkill,
+  options: SkillSessionOptions,
 ): ToolDefinition[] {
   if (!catalogSkill.factory) return [];
-  const definitions = catalogSkill.factory();
+  const definitions = options.contexts && Object.hasOwn(options.contexts, catalogSkill.skill.name)
+    ? catalogSkill.factory(options.contexts[catalogSkill.skill.name]) : catalogSkill.factory();
   const validated = validateToolDefinitions(
     catalogSkill.skill.name,
     catalogSkill.namespace,
@@ -133,10 +142,12 @@ function definitionsForRegistration(
   ) {
     throw new Error(`Skill ${catalogSkill.skill.name} 的工具定义在加载时发生变化`);
   }
-  return definitions.map((definition, index) => ({
-    ...definition,
-    name: validated.publishedNames[index]!,
-  }));
+  return definitions.map((definition, index) => {
+    const decorated = options.decorateTool?.(catalogSkill.skill.name, definition) ?? definition;
+    if (decorated.name !== definition.name) throw new Error("会话工具包装器不能改变 Skill 局部工具名");
+    validateToolDefinitions(catalogSkill.skill.name, catalogSkill.namespace, [decorated]);
+    return { ...decorated, name: validated.publishedNames[index]! };
+  });
 }
 
 function loadedSkillsFromBranch(
@@ -174,6 +185,7 @@ async function resolveReadableFile(
 function createSkillRuntimeExtension(
   catalogSkills: readonly CatalogSkill[],
   cwd: string,
+  options: SkillSessionOptions,
 ): ExtensionFactory {
   const skillsByName = new Map(catalogSkills.map((catalogSkill) => [
     catalogSkill.skill.name,
@@ -198,7 +210,7 @@ function createSkillRuntimeExtension(
       }
       const catalogSkill = skillsByName.get(skillName);
       if (!catalogSkill) throw new Error(`未知 Skill:${skillName}`);
-      for (const definition of definitionsForRegistration(catalogSkill)) {
+      for (const definition of definitionsForRegistration(catalogSkill, options)) {
         pi.registerTool(definition);
       }
       registeredSkills.add(skillName);
@@ -364,10 +376,10 @@ export async function loadAgentSkillCatalog({
     resources,
     skillNames: catalogSkills.map((entry) => entry.skill.name),
     publishedToolNames: catalogSkills.flatMap((entry) => entry.publishedToolNames),
-    createSessionExtension: (cwd) => ({
+    createSessionExtension: (cwd, options = {}) => ({
       name: "sql-web-skill-runtime",
       hidden: true,
-      factory: createSkillRuntimeExtension(catalogSkills, path.resolve(cwd)),
+      factory: createSkillRuntimeExtension(catalogSkills, path.resolve(cwd), options),
     }),
   };
 }

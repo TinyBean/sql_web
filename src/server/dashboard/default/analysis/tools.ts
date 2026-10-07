@@ -4,9 +4,22 @@ import { normalizeDataSnapshotName } from "../../../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
 import { createAgentTools, createExecuteSqlTool, executeSqlParameters } from "../../../tool/database-tools.ts";
 import { createMeasureLossTool, measureLossParameters, MEASURE_LOSS_TOOL_NAME } from "../../../tool/loss-tools.ts";
+import { createRankMachinesTool, rankMachinesParameters, RANK_MACHINES_LOCAL_TOOL_NAME } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
+import { createOeeSkillRuntime } from "../../../agent/oee-skill-runtime.ts";
+import type { SkillSessionOptions } from "../../../agent/skill-catalog.ts";
 import type { AnalysisEvidence, AnalysisEvidenceScope, Evidence, EvidenceOwner } from "./evidence.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { PeriodKeySchema } from "./report.ts";
+
+function evidenceOwner(params: object, scope?: AnalysisEvidenceScope): EvidenceOwner {
+  if (scope) {
+    if ("period" in params) throw new Error("子任务周期由服务端绑定，不能指定 period");
+    return { period: scope.period, agentId: scope.agentId };
+  }
+  const period = "period" in params ? params.period : undefined;
+  if (!ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：day、week、month 或 quarter");
+  return { period: period as PeriodKey, agentId: "root" };
+}
 
 /** Full rows stay on disk and in the audit registry, not in model messages. */
 export function evidenceOutput(record: Evidence) {
@@ -30,15 +43,7 @@ export function evidenceOutput(record: Evidence) {
 export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: CodeInterpreterRuntime, scope?: AnalysisEvidenceScope) {
   const sharedArtifacts = evidence.artifacts;
   if (!sharedArtifacts) throw new Error("每日分析需要独立的数据快照存储");
-  const ownerFor = (params: object): EvidenceOwner => {
-    if (scope) {
-      if ("period" in params) throw new Error("子任务周期由服务端绑定，不能指定 period");
-      return { period: scope.period, agentId: scope.agentId };
-    }
-    const period = "period" in params ? params.period : undefined;
-    if (!ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：day、week、month 或 quarter");
-    return { period: period as PeriodKey, agentId: "root" };
-  };
+  const ownerFor = (params: object) => evidenceOwner(params, scope);
   const storeFor = (owner: EvidenceOwner) => sharedArtifacts.scoped(owner.agentId + "/" + owner.period);
   const sqlParameters = scope
     ? Type.Object(executeSqlParameters.properties, { additionalProperties: false })
@@ -90,4 +95,27 @@ export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: Cod
       },
     }),
   ];
+}
+
+/** Ranking is published only by Skill activation; this wrapper binds audited analysis resources. */
+export function createAnalysisSkillOptions(evidence: AnalysisEvidence, scope?: AnalysisEvidenceScope): SkillSessionOptions {
+  const artifacts = evidence.artifacts;
+  if (!artifacts) throw new Error("每日分析需要独立的数据快照存储");
+  return { decorateTool(skillName, definition) {
+    if (skillName !== "test-oee-calculator" || definition.name !== RANK_MACHINES_LOCAL_TOOL_NAME) return definition;
+    const parameters = scope
+      ? Type.Object(rankMachinesParameters.properties, { additionalProperties: false })
+      : Type.Object({ ...rankMachinesParameters.properties, period: PeriodKeySchema }, { additionalProperties: false });
+    return { ...definition, parameters,
+      description: definition.description + (scope ? " Evidence is private to the assigned period and task." : " period is required and assigns the evidence to one report period."),
+      execute(id, params, signal, update, ctx) {
+        if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("机台排名参数无效");
+        const owner = evidenceOwner(params, scope);
+        const scopedRanking = createRankMachinesTool(createOeeSkillRuntime(evidence.queries, artifacts.scoped(owner.agentId + "/" + owner.period)),
+          (measurement) => evidence.recordMachineRanking(measurement, owner).id, evidence.machineRankingCache);
+        const { period: _period, ...rankingParams } = params as typeof params & { period?: PeriodKey };
+        return evidence.withEvidenceWrite(() => scopedRanking.execute(id, rankingParams, signal, update, ctx), signal);
+      },
+    };
+  } };
 }

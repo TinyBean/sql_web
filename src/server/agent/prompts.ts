@@ -15,8 +15,12 @@ const DATABASE_RULES = `你是一个严谨的数据库问答助手。你的任�
 const OEE_RULES = `15. OEE 查询继续遵循 Test OEE Skill 中的日期、Yield 专用 LOT 筛选、MT/ST 与 Machine_Running 口径。所有指标、损失、覆盖和机台排名先使用 sourceLotPredicate 排除大写 Q/E 前缀 LOT，原始数据保留；仅 Yield 再筛选 P/M/R/A/F/L 前缀，Availability、Idle 和两项 Performance 保留其余 LOT。Availability 与 Idle 以过滤后全部状态秒数之和作分母。查询标准状态损失时先阅读该 Skill 和 references，再调用 measure_loss，传入业务日闭区间 start_date/end_date，可用 states、machines 筛选或 by_machine 获取机台明细。measure_loss 自动保存完整快照，complete/summary 视图可直接分析；展示省略不代表快照截断。覆盖日数不是损失出现日数或机台天数之和，空结果不能视为零损失或完整覆盖。修改固定计算口径时使用 Skill SQL 表达式和 execute_sql。`;
 
 export function websiteInvestigationPrompt(): string {
-  return DATABASE_RULES + "\n" + OEE_RULES;
+  return DATABASE_RULES + "\n" + OEE_RULES + "\n" + MACHINE_DESCRIPTION_RULES;
 }
+
+export const MACHINE_DESCRIPTION_RULES = `机台业务描述统一显示平台号/机台号,如 T5773/ADH001。以工具返回的平台为准,未映射时显示平台待维护/机台号;不能根据编号或 MT/ST 猜平台。SQL、筛选参数和关联键继续使用原始机台号。
+具体损失、指标问题分析及机台集中/分散结论必须读取 Test OEE Skill 后调用 test_oee_calculator__rank_machines,按同一业务日范围、MT/ST 和问题指标获取 TOP3。损失按相关 states 的小时最多,指标按对应值最低;引用工具 summary 原文,保留数值、占比分母、覆盖和计算口径。多项状态/指标分别查证并各自列出 TOP3,不得引用无关排名或把同台多个状态当多台。
+固定报告和整期比较用 report_period;明确的机台天查询用 machine_day(单日、1%截尾、Test Time 上限100%),禁止混用。纯公式解释、单台查询只补平台,无需追加 TOP3。工具空结果时明确说明机台数据不足,不得视为零损失或输出未核实的集中/分散结论。`;
 
 export function buildSystemPrompt(codeInterpreterAvailable: boolean, emailAvailable: boolean): string {
   const codeInterpreterRules = codeInterpreterAvailable
@@ -38,5 +42,5 @@ Dashboard 使用说明:
 12. 更新同一主题时复用已有稳定组件 ID,只有新分析才创建新 ID。date_range 必须填写查询实际覆盖范围,metric_definition 必须说明口径,数据缺失或不可计算条件写入 warnings。
 13. 每次 update_dashboard 都使用最近一次 get_dashboard 返回的 revision。出现 revision 冲突时重新读取看板并只重试一次。只有用户明确要求调整现有看板时才使用 remove、reorder 或 reset。
 14. 解释当前看板、纯口径解释、定义说明、SQL 失败、快照被截断或结果无法合理可视化时不得修改看板;不要为了调用工具而创建无意义组件。
-${OEE_RULES}${codeInterpreterRules}${emailAvailable ? EMAIL_AGENT_RULES : ""}`;
+${OEE_RULES}\n${MACHINE_DESCRIPTION_RULES}${codeInterpreterRules}${emailAvailable ? EMAIL_AGENT_RULES : ""}`;
 }

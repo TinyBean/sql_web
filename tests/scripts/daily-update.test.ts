@@ -178,8 +178,8 @@ test("generates numeric cards using canonical calculations, period extrema, and 
     assert.equal(row["oee_percent"], extreme?.["oee_percent"]);
     // Machine period aggregation retains Jan 2's input even though its daily Socket denominator is zero.
     const expectedMachines = row["grain"] === "周"
-      ? row["point_type"] === "最低" ? "1.ST-01(ST 40.00%)、2.MT-01(MT 69.82%)" : "1.MT-01(MT 40.00%)、2.ST-01(ST 40.00%)"
-      : "1.ST-01(ST 40.00%)、2.MT-01(MT 54.68%)";
+      ? row["point_type"] === "最低" ? "1.平台待维护/ST-01(ST 40.00%)、2.平台待维护/MT-01(MT 69.82%)" : "1.平台待维护/MT-01(MT 40.00%)、2.平台待维护/ST-01(ST 40.00%)"
+      : "1.平台待维护/ST-01(ST 40.00%)、2.平台待维护/MT-01(MT 54.68%)";
     assert.equal(row["top10_machines"], expectedMachines);
   }
   const actions = state.widgets[9]!;
@@ -214,7 +214,7 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
   const machines = state.widgets[8]!;
   assert.deepEqual(machines.data.filter((row) => row["grain"] === "周").map((row) => [
     row["period_label"], row["top10_machines"],
-  ]), [["2026-W02", "1.MT-01(MT 10.00%)"], ["2026-W01", "1.MT-01(MT 32.00%)"]]);
+  ]), [["2026-W02", "1.平台待维护/MT-01(MT 10.00%)"], ["2026-W01", "1.平台待维护/MT-01(MT 32.00%)"]]);
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W01（2026-01-04 至 2026-01-10）")));
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
   assert.match(state.widgets[9]!.subtitle, /最新业务日 · 2026-01-11/u);

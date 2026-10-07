@@ -13,7 +13,7 @@ import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { AnalysisReportSchema, parseAnalysisReport, validateAnalysisReport } from "./report.ts";
 import { analysisBudget, AnalysisToolCallBudget, MAX_ANALYSIS_TOOL_CALLS } from "./budget.ts";
 import { SubagentRunner, type SubagentResult } from "../../../agent/subagent.ts";
-import { createAnalysisTools } from "./tools.ts";
+import { createAnalysisTools, createAnalysisSkillOptions } from "./tools.ts";
 import { createAnalysisTemplate } from "../template.ts";
 
 export { MAX_ANALYSIS_TOOL_CALLS } from "./budget.ts";
@@ -52,6 +52,7 @@ ${child ? "只完成下方 periods 指定的一个周期" : "报告包含最新�
 comparison 中写比较结论、覆盖差异及可比性。minimum_evidence/history_evidence 填下面相应 evidence_id,
 group.evidence_ids 必须含本期 current.evidence_id。没有可计算最低点/历史时明确说明,不能虚构对比。
 阅读 Test OEE Skill 和两个 references 后,${child ? "优先调用 measure_loss 查询本周期全部损失状态" : "利用已完成子任务的证据,仅对缺失或错误补查"},本期损失的 start_date/end_date 必须使用下方 periods 中对应周期的 start/end(业务日闭区间),
+每项问题必须调用 test_oee_calculator__rank_machines 获取本周期同 MT/ST 的对应指标 TOP3,使用 basis=report_period。损失问题用 metric=loss_hours 和实际相关 states;Performance 分别用 dut_on/test_time_performance,Yield 用 final_yield,其他问题按实际指标选取。将返回的 evidence_id 同时写入 item.machine_evidence_ids 和 item.evidence_ids;一条问题涉及多项指标/状态时引用多个排名。服务器会生成并拼接带平台、数值、占比、覆盖的 TOP3 文案,issue 只写发现与判断,不要自己抄写 TOP3。没有机台可计算数据时引用空排名证据并说明数据不足,不能编造集中或分散结论。
 再按需要用 measure_loss(by_machine=true)、execute_sql 和 Skill SQL 工具自主调查机台、状态及组成项。
 数据库数据采用冻结快照传递。execute_sql 自动保存完整结果,measure_loss 和初始比较证据也附带 snapshot。
 measure_loss 的 view.mode=complete 表示全部结果,summary 包含全量派生统计及局部排名;优先直接使用这些确定性统计,不要仅为读取、排序、求和重复调用 Python。execute_sql 的预览不是完整结果:需要额外计算时将 snapshot.name(初始比较为 snapshot 字符串)传给 code_interpreter.snapshot,使用 snapshot_rows(list[dict]),不要手抄预览或把数据库数据塞进代码/user_input。
@@ -64,7 +65,7 @@ measure_loss 的 view.mode=complete 表示全部结果,summary 包含全量派�
 measure 写针对证据的具体操作及验证办法;suggested_owner 仅给建议责任职能,未提供人员资料不得写姓名。
 comparison、issue、measure、suggested_owner、no_findings_reason 面向业务用户,使用简洁中文,按“发现了什么、依据是什么、建议怎么做”表达,数据来源写实际期间和内容,如“本周(09-07 至 09-13)损失统计”“当季机台明细”“1—8 月历史对比”。
 这些正文不得出现 q11、q13 等内部证据编号、“第 0 行”、measure_loss/execute_sql 等工具名或 hours_per_kind_available_day 等字段名。内部编号和行索引只放在 evidence_ids、minimum_evidence、history_evidence、loss_reference 等结构化引用字段;不要为了可读性删除这些审计引用。
-把工具操作改写为业务动作,如“下周复查各机台损失时长”;日均值明确实际分母,如“每个有数据业务日平均损失 98.6 小时”,保留日期、数值、覆盖差异和待验证说明。MT/ST、OEE、Q1、W36 和机台编号可保留;损失状态和组成项首次出现时配中文解释,如“Assistance(协助等待)”“Availability(可用率)”。
+把工具操作改写为业务动作,如“下周复查各机台损失时长”;日均值明确实际分母,如“每个有数据业务日平均损失 98.6 小时”,保留日期、数值、覆盖差异和待验证说明。机台必须显示平台号/机台号,如 T5773/ADH001,未映射时显示平台待维护/机台号,不能根据 MT/ST 猜平台。MT/ST、OEE、Q1、W36 可保留;损失状态和组成项首次出现时配中文解释,如“Assistance(协助等待)”“Availability(可用率)”。
 priority 根据影响、证据和改善价值由 1 起排序;数据不足时允许 items=[],说明 no_findings_reason。
 loss_reference 只能引用 measure_loss 返回的本期同类型行(evidence_id + 从 0 起 row_index);
 Performance (DUT-On)、Performance (Test Time)、Yield 或无法直接对应实测时间的问题用 null,不得折算损失小时。
@@ -147,7 +148,7 @@ async function runSession(
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     // Keep rules and comparison anchors outside the history that compaction summarizes.
     systemPrompt: "你是制造测试 OEE 数据分析员。依据只读数据库证据自主调查并提出可验证的改善建议。\n" + analysisPrompt(context),
-    extensionFactories: [catalog.createSessionExtension(config.cwd), guard], skillsOverride: () => catalog.resources,
+    extensionFactories: [catalog.createSessionExtension(config.cwd, createAnalysisSkillOptions(evidence)), guard], skillsOverride: () => catalog.resources,
   });
   await resourceLoader.reload();
   const errors = resourceLoader.getExtensions().errors;
@@ -164,6 +165,7 @@ async function runSession(
       const scope = evidence.scope(context, period, agentId);
       return {
         systemPrompt: analysisPrompt(context, period), tools: createAnalysisTools(evidence, interpreter, scope),
+        skillOptions: createAnalysisSkillOptions(evidence, scope),
         context: () => ({ throughDate: context.throughDate, periods: { [period]: context.periods[period] },
           evidence: evidence.catalog(scope), code_interpreter: interpreter.status }),
       };

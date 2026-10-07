@@ -4,6 +4,8 @@ import { parseDashboardState, type DashboardRow, type DashboardState } from "../
 import { type AnalysisContext, type Evidence } from "./evidence.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { createAnalysisTemplate } from "../template.ts";
+import { formatMachineMentions, hasMachineDistributionClaim } from "../../../skills/test-oee-calculator/assets/machine-platforms.ts";
+import { machineRankingView, type MachineMetric } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
 
 const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
@@ -18,6 +20,7 @@ export const AnalysisItemSchema = Type.Object({
   issue: text, measure: text,
   suggested_owner: Type.String({ minLength: 1, maxLength: 160, description: readableDescription }),
   evidence_ids: refs,
+  machine_evidence_ids: refs,
   loss_reference: Type.Union([Type.Null(), Type.Object({ evidence_id: Type.String(), row_index: Type.Integer({ minimum: 0 }) }, { additionalProperties: false })]),
 }, { additionalProperties: false });
 export const AnalysisGroupSchema = Type.Object({
@@ -38,7 +41,7 @@ export type AnalysisReport = Static<typeof AnalysisReportSchema>;
 
 /** Decode only structural fields; never guess repairs or echo report contents. */
 export function decodeAnalysisStructures(value: unknown): unknown {
-  const structural = new Set(["periods", "groups", "items", "evidence_ids", "loss_reference"]);
+  const structural = new Set(["periods", "groups", "items", "evidence_ids", "machine_evidence_ids", "loss_reference"]);
   const decode = (input: unknown, key = "", location = "$"): unknown => {
     if (structural.has(key) && typeof input === "string") {
       try { input = JSON.parse(input) as unknown; }
@@ -68,7 +71,7 @@ export function parseAnalysisReport(value: unknown): AnalysisReport {
 
 function assertReadableText(value: string, field: string): void {
   // Keep business identifiers such as Q1, W36, ADH075 and MT/ST intact.
-  const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|execute_sql|submit_analysis|finalize_analysis|get_analysis_draft|draft_id|evidence_ids?|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
+  const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|test_oee_calculator__rank_machines|rank_machines|execute_sql|submit_analysis|finalize_analysis|get_analysis_draft|draft_id|evidence_ids?|machine_evidence_ids|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
   if (internalReference.test(value)) {
     throw new Error(field + " 含内部证据编号、查询行号、工具名或字段名。请改写为业务用户可理解的日期、指标和数据来源（如‘本周损失统计’‘当季机台明细’‘每个有数据业务日的平均损失小时’），保留事实、数值和统计口径；内部引用仅放在 evidence_ids、minimum_evidence、history_evidence、loss_reference 等结构化字段中。");
   }
@@ -91,17 +94,23 @@ export function validateAnalysisReport(
     if (reports.length !== 1) throw new Error("每个周期必须且只能提交一次：" + key);
     const report = reports[0]!;
     assertReadableText(report.comparison, key + ".comparison");
+    report.comparison = formatMachineMentions(report.comparison);
     const expected = context.comparisons[key];
     if (report.minimum_evidence !== expected.minimum.id || report.history_evidence !== expected.history.id) {
       throw new Error(key + " 的最低点或历史证据引用不匹配初始上下文");
     }
     checkRefs([report.minimum_evidence, report.history_evidence], key);
     rows[key] = [];
+    const periodSummaries = new Set<string>();
     for (const kind of ["MT", "ST"] as const) {
       const groups = report.groups.filter((group) => group.kind === kind);
       if (groups.length !== 1) throw new Error(key + " 必须分别覆盖 MT 和 ST");
       const group = groups[0]!;
       assertReadableText(group.no_findings_reason, key + "/" + kind + ".no_findings_reason");
+      group.no_findings_reason = formatMachineMentions(group.no_findings_reason);
+      if (!group.items.length && hasMachineDistributionClaim(group.no_findings_reason)) {
+        throw new Error("无建议原因不能包含未经机台排名证据核实的集中或分散结论");
+      }
       checkRefs(group.evidence_ids, key);
       if (!group.evidence_ids.includes(expected.current.id)) throw new Error(key + "/" + kind + " 缺少本期指标证据");
       if (!group.items.length && !group.no_findings_reason.trim()) throw new Error("空清单必须解释数据不足或无充分依据的原因");
@@ -113,9 +122,28 @@ export function validateAnalysisReport(
           assertReadableText(item[field], key + "/" + kind + ".items[" + index + "]." + field);
         }
         checkRefs(item.evidence_ids, key);
+        if (item.loss_reference !== null && (item.category === "performance" || item.category === "yield")) {
+          throw new Error("Performance/Yield 不得折算为损失小时，loss_reference 应为 null");
+        }
+        checkRefs(item.machine_evidence_ids, key);
+        const allowedMetrics: Record<typeof item.category, readonly MachineMetric[]> = {
+          availability: ["loss_hours", "availability", "effective_availability"],
+          performance: ["dut_on", "test_time_performance"], yield: ["final_yield"],
+          other: ["loss_hours", "availability", "effective_availability", "dut_on", "test_time_performance", "final_yield", "oee", "effective_oee"],
+        };
+        const rankings = [...new Set(item.machine_evidence_ids)].map((id) => {
+          const ranking = evidence.get(id)!;
+          if (!item.evidence_ids.includes(id) || ranking.source !== "rank_machines" || !ranking.rankingScope ||
+              ranking.range?.start !== context.periods[key].start || ranking.range.end !== context.periods[key].end ||
+              ranking.rankingScope.kind !== kind || ranking.rankingScope.basis !== "report_period" ||
+              !allowedMetrics[item.category].includes(ranking.rankingScope.metric) ||
+              ranking.rows.some((row) => row["kind"] !== kind)) {
+            throw new Error("机台 TOP3 必须引用本期同类型、对应问题指标的完整整期排名证据");
+          }
+          return { ...ranking, summary: machineRankingView({ rows: ranking.rows, range: ranking.range, scope: ranking.rankingScope }).summary };
+        });
         let hours: number | null = null;
         if (item.loss_reference !== null) {
-          if (item.category === "performance" || item.category === "yield") throw new Error("Performance/Yield 不得折算为损失小时，loss_reference 应为 null");
           const ref = item.loss_reference;
           checkRefs([ref.evidence_id], key);
           const measured = evidence.get(ref.evidence_id)!;
@@ -125,13 +153,36 @@ export function validateAnalysisReport(
               row?.["kind"] !== kind || typeof row["loss_hours"] !== "number") {
             throw new Error("损失小时必须引用 measure_loss 返回的本期同类型实测行");
           }
+          if (!rankings.some((ranking) => ranking.rankingScope!.metric === "loss_hours" &&
+              (!ranking.rankingScope!.states.length || ranking.rankingScope!.states.includes(String(row["state_group"]))))) {
+            throw new Error("损失问题的 TOP3 状态范围与实测损失引用不匹配");
+          }
           hours = Math.round(row["loss_hours"] * 10) / 10;
         }
+        const machines = rankings.flatMap((ranking) => ranking.rows.map((row) => String(row["machine"])));
+        for (const field of ["issue", "measure", "suggested_owner"] as const) item[field] = formatMachineMentions(item[field], machines);
+        let authoredIssue = item.issue;
+        for (const ranking of rankings) authoredIssue = authoredIssue.replaceAll(ranking.summary, "");
+        if (/TOP\s*3/iu.test(authoredIssue)) {
+          throw new Error("TOP3 文案由服务端生成，请在 issue 中只写事实与判断，通过 machine_evidence_ids 引用排名");
+        }
+        if (hasMachineDistributionClaim(authoredIssue) && rankings.every((ranking) =>
+          !ranking.rows.some((row) => typeof row["metric_value"] === "number"))) {
+          throw new Error("机台排名数据不足，不能输出集中或分散结论");
+        }
+        for (const ranking of rankings) periodSummaries.add(ranking.summary);
+        item.issue = [item.issue, ...rankings.map((ranking) => ranking.summary).filter((summary) => !item.issue.includes(summary))].join("\n");
+        if (item.issue.length > 1800) throw new Error("问题正文与 TOP3 合计超过 1800 字，请压缩问题描述或拆分问题");
         rows[key].push({
           kind, priority: item.priority, issue: item.issue, measure: item.measure,
           suggested_owner: item.suggested_owner + "（职能建议，待人工确认）", loss_hours: hours,
         });
       }
+    }
+    if (hasMachineDistributionClaim(report.comparison)) {
+      if (!periodSummaries.size) throw new Error("周期比较中的机台分布结论缺少排名证据");
+      report.comparison = [report.comparison, ...[...periodSummaries].filter((summary) => !report.comparison.includes(summary))].join("\n");
+      if (report.comparison.length > 1800) throw new Error("周期比较与 TOP3 超过 1800 字，请将机台分布分析写入对应问题");
     }
   }
   return { report: value, rows };
@@ -150,6 +201,8 @@ export function applyAnalysisReport(
         ...widget.warnings.filter((warning) => !warning.startsWith("本次分析暂不可用")),
         ...report.groups.filter((group) => !group.items.length).map((group) =>
           (group.kind + " 未生成建议：" + group.no_findings_reason).slice(0, 300)),
+        ...result.rows[key].filter((row) => typeof row["issue"] === "string" && row["issue"].includes("平台待维护/"))
+          .map(() => "机台平台映射待维护；未知平台机台保留真实数值与排名，请补充映射"),
       ],
     };
   }) });

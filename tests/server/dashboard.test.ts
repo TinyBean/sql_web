@@ -80,6 +80,35 @@ function lineRequest(id = "yield-7d"): DashboardWidgetRequest {
   };
 }
 
+test("new table/chart machine labels include platforms while original snapshot IDs and values remain intact", (t) => {
+  const { dashboard, artifacts } = fixture(t);
+  const rows = [{ machine: "ADH001", oee: 30 }, { machine: "ADH161", oee: 50 }];
+  const snapshot = createSnapshot(artifacts, SESSION_A, "machine-values", rows);
+  const baseline = dashboard.loadOrInitialize(SESSION_A);
+  const first = dashboard.apply(SESSION_A, { action: "upsert", baseRevision: baseline.revision, snapshot,
+    dateRange: { start: "2026-01-01", end: "2026-01-01" }, widget: {
+      id: "machine-values", kind: "table", size: "medium", title: "ADH001 等机台", subtitle: "本日机台值",
+      encoding: { columns: [{ key: "machine", label: "机台" }, { key: "oee", label: "OEE%" }] },
+      format: { unit: "%", precision: 2 }, metricDefinition: "机台指标", warnings: [],
+    } });
+  const table = first.dashboard.widgets.at(-1)!;
+  assert.equal(table.kind, "table"); if (table.kind !== "table") return;
+  const displayColumn = table.encoding.columns[0]!.key;
+  assert.deepEqual(table.data.map((row) => row[displayColumn]), ["T5773/ADH001", "平台待维护/ADH161"]);
+  assert.deepEqual(table.data.map((row) => [row["machine"], row["oee"]]), [["ADH001", 30], ["ADH161", 50]]);
+  assert.equal(table.title, "T5773/ADH001 等机台");
+  const second = dashboard.apply(SESSION_A, { action: "upsert", baseRevision: first.dashboard.revision, snapshot,
+    dateRange: { start: "2026-01-01", end: "2026-01-01" }, widget: {
+      id: "machine-chart", kind: "bar", size: "medium", title: "机台指标", subtitle: "本日",
+      encoding: { category: "machine", series: [{ name: "OEE", column: "oee" }], orientation: "vertical" },
+      format: { unit: "%", precision: 2 }, metricDefinition: "机台指标", warnings: [],
+    } });
+  const chart = second.dashboard.widgets.at(-1)!;
+  assert.equal(chart.kind, "bar"); if (chart.kind !== "bar") return;
+  assert.deepEqual(chart.data.map((row) => row[chart.encoding.category]), ["T5773/ADH001", "平台待维护/ADH161"]);
+  assert.deepEqual(JSON.parse(readFileSync(artifacts.forSession(SESSION_A).resolveDataSnapshot(snapshot).filePath, "utf8")).rows, rows);
+});
+
 test("previews a default dashboard without creating session artifacts", (t) => {
   const { dashboard, artifacts } = fixture(t);
   const sessionDirectory = path.join(artifacts.rootDir, SESSION_A);

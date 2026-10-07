@@ -32,6 +32,7 @@ import {
 } from "../../shared/dashboard.ts";
 import type { QueryResult } from "../database/database.ts";
 import type { ArtifactStore, SessionArtifactStore } from "../tool/artifact-store.ts";
+import { formatMachineMentions, machineLabel } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
 
 export type InitialDashboardProvider = (sessionId: string) => DashboardState;
 
@@ -250,7 +251,7 @@ function materializeWidget(
     if (!available.has(column)) throw new DashboardInputError(`图表快照中不存在列 ${column}`);
   }
   const numbers = numericColumns(request);
-  const data = snapshot.rows.map((row, rowIndex): DashboardRow => {
+  let data = snapshot.rows.map((row, rowIndex): DashboardRow => {
     const output: Record<string, string | number | null> = {};
     for (const column of columns) {
       const value = row[column];
@@ -267,12 +268,40 @@ function materializeWidget(
     }
     return output;
   });
+  // Keep original snapshot keys/IDs for audit; only display bindings point at formatted labels.
+  const displayColumns = new Map<string, string>();
+  const occupied = new Set(columns);
+  for (const column of columns.filter((column) => !numbers.has(column))) {
+    const formatCell = (value: string): string => /^(?:machine|machine_id|tool_name|机台|机台号)$/iu.test(column)
+      ? machineLabel(value.split("/").at(-1)!) : formatMachineMentions(value);
+    if (!data.some((row) => typeof row[column] === "string" && formatCell(row[column]) !== row[column])) continue;
+    let index = displayColumns.size;
+    while (occupied.has("display_machine_" + index)) index++;
+    const displayColumn = "display_machine_" + index;
+    occupied.add(displayColumn); displayColumns.set(column, displayColumn);
+    data = data.map((row) => ({ ...row, [displayColumn]: typeof row[column] === "string" ? formatCell(row[column]) : row[column] ?? null }));
+  }
+  let encoding = request.encoding;
+  if (request.kind === "table") encoding = { ...request.encoding, columns: request.encoding.columns.map((column) => ({
+    ...column, key: displayColumns.get(column.key) ?? column.key, label: formatMachineMentions(column.label),
+  })) };
+  else if (request.kind === "line" || request.kind === "bar" || request.kind === "stacked-bar") encoding = {
+    ...request.encoding, category: displayColumns.get(request.encoding.category) ?? request.encoding.category,
+    series: request.encoding.series.map((series) => ({ ...series, name: formatMachineMentions(series.name) })),
+  };
+  else if (request.kind === "donut") encoding = { ...request.encoding, category: displayColumns.get(request.encoding.category) ?? request.encoding.category };
+  else if (request.kind === "overview") encoding = { ...request.encoding,
+    ...(request.encoding.label ? { label: formatMachineMentions(request.encoding.label) } : {}),
+    ...(request.encoding.description ? { description: formatMachineMentions(request.encoding.description) } : {}),
+    gauges: request.encoding.gauges.map((gauge) => ({ ...gauge, name: formatMachineMentions(gauge.name) })),
+  };
   return parseDashboardState({
     schemaVersion: DASHBOARD_SCHEMA_VERSION,
     revision: 0,
     dataAsOf: new Date().toISOString(),
     dateRange: { start: null, end: null },
-    widgets: [{ ...request, data }],
+    widgets: [{ ...request, encoding, data, title: formatMachineMentions(request.title), subtitle: formatMachineMentions(request.subtitle),
+      metricDefinition: formatMachineMentions(request.metricDefinition), warnings: request.warnings.map((warning) => formatMachineMentions(warning)) }],
   }).widgets[0] as DashboardWidget;
 }
 

@@ -52,6 +52,7 @@ export interface SubagentEnvironment {
   readonly systemPrompt: string;
   readonly tools: ToolDefinition[];
   readonly context: () => unknown;
+  readonly skillOptions?: import("./skill-catalog.ts").SkillSessionOptions;
 }
 
 export interface SubagentRunnerOptions {
@@ -173,7 +174,7 @@ export class SubagentRunner {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
         systemPrompt: CHILD_RULES + "\n" + environment.systemPrompt,
         skillsOverride: () => options.catalog.resources,
-        extensionFactories: [options.catalog.createSessionExtension(options.cwd), (pi) => {
+        extensionFactories: [options.catalog.createSessionExtension(options.cwd, environment.skillOptions), (pi) => {
           pi.on("context", (event) => ({ messages: [{
             role: "custom", customType: "sql_web.subagent.context", display: false, timestamp: Date.now(),
             content: JSON.stringify({ data: environment.context(), remaining_tool_calls: Math.min(

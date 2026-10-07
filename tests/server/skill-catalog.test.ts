@@ -113,6 +113,56 @@ test("rejects Skill tools in the legacy root directory", async (t) => {
   );
 });
 
+test("session contexts stay isolated and activation follows restored branches without catalog execution", async (t) => {
+  const root = fixtureRoot(t);
+  writeSkill(root, "runtime-skill", "runtime-skill", `export function createTools(context) {
+    return [{ name: "run", label: "Run", description: "Run.", parameters: { type: "object", properties: {} },
+      async execute() { if (!context) throw new Error("missing runtime"); return context.run(); } }];
+  }`);
+  writeSkill(root, "legacy-skill", "legacy-skill");
+  const catalog = await loadAgentSkillCatalog({ directory: root });
+  let calls = 0;
+  const fixture = async (marker: string) => {
+    const tools = new Map<string, ToolDefinition>();
+    const handlers = new Map<string, (...args: never[]) => unknown>();
+    let active = ["read", "execute_sql"];
+    let registrations = 0;
+    const extension = catalog.createSessionExtension(root, { contexts: { "runtime-skill": {
+      run: () => { calls++; return { content: [{ type: "text", text: marker }] }; },
+    } } });
+    const factory = typeof extension === "function" ? extension : extension.factory;
+    await factory({ registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); registrations++; },
+      on: (name: string, handler: (...args: never[]) => unknown) => handlers.set(name, handler),
+      getActiveTools: () => active, setActiveTools: (names: string[]) => { active = names; }, appendEntry() {},
+    } as never);
+    const read = (skill: string) => tools.get("read")!.execute("read", { path: path.join(root, skill, "SKILL.md") }, undefined, undefined, undefined as never);
+    const branch = (event: string, loaded: boolean) => handlers.get(event)!({} as never, {
+      sessionManager: { getBranch: () => loaded ? [{ type: "custom", customType: "sql_web.skill.loaded", data: { name: "runtime-skill" } }] : [] },
+    } as never);
+    return { tools, read, branch, active: () => active, registrations: () => registrations };
+  };
+  const first = await fixture("first");
+  const second = await fixture("second");
+  assert.equal(calls, 0);
+  assert.equal(first.tools.has("runtime_skill__run"), false);
+  await first.read("runtime-skill");
+  await first.read("legacy-skill"); // Legacy factories still receive zero arguments.
+  assert.equal(second.tools.has("runtime_skill__run"), false);
+  await second.branch("session_start", true);
+  for (const [session, marker] of [[first, "first"], [second, "second"]] as const) {
+    const result = await session.tools.get("runtime_skill__run")!.execute("run", {}, undefined, undefined, undefined as never);
+    assert.equal((result.content[0] as { text: string }).text, marker);
+  }
+  const registrations = first.registrations();
+  await first.read("runtime-skill");
+  await first.branch("session_tree", false);
+  assert.ok(!first.active().includes("runtime_skill__run"));
+  await first.branch("session_tree", true);
+  assert.ok(first.active().includes("runtime_skill__run"));
+  assert.equal(first.registrations(), registrations);
+  assert.equal(calls, 2);
+});
+
 test("rejects duplicate local names and overlong published names", async (t) => {
   const duplicateRoot = fixtureRoot(t);
   writeSkill(duplicateRoot, "duplicate-skill", "duplicate-skill", `export function createTools() {

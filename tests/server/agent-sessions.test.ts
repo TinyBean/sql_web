@@ -228,6 +228,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "test_oee_calculator__validate_lot_ids",
     "test_oee_calculator__classify_mt_st",
     "test_oee_calculator__classify_availability_states",
+    "test_oee_calculator__rank_machines",
   ]);
   await readTool.execute(
     "read-skill-again",

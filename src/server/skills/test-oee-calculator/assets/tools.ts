@@ -1,6 +1,8 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createRankMachinesTool } from "./machine-ranking.ts";
+import type { TestOeeToolContext } from "./runtime.ts";
 import {
   classifyAvailabilityStates,
   classifyTestOeeKinds,
@@ -19,7 +21,7 @@ function jsonResult(value: unknown) {
   };
 }
 
-export function createTools(): ToolDefinition[] {
+export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
   const getDefaultSqlTool = defineTool({
     name: "get_default_sql",
     label: "获取默认 Test OEE / Effective OEE SQL",
@@ -222,5 +224,6 @@ export function createTools(): ToolDefinition[] {
     validateLotIdsTool,
     classifyMtStTool,
     classifyAvailabilityStatesTool,
+    createRankMachinesTool(context?.runtime),
   ];
 }

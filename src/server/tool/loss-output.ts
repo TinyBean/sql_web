@@ -1,5 +1,7 @@
 import type { DashboardRow } from "../../shared/dashboard.ts";
 import type { LossResult } from "./loss-tools.ts";
+import { machineLabel } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
+import { machineLossSummaries } from "../skills/test-oee-calculator/assets/machine-ranking.ts";
 
 export const LOSS_VIEW_BYTES = 12 * 1024;
 const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(value));
@@ -16,10 +18,14 @@ const denominator = (rows: readonly DashboardRow[], key: string): number | null 
 
 /** Derived totals never gain row indices. Only original rows can supply display hours. */
 export function lossView(record: LossResult) {
-  const indexed = record.rows.map((row, row_index) => ({ row_index, row }));
+  const indexed = record.rows.map((row, row_index) => ({ row_index, row,
+    ...(typeof row["machine"] === "string" ? { machine_label: machineLabel(row["machine"]) } : {}) }));
   if (record.truncated) return { mode: "unavailable" as const, rows_complete: false,
     reason: "原始证据被截断，不能生成全量统计或用于报告；请缩小查询范围" };
-  const complete = { mode: "complete" as const, rows_complete: true, note: "空结果仅表示没有匹配损失行，不能推断数据覆盖完整或损失为零。", rows: indexed };
+  const summaries = machineLossSummaries(record);
+  const machine_summaries = byteLength(summaries) <= LOSS_VIEW_BYTES / 3 ? summaries : [];
+  const machine_summaries_complete = machine_summaries.length === summaries.length;
+  const complete = { mode: "complete" as const, rows_complete: true, note: "空结果仅表示没有匹配损失行，不能推断数据覆盖完整或损失为零。", rows: indexed, machine_summaries, machine_summaries_complete };
   if (indexed.length <= 32 && byteLength(complete) <= LOSS_VIEW_BYTES) return complete;
   const byKind = ["MT", "ST"].map((kind) => {
     const entries = indexed.filter((entry) => entry.row["kind"] === kind);
@@ -44,7 +50,7 @@ export function lossView(record: LossResult) {
       state_count: states.length, state_totals: stateTotals, ranking: ranked.slice(0, 10) };
   });
   const summary = { mode: "summary" as const, rows_complete: false, totals_from_complete_evidence: true,
-    state_summaries_complete: true, rankings_complete: false, by_kind: byKind,
+    state_summaries_complete: true, rankings_complete: false, by_kind: byKind, machine_summaries, machine_summaries_complete,
     note: "合计与占比为当前筛选范围的派生统计，不是 loss_reference；ranking 的 row_index 指向原始证据。覆盖天数不是机台天数之和；无损失记录不等于零损失。" };
   // Trim evenly by rank, never accidentally give ST only the remainder of a shared row limit.
   while (byteLength(summary) > LOSS_VIEW_BYTES && byKind.some((group) => group.ranking.length)) {

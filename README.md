@@ -131,13 +131,19 @@ npm run data:daily -- --through-date 2026-09-14
 
 ### 临时 Agent 改善分析
 
+机台描述使用 `平台号/机台号`（如 `T5773/ADH001`），共享清单来自 v4 文档的 166 条映射：T5773 78 台、T5831 53 台、T5851 35 台。未映射机台显示 `平台待维护/机台号`，保留实际指标并提示维护。原始机台号仍用于查询和关联，展示映射不会改变 MT/ST 分类或 PCIe 排除。既有报告和已发送邮件不回写，规则从新生成的内容开始生效。
+
+平台清单、机台指标 SQL、汇总及排名实现统一位于 `src/server/skills/test-oee-calculator/assets`。读取 OEE Skill 后启用专属工具 `test_oee_calculator__rank_machines`，改善问题通过该工具 按同周期、同 MT/ST、相关状态或指标计算 TOP3，损失小时降序、比率指标升序；按未舍入值排序，并列按机台号。损失先跨相关状态按机台汇总，单台与 TOP3 合计占比均以同范围全部机台相关损失作分母。比率输出已乘 100，NULL 不入榜，不足三台显示实际数量，空结果不能视为零损失或完整覆盖。固定报告使用 `report_period` 整期口径，明确机台天查询使用 `machine_day` 单日口径，两种 Test Time 规则保持独立。
+
+每项改善问题的 `machine_evidence_ids` 必须引用 `test_oee_calculator__rank_machines` 的完整排名证据，并同时列入 `evidence_ids`。服务端检查周期、类型、问题指标、损失状态与计算口径，生成带平台、数值、占比和覆盖的 TOP3 文案，写入原有问题列；日报邮件复用该文本，TOP10 机台看板只更新显示标签。聊天创建的机台表格与图表新增显示标签列，保留原始机台号。聊天也使用同一工具与格式化模块，缺少排名证据或出现自行编写的 TOP3 时最多修正一轮，仍不能核实时明确说明机台分布证据不足。纯公式解释和单台数值查询只补平台。
+
 指标生成与 Agent 查询在独立子进程的同一个只读 SQLite 事务内运行。子进程先交回基础指标，再使用内存会话和设置、项目 `.data/agent` 的模型凭据启动分析；模型沿用 `SQL_WEB_PROVIDER` / `SQL_WEB_MODEL`（当前为 `local-vllm / zai-org/GLM-5.3-Flash`）。不产生网站会话。
 
 分析分别覆盖最新业务日（即截止业务日当日）、最近完整周、当月累计、当季累计的 MT/ST，每类型最多三项。日的最低点基准为年内可计算日等权 OEE 最低的那一天，历史基准为年初至前一日。保留原六列：**类型、优先级、问题（损失源）、改善措施、建议责任人、本期损失小时**。问题文本包含简要事实和判断；推测需标注待验证，责任人仅为建议职能。Agent 可查询所有状态、机台及 Performance/Yield；损失小时由程序从 `measure_loss` 的本期同类型实测证据取值，Performance/Yield 等无法对应实测时间的问题保持 `null`。
 
 分析正文使用业务用户可读的中文日期、指标和数据来源说明；内部证据编号（如 `q11`）、查询行号、工具名及字段名只用于结构化引用和审计。提交校验发现这些内部标记出现在正文时，要求 Agent 保留事实和统计口径、改写后再提交。
 
-临时 Agent 复用网站的 `execute_sql`、`get_current_time`、`measure_loss` 和可用时的 `code_interpreter`，以及 Skill 目录读取和标准 OEE 规则工具，最终报告通过 `submit_analysis` 提交；最多 60 次调用。每日主 Agent 的 `execute_sql` 和 `measure_loss` 必须填写 `period`（`day`、`week`、`month` 或 `quarter`）以标记补查证据归属，子任务周期由服务端绑定，不能指定或修改。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限查询失败且不保存快照。每日分析按各周期的 start/end 调用统一日期接口；报告只接受标准损失查询来源、日期范围和 MT/ST 类型均匹配的原始行，所有证据引用必须归属报告对应周期，即使日期相同也分别登记。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
+临时 Agent 复用网站的 `execute_sql`、`get_current_time`、`measure_loss` 和可用时的 `code_interpreter`，通过读取 OEE Skill 启用 `test_oee_calculator__rank_machines` 及标准规则工具，最终报告通过 `submit_analysis` 提交；最多 60 次调用。每日主 Agent 的 `execute_sql`、`measure_loss` 和 `test_oee_calculator__rank_machines` 必须填写 `period`（`day`、`week`、`month` 或 `quarter`）以标记补查证据归属，子任务周期由服务端绑定，不能指定或修改。所有 SQL 仍使用构建指标的同一次只读事务。查询及损失明细保存为运行独立的冻结快照，`execute_sql` 返回元数据、证据编号和最多 3 行、6 KB 预览。`measure_loss` 对不超过 32 行且展示内容不超过 12 KiB 的结果返回完整行；更大的结果返回 MT/ST 分组的损失合计、状态占比和各自最高十条机台—状态记录，超出展示预算时标明省略。摘要只针对当前筛选范围，覆盖日数不叠加；派生合计不能作为损失小时的行引用，排名保留原始行号。原始证据截断时禁止全量摘要。Python 仍可按逻辑名称读取完整快照；展示省略不代表原始证据截断。同一证据快照不能覆盖，机台明细最多保留 100,000 行、32 MiB，超限查询失败且不保存快照。每日分析按各周期的 start/end 调用统一日期接口；报告只接受标准损失查询来源、日期范围和 MT/ST 类型均匹配的原始行，所有证据引用必须归属报告对应周期，即使日期相同也分别登记。Python 沙箱不可用时，可用聚合 SQL 或缩小损失查询范围继续分析。
 
 自动上下文压缩已启用。每日分析的上下文上限默认 262144 token、单次输出上限默认 32768 token，均不超过模型目录上限；用 `SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW` 按实际部署容量调整、`SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS` 调整输出上限。输出还最多占上下文四分之一，提前为系统指令、工具和证据目录预留空间。压缩后保留系统中的口径与比较基准，每次请求重新提供权限范围内的快照目录和工具额度，主 Agent 还会收到服务端保存的四期子任务结果与状态；完整证据和校验在服务端独立保存。模型将报告数组序列化成 JSON 字符串时会先规范化再严格校验，错误反馈不会重复回显整个报告。
 
@@ -439,9 +445,9 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 - `execute_sql` 默认直接返回最多 200 行；需要 Python 计算、统计或绘图时，使用可选 `save_as` 将最多 100,000 行、32 MiB 的完整结果保存为会话级冻结快照，同时只返回元数据和最多 20 行预览。后续通过逻辑名称引用快照，不经过模型搬运完整结果。
 - `measure_loss` 在新建和恢复的会话中默认可用，与每日分析共用实现。必填 `start_date`、`end_date` 为业务日闭区间，可选 `states`、`machines`、`by_machine`；标准 PCIe、MT/ST 和状态规则与每日分析一致，损失和类型覆盖均先排除大写 Q/E 前缀 LOT，保留其余 LOT（P/M/R/A/F/L 白名单仅用于 Yield）。每次成功查询自动保存完整快照，名称为 `loss-YYYYMMDD-YYYYMMDD`，重名追加序号，恢复后继续避免覆盖。返回明细或有展示预算的摘要，快照可直接供 Python 和看板使用；空结果不代表零损失，覆盖天数按类型统计，不随损失筛选缩小。Python 不可用时仍可查询。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
-- `test-oee-calculator` 被加载后，当前会话才会注册 SQL 表达式、Yield LOT 校验、MT/ST 分类和 Availability 状态分类工具；这些工具不连接数据库。公共 SQL 表达式 sourceLotPredicate 对 Availability 和 DUT 的计算入口统一排除 Q/E，原始文件与数据库记录保留；Yield 的 yieldLotPredicate 另用于条件聚合。规则在后续查询和常规刷新时生效，已有看板、报告及快照保留原结果与原口径。数据库派生的比率与乘积必须在同一条 SQL 或可信的 `code_interpreter` 调用中完成，纯比率计算器仅保留为规则测试基准。
+- `test-oee-calculator` 被加载后，当前会话才会注册 SQL 表达式、Yield LOT 校验、MT/ST 分类、Availability 状态分类及机台排名工具；规则工具不连接数据库，排名使用会话注入的只读能力。公共 SQL 表达式 sourceLotPredicate 对 Availability 和 DUT 的计算入口统一排除 Q/E，原始文件与数据库记录保留；Yield 的 yieldLotPredicate 另用于条件聚合。规则在后续查询和常规刷新时生效，已有看板、报告及快照保留原结果与原口径。数据库派生的比率与乘积必须在同一条 SQL 或可信的 `code_interpreter` 调用中完成，纯比率计算器仅保留为规则测试基准。
 - 新增 Skill 必须沿用同一目录约定：根目录只放 `SKILL.md` 等元数据，直接执行的脚本放入 `scripts/`，静态资源和代码放入 `assets/`，按需读取的说明文档放入 `references/`。Catalog 只从 `assets/tools.js` 或 `assets/tools.ts` 加载 Skill 专有工具，不兼容根目录 `tools.*`。
-- Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 不接收或持有数据库连接；启动时只扫描元数据并调用无参工具工厂进行校验，不会把专有工具注册到全局或暴露给新会话。需要数据的业务 Skill 自主管理只读连接。
+- Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 启动时只扫描元数据并调用无参工具工厂进行校验，不查询数据库，不持有会话运行依赖，也不会把专有工具注册到全局或暴露给新会话。会话扩展可向指定 Skill 的 `createTools(context?)` 注入只读查询与完整快照能力，并使用工具包装器补充证据政策。OEE 排名依赖按会话和任务绑定，固定分析复用原冻结事务；缺少运行依赖时执行明确报错。
 - `code_interpreter` 接收 `code`、可选的 `snapshot` 逻辑名称和可选 `user_input`，不接收或执行 SQL。传入快照时，服务端把该会话的完整冻结数据只读挂载为 `input_data.database`，并提供 `snapshot_rows` 作为 `list[dict]` 行对象列表；每行可用 `row["列名"]` 访问，无需也不应再与 `columns` 做 `zip`。`input_data` 同时支持属性和方括号访问。未传快照时 `input_data.database` 为 `None`、`snapshot_rows` 为空，可执行不依赖数据库的纯 Python。`user_input` 单独出现在 `input_data.user`，只用于用户明确提供的参数。快照查询达到 100,000 行或 32 MiB 上限时不会保存，不允许基于截断数据生成结论。
   Python 必须且只能调用一次 `emit_result(...)`；可提交 JSON 值或结构化关键字字段，运行时会补充缺失的 `summary`，并把字符串 `notes` 规范化为数组。结构化结果上限为 64 KiB。`print()` 仅作为调试日志，不能替代 `emit_result`；工具结果同时包含查询行数、字节数、截断状态和用户输入标记。
   每张 Matplotlib/Pillow 图片必须通过 `emit_image(value, reference_name)` 显式提交；名称应具体表达图片含义，归一化后不超过 50 个字符。空格和标点会统一转成小写连字符格式，例如 `2026 OEE / Top 10` 变为 `2026-oee-top-10`；纯数字、纯符号或空名称会被拒绝。未显式提交的 Matplotlib 图不会输出。

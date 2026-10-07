@@ -39,6 +39,8 @@ import type { EmailConfig } from "../email.ts";
 import { SessionDashboardStore, type InitialDashboardProvider } from "./session-dashboard.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import { createGeneratedTextReviewExtension } from "./generated-text-review.ts";
+import { createMachineTextReviewExtension } from "./machine-text-review.ts";
+import { oeeSkillSessionOptions } from "./oee-skill-runtime.ts";
 import { createDashboardContextExtension } from "./dashboard-context.ts";
 import type { AppLogger } from "../logger.ts";
 import {
@@ -112,6 +114,7 @@ async function createLockedResourceLoader(
   settingsManager: SettingsManager,
   logger: AgentProcessLogger,
   dashboard: SessionDashboardStore,
+  skillOptions: import("./skill-catalog.ts").SkillSessionOptions,
 ): Promise<ResourceLoader> {
   const loader = new DefaultResourceLoader({
     cwd,
@@ -124,8 +127,9 @@ async function createLockedResourceLoader(
     noContextFiles: true,
     systemPrompt,
     extensionFactories: [
-      skillCatalog.createSessionExtension(cwd),
+      skillCatalog.createSessionExtension(cwd, skillOptions),
       createGeneratedTextReviewExtension(logger),
+      createMachineTextReviewExtension(logger),
       createDashboardContextExtension(dashboard, logger),
     ],
     skillsOverride: () => skillCatalog.resources,
@@ -796,6 +800,7 @@ export class AgentSessionStore {
         return (agentId) => ({
           systemPrompt: websiteInvestigationPrompt(),
           tools: createAgentTools(this.#database, artifacts.scoped(agentId), this.#codeInterpreter, new Set(), undefined, true),
+          skillOptions: oeeSkillSessionOptions(this.#database, artifacts.scoped(agentId)),
           context: () => ({ dashboard, snapshots: artifacts.listDataSnapshots() }),
         });
       },
@@ -828,6 +833,7 @@ export class AgentSessionStore {
       settingsManager,
       this.#logger,
       this.#dashboard,
+      oeeSkillSessionOptions(this.#database, artifacts),
     );
     const { session } = await createAgentSession({
       cwd: this.#cwd,

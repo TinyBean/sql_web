@@ -6,6 +6,7 @@ import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets
 import { dashboardPeriods, weekLabel, ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
 import type { LossMeasurement, LossScope } from "../../../tool/loss-tools.ts";
+import type { MachineRankingMeasurement, MachineRankingScope, MachineRankingCache } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
 import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
 
 export interface Evidence {
@@ -16,8 +17,9 @@ export interface Evidence {
   readonly truncated: boolean;
   readonly sourceId?: string;
   readonly range?: DatePeriod;
-  readonly source?: "measure_loss";
+  readonly source?: "measure_loss" | "rank_machines";
   readonly lossScope?: LossScope;
+  readonly rankingScope?: MachineRankingScope;
   readonly snapshot?: DataSnapshotDescriptor;
   readonly owner?: EvidenceOwner;
 }
@@ -54,6 +56,7 @@ function normalize(row: Record<string, unknown>): DashboardRow {
 /** Every reference resolves to a result from this run's single read transaction. */
 export class AnalysisEvidence {
   readonly records = new Map<string, Evidence>();
+  readonly machineRankingCache: MachineRankingCache = new Map();
   readonly queries: Pick<AppDatabase, "query" | "exportQueryJson">;
   readonly artifacts: SessionArtifactStore | undefined;
   readonly #database: DatabaseSync;
@@ -126,7 +129,8 @@ export class AnalysisEvidence {
   catalog(scope?: AnalysisEvidenceScope) {
     return [...this.records.values()].filter((record) => !scope || this.#visible(record, scope)).map((record) => ({
       evidence_id: record.id, snapshot: record.snapshot?.name ?? null, row_count: record.rows.length,
-      truncated: record.truncated, range: record.range, source: record.source, loss_scope: record.lossScope, owner: record.owner,
+      truncated: record.truncated, range: record.range, source: record.source, loss_scope: record.lossScope,
+      ranking_scope: record.rankingScope, owner: record.owner,
     }));
   }
 
@@ -211,5 +215,11 @@ export class AnalysisEvidence {
       rows: measurement.rows, truncated: false, snapshot: measurement.snapshot,
       range: measurement.range, lossScope: measurement.scope, source: "measure_loss", owner,
     });
+  }
+
+  recordMachineRanking(measurement: MachineRankingMeasurement, owner: EvidenceOwner): Evidence {
+    return this.#save({ sql: measurement.sql, parameters: [], rows: measurement.rows, truncated: false,
+      snapshot: measurement.snapshot, range: measurement.range, rankingScope: measurement.scope,
+      source: "rank_machines", owner });
   }
 }

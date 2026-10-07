@@ -520,7 +520,7 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
   assert.equal(actual["product"], expected.product);
 });
 
-test("publishes deterministic database-free Skill tools", async () => {
+test("publishes deterministic Skill tools without opening runtime resources", async () => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
     "get_default_sql",
@@ -530,6 +530,7 @@ test("publishes deterministic database-free Skill tools", async () => {
     "validate_lot_ids",
     "classify_mt_st",
     "classify_availability_states",
+    "rank_machines",
   ]);
   assert.equal(tools.some((tool) => tool.name === "calculate_test_oee"), false);
   assert.equal(tools.some((tool) => tool.name === "classify_test_oee_record"), false);

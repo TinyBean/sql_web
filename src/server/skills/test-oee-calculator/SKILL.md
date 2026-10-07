@@ -1,11 +1,11 @@
 ---
 name: test-oee-calculator
-description: 使用 Q/E 源数据排除、Yield 专用 LOT 筛选、PCIe 平台排除、MT/ST、Machine_Running、Idle、Performance (DUT-On)、Performance (Test Time)、Yield 和业务日聚合规则，以可信 SQLite 数据链路查询、计算或解释 Test OEE 与 Effective OEE，支持机台天维度的独立 1% 截尾 Test Time。适用于默认口径及明确的临时口径调整；不适用于 Assembly OEE。
+description: 使用 Q/E 源数据排除、Yield 专用 LOT 筛选、PCIe 平台排除、MT/ST、Machine_Running、Idle、Performance (DUT-On)、Performance (Test Time)、Yield 和业务日聚合规则，以可信 SQLite 数据链路查询、计算或解释 Test OEE 与 Effective OEE，支持机台天维度的独立 1% 截尾 Test Time、机台平台标签及问题指标 TOP3 排名。适用于默认口径及明确的临时口径调整；不适用于 Assembly OEE。
 ---
 
 # Test OEE 与 Effective OEE 计算
 
-本技能不直接连接数据库。规则工具只生成或验证确定性的 SQL 和分类结果；数据库事实必须来自 `execute_sql` 或公共工具 `measure_loss`。
+本技能统一维护 OEE 规则、机台平台映射、指标计算与排名。SQL 和分类工具不连接数据库；专属排名工具通过当前会话注入的只读查询与完整快照能力获取事实，不自行建立数据库连接。读取本入口后才会启用 `test_oee_calculator__rank_machines`。其他数据库事实来自 `execute_sql` 或公共工具 `measure_loss`。
 
 所有 OEE 指标、状态损失、覆盖统计和机台排名计算前，Availability 和 DUT 数据均先排除 LOT 首字符为大写 `Q` 或 `E` 的记录；这是只读查询筛选，原始文件和数据库记录保留。Yield 在此基础上另应用 P/M/R/A/F/L 前缀条件。
 
@@ -25,6 +25,7 @@ description: 使用 Q/E 源数据排除、Yield 专用 LOT 筛选、PCIe 平台�
 
 ## 固定规则工具
 
+- `test_oee_calculator__rank_machines`：执行同业务日范围、MT/ST、问题指标的机台 TOP3 查询，自动保存完整排名候选快照；参数、占比及两种计算口径见下方结果口径。
 - `test_oee_calculator__get_default_sql`：生成完整的默认 SQLite 查询。PCIe 排除优先；结果包含 Availability、Idle 秒数及比率、Effective Availability、Performance (DUT-On)、Performance (Test Time)、Yield、逐日与多日 Test OEE / Effective OEE 及各自覆盖计数。
 - `test_oee_calculator__get_machine_daily_sql`：生成机台天明细 SQL；按业务日、机台、类型分别聚合并左连接，Test Time 使用该机台日类型自身的 1% 截尾均值，返回封顶前后比率、样本计数及日 Test OEE / Effective OEE。只输出有效 Availability 的机台日类型，不补缺日；不定义周/月/季聚合。
 - `test_oee_calculator__get_default_dashboard_sql`：从同一默认逐日查询生成单行概览（合并及 MT/ST 分类指标、各自覆盖计数）或 MT/ST 宽表趋势；`_percent` 列为可直接展示的百分数值。
@@ -36,5 +37,11 @@ description: 使用 Q/E 源数据排除、Yield 专用 LOT 筛选、PCIe 平台�
 若用户明确修改某项固定规则，不要使用受影响的固定 SQL 或分类结果；按用户规则编写查询并说明偏差。
 
 ## 结果口径
+
+机台业务描述使用 `平台号/机台号`，如 `T5773/ADH001`。平台来自本 Skill [平台清单](assets/machine-platforms.ts)维护的 v4 文档 166 台静态映射（T5773 78 台、T5831 53 台、T5851 35 台），未映射时显示 `平台待维护/机台号`，不能用 MT/ST 猜平台。查询参数、SQL 关联键仍使用原始机台号。
+
+具体损失或指标问题分析必须使用Skill 专属工具 `test_oee_calculator__rank_machines(start_date,end_date,kind,metric,states?,basis?)`，逐字引用返回的 `summary`。它按相关状态损失小时降序或对应指标升序返回去重的 TOP3，保留数值、覆盖；损失占比以同范围全部机台的相关损失作分母。`states` 仅适用于 `loss_hours`；比率指标的 `value` 和快照 `metric_value` 已乘 100。完整候选快照含原始机台号、平台、显示标签及空指标，预览的 TOP3 不代表快照截断。
+
+`basis=report_period` 为默认整期机台口径，Test Time 使用同日同类型 0.2% 截尾标准；`basis=machine_day` 只接受单个业务日，沿用机台天 1% 截尾和 Test Time 上限 100%。不同口径不能混排。纯公式解释、单台查询只补平台，不强制 TOP3；不足三台展示实际数量，无匹配记录不代表零损失或完整覆盖。排名证据属于派生统计，不能作为实测 `loss_reference`。
 
 默认公式和异常处理以 [references/business-rules.md](references/business-rules.md) 为唯一业务规则来源。纯数值计算函数只作为回归测试基准，不作为 Agent 工具发布。

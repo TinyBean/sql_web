@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { DatabaseSync } from "node:sqlite";
 import type { AppLogger } from "../../src/server/logger.ts";
+import { JsonDocumentValidator } from "./json-document-validator.ts";
 
 export const OEE_DATASETS = ["availability", "dut_utilization"] as const;
 export type OeeDataset = (typeof OEE_DATASETS)[number];
@@ -21,7 +22,6 @@ interface DatasetSpec {
   readonly rowKey: string;
   readonly tableName: "oee_availability" | "oee_dut_utilization";
   readonly dataDateExpression: string;
-  readonly responseDateOffsetDays: number;
 }
 
 export interface DateWindow {
@@ -60,8 +60,10 @@ interface ResolvedOeeDataStoreOptions {
 export interface ImportFileOptions {
   readonly dataset: OeeDataset;
   readonly filePath: string;
-  readonly requestedStartDate: string;
-  readonly requestedEndDate: string;
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly requestedStartDate?: string;
+  readonly requestedEndDate?: string;
   readonly sourceKind?: SourceKind;
   readonly sourceRef?: string;
 }
@@ -70,6 +72,11 @@ export interface PullWindowOptions {
   readonly dataset: OeeDataset;
   readonly startDate: string;
   readonly endDate: string;
+}
+
+export interface ImportNewDayOptions {
+  readonly dataset: OeeDataset;
+  readonly date: string;
 }
 
 export interface SyncOptions {
@@ -85,6 +92,15 @@ export interface DatabaseCoverage {
   readonly maxDataDate: string | null;
   readonly rowCount: number;
   readonly distinctDateCount: number;
+}
+
+export interface DutValidationSummary {
+  readonly date: string;
+  readonly shift: string | null;
+  readonly rowCount: number;
+  readonly inQty: number;
+  readonly outQty: number;
+  readonly dutNum: number;
 }
 
 export interface ImportResult {
@@ -105,6 +121,11 @@ export interface ImportResult {
   readonly observedDayCounts: Readonly<Record<string, number>>;
   readonly missingDates: readonly string[];
   readonly unexpectedDates: readonly string[];
+  readonly incompleteDates: readonly string[];
+  readonly committedDates: readonly string[];
+  readonly ignoredBoundaryRowCount: number;
+  readonly coverageVersion: number;
+  readonly validation: readonly DutValidationSummary[];
   readonly sourceSha256: string;
   readonly coverage: DatabaseCoverage;
 }
@@ -137,6 +158,9 @@ export interface ImportIssue {
   readonly status: "completed_with_warnings" | "failed" | "interrupted";
   readonly requestedStartDate: string;
   readonly requestedEndDate: string;
+  readonly expectedStartDate: string;
+  readonly expectedEndDate: string;
+  readonly incompleteDates: readonly string[];
   readonly missingDates: readonly string[];
   readonly unexpectedDates: readonly string[];
   readonly unscopedRowCount: number;
@@ -247,6 +271,7 @@ const DEFAULT_API_BASE_URL = "http://csj-mp-dvapp03.wdc.com:9400/json/Interface/
 const DEFAULT_REQUEST_TIMEOUT_MS = 15 * 60 * 1_000;
 const DEFAULT_FETCH_RETRIES = 2;
 const MAX_API_WINDOW_DAYS = 3;
+const COVERAGE_VERSION = 1;
 const MAX_DATE_RANGE_DAYS = 3_660;
 const MAX_EMPTY_RESPONSE_BYTES = 64 * 1_024;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
@@ -265,7 +290,6 @@ const DATASET_SPECS: Record<OeeDataset, DatasetSpec> = {
     rowKey: "ORPTSIP.row",
     tableName: "oee_availability",
     dataDateExpression: "substr(date, 1, 10)",
-    responseDateOffsetDays: 0,
   },
   dut_utilization: {
     dataset: "dut_utilization",
@@ -274,7 +298,6 @@ const DATASET_SPECS: Record<OeeDataset, DatasetSpec> = {
     rowKey: "ORPTSIP.row",
     tableName: "oee_dut_utilization",
     dataDateExpression: "substr(date, 1, 10)",
-    responseDateOffsetDays: -1,
   },
 };
 
@@ -542,14 +565,18 @@ async function* streamRecords(
   sourceHash: ReturnType<typeof createHash>,
 ): AsyncGenerator<JsonRecord> {
   const extractor = new RowArrayExtractor(rowKey);
-  const decoder = new TextDecoder();
+  const validator = new JsonDocumentValidator();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   for await (const chunk of createReadStream(filePath)) {
     const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
     sourceHash.update(bytes);
     const text = decoder.decode(bytes, { stream: true });
+    validator.push(text);
     for (const record of extractor.push(text)) yield record;
   }
   const tail = decoder.decode();
+  validator.push(tail);
+  validator.finish();
   for (const record of extractor.push(tail)) yield record;
   try {
     extractor.finish();
@@ -660,6 +687,8 @@ type WindowState =
   | "interrupted";
 
 interface RegisteredWindow extends DateWindow {
+  readonly requestedStartDate: string;
+  readonly requestedEndDate: string;
   readonly id: string;
   readonly runId: string;
   readonly sequence: number;
@@ -674,6 +703,9 @@ interface WindowAuditRow {
   readonly status: WindowState;
   readonly requestedStartDate: string;
   readonly requestedEndDate: string;
+  readonly expectedStartDate: string;
+  readonly expectedEndDate: string;
+  readonly incompleteDates: readonly string[];
   readonly missingDates: readonly string[];
   readonly unexpectedDates: readonly string[];
   readonly unscopedRowCount: number;
@@ -737,11 +769,16 @@ function coalesceDates(values: readonly string[]): DateRange[] {
   return ranges;
 }
 
-function expectedWindow(spec: DatasetSpec, window: DateWindow): DateWindow {
-  return {
-    startDate: addDays(window.startDate, spec.responseDateOffsetDays),
-    endDate: addDays(window.endDate, spec.responseDateOffsetDays),
-  };
+function apiWindow(dataset: OeeDataset, business: DateWindow): DateWindow {
+  return { startDate: business.startDate,
+    endDate: dataset === "dut_utilization" ? addDays(business.endDate, 2) : business.endDate };
+}
+
+function businessWindowSize(dataset: OeeDataset, maximum = MAX_API_WINDOW_DAYS): number {
+  if (dataset === "dut_utilization" && maximum < 3) {
+    throw new Error("DUT 完整业务日拉取需要三个日期的 API 请求窗口");
+  }
+  return dataset === "dut_utilization" ? 1 : maximum;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -812,6 +849,7 @@ export class OeeDataStore {
           "oee_import_runs",
           "oee_import_windows",
         ]) database.prepare(`SELECT 1 FROM ${table} LIMIT 0`).all();
+        database.prepare("SELECT coverage_version, committed_dates_json, incomplete_dates_json, ignored_boundary_row_count FROM oee_import_windows LIMIT 0").all();
       } catch (error) {
         throw new Error(`数据库尚未初始化或需要升级 ${resolved.databasePath};请运行 npm run data:init`, {
           cause: error,
@@ -827,15 +865,31 @@ export class OeeDataStore {
 
   async importFile(options: ImportFileOptions): Promise<ImportResult> {
     this.#assertOpen();
-    dateRange(options.requestedStartDate, options.requestedEndDate);
+    dateRange(options.startDate, options.endDate);
+    if ((options.requestedStartDate === undefined) !== (options.requestedEndDate === undefined)) {
+      throw new Error("原始请求起止日期必须同时提供");
+    }
+    if (options.dataset === "dut_utilization" && (!options.requestedStartDate || !options.requestedEndDate)) {
+      throw new Error("DUT 文件导入必须提供原始请求范围 --request-start 和 --request-end");
+    }
+    const requestedStartDate = options.requestedStartDate ?? options.startDate;
+    const requestedEndDate = options.requestedEndDate ?? options.endDate;
+    const requestedDays = dateRange(requestedStartDate, requestedEndDate);
+    if (options.dataset === "dut_utilization" && requestedDays.length > MAX_API_WINDOW_DAYS) {
+      throw new Error("DUT 文件原始 API 请求范围不能超过三个日期；请按完整业务日分别导入");
+    }
+    const required = apiWindow(options.dataset, options);
+    if (requestedStartDate > required.startDate || requestedEndDate < required.endDate) {
+      throw new Error("原始请求范围未完整覆盖目标业务日，不能进行整日替换");
+    }
     const filePath = path.resolve(options.filePath);
     const sourceKind = options.sourceKind ?? "file";
     const sourceRef = options.sourceRef ?? filePath;
     const runId = this.#createRun("import", {
       dataset: options.dataset,
       filePath,
-      requestedStartDate: options.requestedStartDate,
-      requestedEndDate: options.requestedEndDate,
+      startDate: options.startDate, endDate: options.endDate,
+      requestedStartDate, requestedEndDate,
     });
     try {
       const window = this.#registerWindow(runId, 0, {
@@ -846,8 +900,9 @@ export class OeeDataStore {
         sourceKind,
         sourceRef,
         filePath,
-        startDate: options.requestedStartDate,
-        endDate: options.requestedEndDate,
+        startDate: options.startDate,
+        endDate: options.endDate,
+        requestedStartDate, requestedEndDate,
       });
       const result = await this.#executeWindow(window);
       this.#finalizeRun(runId);
@@ -862,21 +917,26 @@ export class OeeDataStore {
   async pullWindow(options: PullWindowOptions): Promise<ImportResult> {
     this.#assertOpen();
     const days = dateRange(options.startDate, options.endDate);
-    if (days.length > MAX_API_WINDOW_DAYS) {
-      throw new Error(`单次 API 拉取不能超过 ${MAX_API_WINDOW_DAYS} 天`);
+    if (days.length > businessWindowSize(options.dataset)) {
+      throw new Error(options.dataset === "dut_utilization"
+        ? "DUT 单次拉取仅支持一个完整业务日；多日请使用 data:reimport"
+        : `单次 API 拉取不能超过 ${MAX_API_WINDOW_DAYS} 天`);
     }
     const runId = this.#createRun("pull", options);
     try {
       const spec = DATASET_SPECS[options.dataset];
+      const requested = apiWindow(options.dataset, options);
       const window = this.#registerWindow(runId, 0, {
         id: "",
         runId,
         sequence: 0,
         dataset: options.dataset,
         sourceKind: "api",
-        sourceRef: sourceUrl(this.#apiBaseUrl, spec, options),
+        sourceRef: sourceUrl(this.#apiBaseUrl, spec, requested),
         startDate: options.startDate,
         endDate: options.endDate,
+        requestedStartDate: requested.startDate,
+        requestedEndDate: requested.endDate,
       });
       const result = await this.#executeWindow(window);
       this.#finalizeRun(runId);
@@ -886,6 +946,22 @@ export class OeeDataStore {
       this.#finishSingleRunFailure(runId, error);
       throw error;
     }
+  }
+
+  async importNewDay(options: ImportNewDayOptions): Promise<SyncResult> {
+    this.#assertOpen();
+    normalizeDateKey(options.date, "date");
+    return this.#executeMultiWindowRun("sync", [options.dataset], {
+      mode: "new-day-only", date: options.date,
+    }, (dataset) => {
+      if (this.#hasCommittedDate(dataset, options.date)) {
+        this.#logger.info("oee.new_day.skipped", {
+          dataset, date: options.date, reason: "business_date_already_committed",
+        });
+        return [];
+      }
+      return [{ startDate: options.date, endDate: options.date }];
+    });
   }
 
   async sync(options: SyncOptions): Promise<SyncResult> {
@@ -927,7 +1003,7 @@ export class OeeDataStore {
       "reimport",
       [options.dataset],
       { startDate: options.startDate, endDate: options.endDate },
-      () => mergeAndSplitWindows([options], MAX_API_WINDOW_DAYS),
+      () => mergeAndSplitWindows([options], businessWindowSize(options.dataset)),
     );
   }
 
@@ -1003,13 +1079,11 @@ export class OeeDataStore {
 
   #registerWindow(runId: string, sequence: number, window: RegisteredWindow): RegisteredWindow {
     const id = randomUUID();
-    const spec = DATASET_SPECS[window.dataset];
-    const expected = expectedWindow(spec, window);
     this.#database.prepare(
       `INSERT INTO oee_import_windows (
          id, run_id, sequence, dataset, source_kind, source_ref,
-         requested_start_date, requested_end_date, expected_start_date, expected_end_date, status
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')`,
+         requested_start_date, requested_end_date, expected_start_date, expected_end_date, coverage_version, status
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')`,
     ).run(
       id,
       runId,
@@ -1017,10 +1091,11 @@ export class OeeDataStore {
       window.dataset,
       window.sourceKind,
       window.sourceRef,
+      window.requestedStartDate,
+      window.requestedEndDate,
       window.startDate,
       window.endDate,
-      expected.startDate,
-      expected.endDate,
+      COVERAGE_VERSION,
     );
     return { ...window, id };
   }
@@ -1043,19 +1118,24 @@ export class OeeDataStore {
           const windows = plan(dataset);
           logger.info("oee.sync.windows_planned", { dataset, windows });
           const spec = DATASET_SPECS[dataset];
-          registeredByDataset.set(dataset, windows.map((window) => this.#registerWindow(
-            runId,
-            sequence++,
-            {
-              id: "",
+          registeredByDataset.set(dataset, windows.map((window) => {
+            const requested = apiWindow(dataset, window);
+            return this.#registerWindow(
               runId,
-              sequence: sequence - 1,
-              dataset,
-              sourceKind: "api",
-              sourceRef: sourceUrl(this.#apiBaseUrl, spec, window),
-              ...window,
-            },
-          )));
+              sequence++,
+              {
+                id: "",
+                runId,
+                sequence: sequence - 1,
+                dataset,
+                sourceKind: "api",
+                sourceRef: sourceUrl(this.#apiBaseUrl, spec, requested),
+                ...window,
+                requestedStartDate: requested.startDate,
+                requestedEndDate: requested.endDate,
+              },
+            );
+          }));
         } catch (error) {
           planningErrors.set(dataset, error);
           logger.error("oee.sync.planning_failed", error, {
@@ -1122,8 +1202,10 @@ export class OeeDataStore {
     logger.info("oee.window.started", {
       dataset: window.dataset,
       sourceKind: window.sourceKind,
-      requestedStartDate: window.startDate,
-      requestedEndDate: window.endDate,
+      requestedStartDate: window.requestedStartDate,
+      requestedEndDate: window.requestedEndDate,
+      expectedStartDate: window.startDate,
+      expectedEndDate: window.endDate,
     });
     try {
       if (window.sourceKind === "api") {
@@ -1142,6 +1224,10 @@ export class OeeDataStore {
         rowsReceived: result.rowsReceived,
         rowsInserted: result.rowsInserted,
         rowsDeleted: result.rowsDeleted,
+        committedDates: result.committedDates,
+        incompleteDates: result.incompleteDates,
+        ignoredBoundaryRowCount: result.ignoredBoundaryRowCount,
+        coverageVersion: result.coverageVersion,
         missingDates: result.missingDates,
         unexpectedDates: result.unexpectedDates,
         unscopedRowCount: result.unscopedRowCount,
@@ -1173,111 +1259,127 @@ export class OeeDataStore {
 
   async #importIntoWindow(window: RegisteredWindow, filePath: string): Promise<ImportResult> {
     const spec = DATASET_SPECS[window.dataset];
-    const expected = expectedWindow(spec, window);
-    const expectedDates = dateRange(expected.startDate, expected.endDate);
+    const expectedDates = dateRange(window.startDate, window.endDate);
     const expectedSet = new Set(expectedDates);
-    const replacedDates = new Set<string>();
     const unexpectedDates = new Set<string>();
     const observedDayCounts = new Map<string, number>();
+    const observedShifts = new Map<string, Set<string>>();
     const fileHash = createHash("sha256");
-    const deleteDate = this.#database.prepare(
-      `DELETE FROM ${spec.tableName} WHERE ${spec.dataDateExpression} = ?`,
-    );
+    const committedDates: string[] = [];
+    const incompleteDates: string[] = [];
+    const validation: DutValidationSummary[] = [];
     let rowsReceived = 0;
     let rowsInserted = 0;
     let rowsDeleted = 0;
     let unscopedRowCount = 0;
+    let ignoredBoundaryRowCount = 0;
     let transactionOpen = false;
+    this.#database.exec(`CREATE TEMP TABLE oee_import_staging AS SELECT * FROM ${spec.tableName} WHERE 0`);
     try {
-      this.#database.exec("BEGIN IMMEDIATE");
+      // Staging touches only the temporary database; facts remain intact during parsing.
+      this.#database.exec("BEGIN");
       transactionOpen = true;
       for await (const record of streamRecords(filePath, spec.rowKey, spec.resultKey, fileHash)) {
         const normalized = spec.dataset === "availability"
-          ? normalizeAvailability(record)
-          : normalizeDut(record);
+          ? normalizeAvailability(record) : normalizeDut(record);
         rowsReceived += 1;
-        if (!normalized.dataDate) {
+        const date = normalized.dataDate;
+        if (!date) {
           unscopedRowCount += 1;
-        } else {
-          observedDayCounts.set(
-            normalized.dataDate,
-            (observedDayCounts.get(normalized.dataDate) ?? 0) + 1,
-          );
-          if (expectedSet.has(normalized.dataDate)) {
-            if (!replacedDates.has(normalized.dataDate)) {
-              rowsDeleted += rowChanges(deleteDate.run(normalized.dataDate));
-              replacedDates.add(normalized.dataDate);
-            }
-          } else {
-            unexpectedDates.add(normalized.dataDate);
-          }
+          continue;
         }
-        if (spec.dataset === "availability") this.#insertAvailability(normalized as AvailabilityRow);
-        else this.#insertDut(normalized as DutRow);
-        rowsInserted += 1;
+        observedDayCounts.set(date, (observedDayCounts.get(date) ?? 0) + 1);
+        if (!expectedSet.has(date)) {
+          if (spec.dataset === "dut_utilization" &&
+              date >= addDays(window.requestedStartDate, -1) && date <= window.requestedEndDate) {
+            ignoredBoundaryRowCount += 1;
+          } else unexpectedDates.add(date);
+          continue;
+        }
+        let shifts = observedShifts.get(date);
+        if (!shifts) { shifts = new Set(); observedShifts.set(date, shifts); }
+        if (normalized.shift !== null) shifts.add(normalized.shift);
+        if (spec.dataset === "availability") this.#insertAvailability(normalized as AvailabilityRow, "oee_import_staging");
+        else this.#insertDut(normalized as DutRow, "oee_import_staging");
       }
-
       const sourceSha256 = fileHash.digest("hex");
-      const missingDates = expectedDates.filter((date) => !replacedDates.has(date));
+      this.#database.exec("COMMIT");
+      transactionOpen = false;
+
+      this.#database.exec("BEGIN IMMEDIATE");
+      transactionOpen = true;
+      const columns = this.#database.prepare(`PRAGMA table_info(${spec.tableName})`).all()
+        .map((row) => stringColumn(row, "name")).filter((name) => name !== "id").join(", ");
+      const deleteDate = this.#database.prepare(`DELETE FROM ${spec.tableName} WHERE date >= ? AND date < ?`);
+      const insertDate = this.#database.prepare(`INSERT INTO ${spec.tableName} (${columns})
+        SELECT ${columns} FROM oee_import_staging WHERE date >= ? AND date < ?`);
+      const previousShifts = this.#database.prepare(`SELECT DISTINCT shift FROM ${spec.tableName}
+        WHERE date >= ? AND date < ? AND shift IS NOT NULL`);
+      for (const date of expectedDates) {
+        if (!observedDayCounts.has(date)) continue;
+        const nextDate = addDays(date, 1);
+        const shifts = observedShifts.get(date)!;
+        if (previousShifts.all(date, nextDate).some((row) => !shifts.has(stringColumn(row, "shift")))) {
+          incompleteDates.push(date);
+          continue;
+        }
+        rowsDeleted += rowChanges(deleteDate.run(date, nextDate));
+        const inserted = rowChanges(insertDate.run(date, nextDate));
+        if (inserted !== observedDayCounts.get(date)) throw new Error("目标日期写入行数与源响应不一致");
+        rowsInserted += inserted;
+        if (spec.dataset === "dut_utilization") {
+          const summarize = (table: string): DutValidationSummary[] => this.#database.prepare(
+            `SELECT ? date, shift, COUNT(*) rowCount, TOTAL(CAST(in_qty AS REAL)) inQty,
+                    TOTAL(CAST(out_qty AS REAL)) outQty, TOTAL(CAST(dut_num AS REAL)) dutNum
+             FROM ${table} WHERE date >= ? AND date < ? GROUP BY shift ORDER BY shift`,
+          ).all(date, date, nextDate).map((row) => ({ date, shift: nullableStringColumn(row, "shift"),
+            rowCount: numberColumn(row, "rowCount"), inQty: numberColumn(row, "inQty"),
+            outQty: numberColumn(row, "outQty"), dutNum: numberColumn(row, "dutNum") }));
+          const incoming = summarize("oee_import_staging");
+          if (JSON.stringify(incoming) !== JSON.stringify(summarize(spec.tableName))) {
+            throw new Error("DUT 写入验收失败：业务日、班次或关键数量汇总与源响应不一致");
+          }
+          validation.push(...incoming);
+        }
+        committedDates.push(date);
+      }
+      const missingDates = expectedDates.filter((date) => !observedDayCounts.has(date));
       const sortedObservedDates = [...observedDayCounts.keys()].sort();
       const sortedUnexpectedDates = [...unexpectedDates].sort();
       const orderedDayCounts = Object.fromEntries(
         [...observedDayCounts.entries()].sort(([left], [right]) => left.localeCompare(right)),
       );
-      const status: ImportOutcome = missingDates.length || sortedUnexpectedDates.length || unscopedRowCount
-        ? "completed_with_warnings"
-        : "completed";
-      const completedAt = operationalTimestamp();
+      const status: ImportOutcome = missingDates.length || incompleteDates.length ||
+        sortedUnexpectedDates.length || unscopedRowCount ? "completed_with_warnings" : "completed";
       const coverage = this.#coverage(spec);
       this.#database.prepare(
         `UPDATE oee_import_windows
          SET status = ?, completed_at = ?, rows_received = ?, rows_inserted = ?, rows_deleted = ?,
              unscoped_row_count = ?, observed_min_date = ?, observed_max_date = ?,
              observed_day_counts_json = ?, missing_dates_json = ?, unexpected_dates_json = ?,
-             source_sha256 = ?, error_stage = NULL, error_name = NULL,
-             error_code = NULL, error_message = NULL
-         WHERE id = ?`,
-      ).run(
-        status,
-        completedAt,
-        rowsReceived,
-        rowsInserted,
-        rowsDeleted,
-        unscopedRowCount,
-        sortedObservedDates.at(0) ?? null,
-        sortedObservedDates.at(-1) ?? null,
-        JSON.stringify(orderedDayCounts),
-        JSON.stringify(missingDates),
-        JSON.stringify(sortedUnexpectedDates),
-        sourceSha256,
-        window.id,
-      );
+             source_sha256 = ?, committed_dates_json = ?, incomplete_dates_json = ?,
+             ignored_boundary_row_count = ?, error_stage = NULL, error_name = NULL,
+             error_code = NULL, error_message = NULL WHERE id = ?`,
+      ).run(status, operationalTimestamp(), rowsReceived, rowsInserted, rowsDeleted,
+        unscopedRowCount, sortedObservedDates.at(0) ?? null, sortedObservedDates.at(-1) ?? null,
+        JSON.stringify(orderedDayCounts), JSON.stringify(missingDates), JSON.stringify(sortedUnexpectedDates),
+        sourceSha256, JSON.stringify(committedDates), JSON.stringify(incompleteDates), ignoredBoundaryRowCount, window.id);
       this.#database.exec("COMMIT");
       transactionOpen = false;
       return {
-        runId: window.runId,
-        windowId: window.id,
-        status,
-        dataset: window.dataset,
-        requestedStartDate: window.startDate,
-        requestedEndDate: window.endDate,
-        expectedStartDate: expected.startDate,
-        expectedEndDate: expected.endDate,
-        rowsReceived,
-        rowsInserted,
-        rowsDeleted,
-        unscopedRowCount,
-        observedMinDate: sortedObservedDates.at(0) ?? null,
-        observedMaxDate: sortedObservedDates.at(-1) ?? null,
-        observedDayCounts: orderedDayCounts,
-        missingDates,
-        unexpectedDates: sortedUnexpectedDates,
-        sourceSha256,
-        coverage,
+        runId: window.runId, windowId: window.id, status, dataset: window.dataset,
+        requestedStartDate: window.requestedStartDate, requestedEndDate: window.requestedEndDate,
+        expectedStartDate: window.startDate, expectedEndDate: window.endDate,
+        rowsReceived, rowsInserted, rowsDeleted, unscopedRowCount, ignoredBoundaryRowCount,
+        observedMinDate: sortedObservedDates.at(0) ?? null, observedMaxDate: sortedObservedDates.at(-1) ?? null,
+        observedDayCounts: orderedDayCounts, missingDates, unexpectedDates: sortedUnexpectedDates,
+        committedDates, incompleteDates, coverageVersion: COVERAGE_VERSION, validation, sourceSha256, coverage,
       };
     } catch (error) {
       if (transactionOpen) this.#database.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.#database.exec("DROP TABLE temp.oee_import_staging");
     }
   }
 
@@ -1315,8 +1417,8 @@ export class OeeDataStore {
       windowId: window.id,
       status: "failed",
       dataset: window.dataset,
-      requestedStartDate: window.startDate,
-      requestedEndDate: window.endDate,
+      requestedStartDate: window.requestedStartDate,
+      requestedEndDate: window.requestedEndDate,
       errorStage: row ? nullableStringColumn(row, "error_stage") ?? "unknown" : "unknown",
       errorMessage: row ? nullableStringColumn(row, "error_message") ?? "导入失败" : "导入失败",
     };
@@ -1421,22 +1523,37 @@ export class OeeDataStore {
     return Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
   }
 
-  #latestWindowStates(dataset: OeeDataset): Map<string, { status: WindowState; windowId: string }> {
-    const latest = new Map<string, { status: WindowState; windowId: string }>();
+  #hasCommittedDate(dataset: OeeDataset, date: string): boolean {
     const rows = this.#database.prepare(
-      `SELECT w.id, w.status, w.requested_start_date, w.requested_end_date
-       FROM oee_import_windows w
-       JOIN oee_import_runs r ON r.id = w.run_id
-       WHERE w.dataset = ?
-       ORDER BY r.started_at, r.rowid, w.sequence`,
+      `SELECT coverage_version, committed_dates_json, missing_dates_json
+       FROM oee_import_windows
+       WHERE dataset = ? AND expected_start_date <= ? AND expected_end_date >= ?
+         AND status IN ('completed', 'completed_with_warnings')`,
+    ).all(dataset, date, date);
+    return rows.some((row) => numberColumn(row, "coverage_version") >= COVERAGE_VERSION
+      ? jsonStringArray(row["committed_dates_json"]).includes(date)
+      : dataset === "availability" && !jsonStringArray(row["missing_dates_json"]).includes(date));
+  }
+
+  #latestWindowStates(dataset: OeeDataset): Map<string, { status: WindowState; windowId: string; complete: boolean }> {
+    const latest = new Map<string, { status: WindowState; windowId: string; complete: boolean }>();
+    const rows = this.#database.prepare(
+      `SELECT w.id, w.status, w.expected_start_date, w.expected_end_date,
+              w.coverage_version, w.committed_dates_json, w.missing_dates_json
+       FROM oee_import_windows w JOIN oee_import_runs r ON r.id = w.run_id
+       WHERE w.dataset = ? ORDER BY r.started_at, r.rowid, w.sequence`,
     ).all(dataset);
     for (const row of rows) {
       const status = stringColumn(row, "status") as WindowState;
       const windowId = stringColumn(row, "id");
-      for (const date of dateRange(
-        stringColumn(row, "requested_start_date"),
-        stringColumn(row, "requested_end_date"),
-      )) latest.set(date, { status, windowId });
+      const version = numberColumn(row, "coverage_version");
+      const committed = new Set(jsonStringArray(row["committed_dates_json"]));
+      const missing = new Set(jsonStringArray(row["missing_dates_json"]));
+      for (const date of dateRange(stringColumn(row, "expected_start_date"), stringColumn(row, "expected_end_date"))) {
+        const complete = COMPLETED_WINDOW_STATES.has(status) && (version >= COVERAGE_VERSION
+          ? committed.has(date) : dataset === "availability" && !missing.has(date));
+        latest.set(date, { status, windowId, complete });
+      }
     }
     return latest;
   }
@@ -1453,12 +1570,11 @@ export class OeeDataStore {
     if (latest.size === 0 && !initialStartDate) {
       const maxDataDate = this.#coverage(spec).maxDataDate;
       if (!maxDataDate) throw new Error(`${dataset} 尚无数据,首次同步必须提供 initialStartDate`);
-      const latestRequestedDate = addDays(maxDataDate, -spec.responseDateOffsetDays);
-      const anchor = latestRequestedDate < throughDate ? latestRequestedDate : throughDate;
+      const anchor = maxDataDate < throughDate ? maxDataDate : throughDate;
       return mergeAndSplitWindows([{
-        startDate: addDays(anchor, -(overlapDays - 1)),
+        startDate: dataset === "dut_utilization" ? this.#coverage(spec).minDataDate! : addDays(anchor, -(overlapDays - 1)),
         endDate: throughDate,
-      }], maxWindowDays);
+      }], businessWindowSize(dataset, maxWindowDays));
     }
 
     const knownDates = [...latest.keys()].sort();
@@ -1471,11 +1587,10 @@ export class OeeDataStore {
     if (!startDate) throw new Error(`${dataset} 尚无可追踪的同步起始日期`);
     const planned = new Set<string>();
     for (const date of dateRange(startDate, throughDate)) {
-      const state = latest.get(date)?.status;
-      if (!state || !COMPLETED_WINDOW_STATES.has(state)) planned.add(date);
+      if (!latest.get(date)?.complete) planned.add(date);
     }
     const completed = knownDates.filter((date) =>
-      date <= throughDate && COMPLETED_WINDOW_STATES.has(latest.get(date)!.status));
+      date <= throughDate && latest.get(date)!.complete);
     const latestCompleted = completed.at(-1);
     if (latestCompleted) {
       const anchor = latestCompleted < throughDate ? latestCompleted : throughDate;
@@ -1484,7 +1599,7 @@ export class OeeDataStore {
         planned.add(date);
       }
     }
-    return mergeAndSplitWindows(coalesceDates([...planned]), maxWindowDays);
+    return mergeAndSplitWindows(coalesceDates([...planned]), businessWindowSize(dataset, maxWindowDays));
   }
 
   #datasetStatus(dataset: OeeDataset): DatasetStatus {
@@ -1493,10 +1608,10 @@ export class OeeDataStore {
     const latest = this.#latestWindowStates(dataset);
     const trackedDates = [...latest.keys()].sort();
     const unresolvedDates = trackedDates.filter((date) =>
-      !COMPLETED_WINDOW_STATES.has(latest.get(date)!.status));
+      !latest.get(date)!.complete);
     let completedThroughDate: string | null = null;
     for (const date of trackedDates) {
-      if (!COMPLETED_WINDOW_STATES.has(latest.get(date)!.status)) break;
+      if (!latest.get(date)!.complete) break;
       if (completedThroughDate && date !== addDays(completedThroughDate, 1)) break;
       completedThroughDate = date;
     }
@@ -1511,6 +1626,8 @@ export class OeeDataStore {
         status: row.status as ImportIssue["status"],
         requestedStartDate: row.requestedStartDate,
         requestedEndDate: row.requestedEndDate,
+        expectedStartDate: row.expectedStartDate, expectedEndDate: row.expectedEndDate,
+        incompleteDates: row.incompleteDates,
         missingDates: row.missingDates,
         unexpectedDates: row.unexpectedDates,
         unscopedRowCount: row.unscopedRowCount,
@@ -1521,7 +1638,7 @@ export class OeeDataStore {
     const recommendations: ImportRecommendation[] = unresolvedRanges.map((range) => ({
       action: "sync",
       ...range,
-      reason: "存在未完成、失败或中断的导入日期",
+      reason: "存在未提交、完整性未验证、失败或中断的业务日期",
       windowIds: [...new Set(
         dateRange(range.startDate, range.endDate)
           .map((date) => latest.get(date)?.windowId)
@@ -1532,19 +1649,15 @@ export class OeeDataStore {
       if (issue.status !== "completed_with_warnings") continue;
       recommendations.push({
         action: "reimport",
-        startDate: issue.requestedStartDate,
-        endDate: issue.requestedEndDate,
-        reason: "最近一次提交存在缺日、越界或无日期数据",
+        startDate: issue.expectedStartDate,
+        endDate: issue.expectedEndDate,
+        reason: "最近一次提交存在缺日、班次覆盖退化、越界或无日期数据",
         windowIds: [issue.windowId],
       });
     }
 
-    const factLogicalStart = facts.minDataDate
-      ? addDays(facts.minDataDate, -spec.responseDateOffsetDays)
-      : null;
-    const factLogicalEnd = facts.maxDataDate
-      ? addDays(facts.maxDataDate, -spec.responseDateOffsetDays)
-      : null;
+    const factLogicalStart = facts.minDataDate;
+    const factLogicalEnd = facts.maxDataDate;
     let state: DatasetStatus["tracking"]["state"];
     if (!trackedDates.length && facts.rowCount === 0) state = "empty";
     else if (!trackedDates.length) state = "legacy_untracked";
@@ -1582,6 +1695,7 @@ export class OeeDataStore {
   #windowAuditRows(dataset: OeeDataset): WindowAuditRow[] {
     return this.#database.prepare(
       `SELECT w.id, w.status, w.requested_start_date, w.requested_end_date,
+              w.expected_start_date, w.expected_end_date, w.incomplete_dates_json,
               w.missing_dates_json, w.unexpected_dates_json, w.unscoped_row_count,
               w.error_stage, w.error_message
        FROM oee_import_windows w
@@ -1593,6 +1707,9 @@ export class OeeDataStore {
       status: stringColumn(row, "status") as WindowState,
       requestedStartDate: stringColumn(row, "requested_start_date"),
       requestedEndDate: stringColumn(row, "requested_end_date"),
+      expectedStartDate: stringColumn(row, "expected_start_date"),
+      expectedEndDate: stringColumn(row, "expected_end_date"),
+      incompleteDates: jsonStringArray(row["incomplete_dates_json"]),
       missingDates: jsonStringArray(row["missing_dates_json"]),
       unexpectedDates: jsonStringArray(row["unexpected_dates_json"]),
       unscopedRowCount: numberColumn(row, "unscoped_row_count"),
@@ -1670,15 +1787,15 @@ export class OeeDataStore {
     };
   }
 
-  #insertAvailability(row: AvailabilityRow): void {
+  #insertAvailability(row: AvailabilityRow, table = "oee_availability"): void {
     this.#database.prepare(
-      `INSERT INTO oee_availability (
+      `INSERT INTO ${table} (
          tool_name, lot_id, final_state, step, date, shift, time_span
        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(row.toolName, row.lotId, row.finalState, row.step, row.date, row.shift, row.timeSpan);
   }
 
-  #insertDut(row: DutRow): void {
+  #insertDut(row: DutRow, table = "oee_dut_utilization"): void {
     const columns = [
       "machine_id", "lot_id", "touchdown_index", "start_time", "end_time", "in_qty",
       "out_qty", "total_in", "total_out", "part_num", "package_size", "test_stage",
@@ -1698,7 +1815,7 @@ export class OeeDataStore {
       row.handlerDutOffCount, row.partialTd, row.dutOffAuto, row.dutOffManual, row.date, row.shift,
     ] as const;
     this.#database.prepare(
-      `INSERT INTO oee_dut_utilization (${columns.join(", ")})
+      `INSERT INTO ${table} (${columns.join(", ")})
        VALUES (${values.map(() => "?").join(", ")})`,
     ).run(...values);
   }

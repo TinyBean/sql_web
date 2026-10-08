@@ -484,7 +484,7 @@ test("unavailable models publish new metrics and empty analysis, without creatin
   })]);
   const result = await runDailyUpdate(config, dailyUpdatePlan(["--through-date", "2026-01-12"], new Date("2026-01-13T01:00:00Z")), registry, logger, {
     openStore: () => ({
-      async sync() { return { runId: "test", status: "completed", datasets: [] }; }, close() {},
+      async importNewDay() { return { runId: "test", status: "completed", datasets: [] }; }, close() {},
     }),
   });
   assert.equal(result.status, "completed_with_warnings", JSON.stringify(result));

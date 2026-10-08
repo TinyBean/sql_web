@@ -4,11 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { OeeDataStore, outcomeExitCode } from "../../scripts/database/oee-data-store.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import { FileLogger } from "../../src/server/logger.ts";
+import { addDays } from "../../src/server/database/business-dates.ts";
 
 function availabilityRow(dataDate: string, suffix: string, timeSpan = 60): Record<string, unknown> {
   return {
@@ -175,8 +176,8 @@ test("preserves every Availability row and syncs from live fact-table coverage",
   const first = await store.importFile({
     dataset: "availability",
     filePath: initialPath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-22",
+    startDate: "2026-08-20",
+    endDate: "2026-08-22",
   });
   assert.equal(first.rowsReceived, 3);
   assert.equal(first.rowsInserted, 3);
@@ -232,8 +233,8 @@ test("assigns separate auto-increment IDs to completely identical API rows", asy
   const result = await store.importFile({
     dataset: "availability",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-20",
+    startDate: "2026-08-20",
+    endDate: "2026-08-20",
   });
   assert.equal(result.rowsReceived, 2);
   assert.equal(result.rowsInserted, 2);
@@ -264,8 +265,8 @@ test("atomically replaces returned dates while preserving duplicate rows within 
   const first = await store.importFile({
     dataset: "availability",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-20",
+    startDate: "2026-08-20",
+    endDate: "2026-08-20",
   });
   assert.equal(first.status, "completed");
   assert.equal(first.rowsDeleted, 0);
@@ -276,8 +277,8 @@ test("atomically replaces returned dates while preserving duplicate rows within 
   const second = await store.importFile({
     dataset: "availability",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-20",
+    startDate: "2026-08-20",
+    endDate: "2026-08-20",
   });
   assert.equal(second.rowsDeleted, 2);
   reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
@@ -306,8 +307,8 @@ test("preserves old rows for missing response dates and recommends a reimport", 
   await store.importFile({
     dataset: "availability",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-21",
+    startDate: "2026-08-20",
+    endDate: "2026-08-21",
   });
   writeFileSync(sourcePath, availabilityResponse([
     availabilityRow("2026-08-20", "new-20", 120),
@@ -315,8 +316,8 @@ test("preserves old rows for missing response dates and recommends a reimport", 
   const result = await store.importFile({
     dataset: "availability",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-21",
+    startDate: "2026-08-20",
+    endDate: "2026-08-21",
   });
   assert.equal(result.status, "completed_with_warnings");
   assert.deepEqual(result.missingDates, ["2026-08-21"]);
@@ -333,9 +334,137 @@ test("preserves old rows for missing response dates and recommends a reimport", 
   const status = store.getStatus()[0];
   assert.deepEqual(status?.issues[0]?.missingDates, ["2026-08-21"]);
   assert.equal(status?.recommendations.some((item) => item.action === "reimport"), true);
+  assert.equal(status?.tracking.completedThroughDate, "2026-08-20");
+  assert.deepEqual(status?.tracking.unresolvedRanges, [{ startDate: "2026-08-21", endDate: "2026-08-21" }]);
 });
 
-test("imports DUT rows with missing or unexpected dates and exposes their non-idempotent status", async (t) => {
+async function dutApiFixture(t: TestContext, firstDate: string, lastDate: string) {
+  const directory = mkdtempSync(path.join(tmpdir(), "oee-business-window-"));
+  const rows: Record<string, unknown>[] = [];
+  for (let date = addDays(firstDate, -1); date <= addDays(lastDate, 1); date = addDays(date, 1)) {
+    for (const [shift, end] of [["day", date + "T12:00:00.000Z"],
+      ["night", addDays(date, 1) + "T04:00:00.000Z"]]) {
+      const row = { ...dutRow(date + shift), "ORPTSIP.DATE": date + "T00:00:00.000Z",
+        "ORPTSIP.SHIFT": shift, "ORPTSIP.END_TIME": end, "ORPTSIP.LOT_ID": date + shift };
+      rows.push(row);
+      if (shift === "day") rows.push(row); // Identical source rows remain distinct facts.
+    }
+  }
+  const requests: string[][] = [];
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const dates = requestedDateKeys(url);
+    requests.push([dates[0]!, dates.at(-1)!]);
+    const received = rows.filter((row) => String(row["ORPTSIP.END_TIME"]) >= dates[0]! + "T00:00:00.000Z" &&
+      String(row["ORPTSIP.END_TIME"]) < dates.at(-1)! + "T00:00:00.000Z");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(dutResponse(received));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
+  const reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
+  t.after(async () => {
+    reader.close(); store.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return { directory, store, reader, requests };
+}
+
+test("DUT manual sync overlap and same-day reruns keep both shifts and ignore partial boundary days", async (t) => {
+  const { store, reader, requests } = await dutApiFixture(t, "2026-10-05", "2026-10-06");
+  const first = await store.pullWindow({ dataset: "dut_utilization", startDate: "2026-10-05", endDate: "2026-10-05" });
+  assert.deepEqual(first.committedDates, ["2026-10-05"]);
+  assert.equal(first.ignoredBoundaryRowCount, 3);
+  const options = { dataset: "dut_utilization" as const, initialStartDate: "2026-10-05", throughDate: "2026-10-06" };
+  assert.equal((await store.sync(options)).status, "completed");
+  assert.equal((await store.sync(options)).status, "completed");
+  assert.deepEqual(requests, [
+    ["2026-10-05", "2026-10-07"], ["2026-10-05", "2026-10-07"], ["2026-10-06", "2026-10-08"],
+    ["2026-10-05", "2026-10-07"], ["2026-10-06", "2026-10-08"],
+  ]);
+  assert.deepEqual(reader.prepare("SELECT substr(date,1,10) date, shift, COUNT(*) n FROM oee_dut_utilization GROUP BY date,shift ORDER BY date,shift")
+    .all().map((row) => ({ ...row })), ["2026-10-05", "2026-10-06"].flatMap((date) =>
+      [{ date, shift: "day", n: 2 }, { date, shift: "night", n: 1 }]));
+  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, "2026-10-06");
+});
+
+test("DUT backfill splits business dates with overlapping HTTP windows across a year boundary", async (t) => {
+  const { store, reader, requests } = await dutApiFixture(t, "2026-12-30", "2027-01-02");
+  const result = await store.reimport({ dataset: "dut_utilization", startDate: "2026-12-30", endDate: "2027-01-02" });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(requests, [["2026-12-30", "2027-01-01"], ["2026-12-31", "2027-01-02"],
+    ["2027-01-01", "2027-01-03"], ["2027-01-02", "2027-01-04"]]);
+  assert.equal(reader.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 12);
+  await store.reimport({ dataset: "dut_utilization", startDate: "2026-12-30", endDate: "2027-01-02" });
+  assert.equal(reader.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 12);
+});
+
+test("file imports reject insufficient DUT envelopes and preserve old shifts when coverage regresses", async (t) => {
+  const { directory, store, reader } = await dutApiFixture(t, "2026-10-05", "2026-10-05");
+  const filePath = path.join(directory, "partial.json");
+  const partial = { ...dutRow("partial"), "ORPTSIP.DATE": "2026-10-05T00:00:00.000Z", "ORPTSIP.SHIFT": "night" };
+  writeFileSync(filePath, dutResponse([partial]));
+  const target = { dataset: "dut_utilization" as const, filePath, startDate: "2026-10-05", endDate: "2026-10-05" };
+  await assert.rejects(store.importFile(target), /原始请求范围/u);
+  await assert.rejects(store.importFile({ ...target, requestedStartDate: "2026-10-06", requestedEndDate: "2026-10-07" }), /未完整覆盖/u);
+  await assert.rejects(store.importFile({ ...target, requestedStartDate: "2026-10-04", requestedEndDate: "2026-10-07" }), /不能超过三个日期/u);
+  await store.pullWindow(target);
+  const before = reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
+  const result = await store.importFile({ ...target, requestedStartDate: "2026-10-05", requestedEndDate: "2026-10-07" });
+  assert.equal(result.status, "completed_with_warnings");
+  assert.deepEqual(result.incompleteDates, ["2026-10-05"]);
+  assert.deepEqual(result.committedDates, []);
+  assert.equal(result.rowsDeleted, 0);
+  assert.equal(result.rowsInserted, 0);
+  assert.deepEqual(reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), before);
+  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, null);
+  assert.deepEqual(store.getStatus()[1]?.tracking.unresolvedRanges, [{ startDate: "2026-10-05", endDate: "2026-10-05" }]);
+  const retry = await store.sync({ dataset: "dut_utilization", throughDate: "2026-10-05" });
+  assert.deepEqual(retry.datasets[0]?.plannedWindows, [{ startDate: "2026-10-05", endDate: "2026-10-05" }]);
+  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, "2026-10-05");
+});
+
+test("DUT quantity validation rolls back database-side changes to otherwise successful inserts", async (t) => {
+  const { directory, store, reader } = await dutApiFixture(t, "2026-10-05", "2026-10-05");
+  const target = { dataset: "dut_utilization" as const, startDate: "2026-10-05", endDate: "2026-10-05" };
+  await store.pullWindow(target);
+  const before = reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
+  const writer = new DatabaseSync(path.join(directory, "oee.sqlite"));
+  writer.exec(`CREATE TRIGGER change_quantity AFTER INSERT ON oee_dut_utilization
+    BEGIN UPDATE oee_dut_utilization SET out_qty='0' WHERE id=NEW.id; END`);
+  writer.close();
+  await assert.rejects(store.pullWindow(target), /DUT 写入验收失败/u);
+  assert.deepEqual(reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), before);
+});
+
+test("a truncated JSON envelope, trailing garbage, bad row or failed write leaves the whole window intact", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "oee-staging-rollback-"));
+  const store = createStore(directory);
+  const filePath = path.join(directory, "source.json");
+  const writer = new DatabaseSync(path.join(directory, "oee.sqlite"));
+  t.after(() => { writer.close(); store.close(); rmSync(directory, { recursive: true, force: true }); });
+  const target = { dataset: "availability" as const, filePath, startDate: "2026-08-20", endDate: "2026-08-21" };
+  writeFileSync(filePath, availabilityResponse([availabilityRow("2026-08-20", "old"), availabilityRow("2026-08-21", "old-21")]));
+  await store.importFile(target);
+  const before = writer.prepare("SELECT * FROM oee_availability ORDER BY id").all();
+  const good = availabilityResponse([availabilityRow("2026-08-20", "new"), availabilityRow("2026-08-21", "new-21")]);
+  for (const body of [good.slice(0, -2), good + "garbage", availabilityResponse([
+    availabilityRow("2026-08-20", "new"), { ...availabilityRow("2026-08-21", "bad"), "ORPTSIP.TIME_SPAN": "bad" },
+  ])]) {
+    writeFileSync(filePath, body);
+    await assert.rejects(store.importFile(target));
+    assert.deepEqual(writer.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
+  }
+  writer.exec("CREATE TRIGGER reject_second_date BEFORE INSERT ON oee_availability WHEN NEW.tool_name='TOOL-new-21' BEGIN SELECT RAISE(ABORT,'write rejected'); END");
+  writeFileSync(filePath, good);
+  await assert.rejects(store.importFile(target), /write rejected/u);
+  assert.deepEqual(writer.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
+});
+
+test("audits undated DUT rows and boundary rows without accumulating them in facts", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "oee-dut-anomaly-test-"));
   const sourcePath = path.join(directory, "dut-anomaly.json");
   const normal = dutRow("normal");
@@ -353,23 +482,28 @@ test("imports DUT rows with missing or unexpected dates and exposes their non-id
   const first = await store.importFile({
     dataset: "dut_utilization",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-20",
+    startDate: "2026-08-19",
+    endDate: "2026-08-19",
+    requestedStartDate: "2026-08-19",
+    requestedEndDate: "2026-08-21",
   });
   assert.equal(first.status, "completed_with_warnings");
   assert.equal(first.unscopedRowCount, 1);
-  assert.deepEqual(first.unexpectedDates, ["2026-08-18"]);
+  assert.deepEqual(first.unexpectedDates, []);
+  assert.equal(first.ignoredBoundaryRowCount, 1);
   assert.deepEqual(first.missingDates, []);
 
   await store.importFile({
     dataset: "dut_utilization",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-20",
+    startDate: "2026-08-19",
+    endDate: "2026-08-19",
+    requestedStartDate: "2026-08-19",
+    requestedEndDate: "2026-08-21",
   });
   const status = store.getStatus()[1];
-  assert.equal(status?.facts.rowCount, 5);
-  assert.equal(status?.facts.unscopedRowCount, 2);
+  assert.equal(status?.facts.rowCount, 1);
+  assert.equal(status?.facts.unscopedRowCount, 0);
 });
 
 test("marks abandoned audit runs as interrupted when their owner process is gone", (t) => {
@@ -596,8 +730,8 @@ test("replays an explicit initial range after a failed window", async (t) => {
   await store.importFile({
     dataset: "availability",
     filePath: initialPath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-22",
+    startDate: "2026-08-20",
+    endDate: "2026-08-22",
   });
   const syncOptions = {
     dataset: "availability" as const,
@@ -693,8 +827,10 @@ test("keeps DUT payload fields inline and permits nulls in nonessential fields",
   const result = await store.importFile({
     dataset: "dut_utilization",
     filePath: sourcePath,
-    requestedStartDate: "2026-08-20",
-    requestedEndDate: "2026-08-20",
+    startDate: "2026-08-19",
+    endDate: "2026-08-19",
+    requestedStartDate: "2026-08-19",
+    requestedEndDate: "2026-08-21",
   });
   assert.equal(result.rowsInserted, 2);
   assert.equal(result.expectedStartDate, "2026-08-19");
@@ -779,8 +915,8 @@ test("logs file import failures", async (t) => {
     store.importFile({
       dataset: "availability",
       filePath: sourcePath,
-      requestedStartDate: "2026-08-20",
-      requestedEndDate: "2026-08-20",
+      startDate: "2026-08-20",
+      endDate: "2026-08-20",
     }),
     /未能完整读取/u,
   );

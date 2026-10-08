@@ -37,7 +37,7 @@ function database(calls: string[], warnings = false): DailyDatabaseDependencies 
   return { openStore() {
     calls.push("open");
     return {
-      async sync(options) {
+      async importNewDay(options) {
         calls.push(options.dataset!);
         return { runId: "sync", status: warnings ? "completed_with_warnings" : "completed", datasets: [] };
       },
@@ -111,7 +111,7 @@ test("database open, sync, reported, and close failures skip every strategy", as
       openStore() {
         if (failure === "open") throw new Error("open failed");
         return {
-          async sync(options) {
+          async importNewDay(options) {
             calls.push(options.dataset!);
             if (options.dataset === "availability" && failure === "sync") throw new Error("sync failed");
             return { runId: "test", datasets: [], status: failure === "reported" ? "failed" : "completed" };
@@ -175,7 +175,11 @@ test("daily CLI dry-run reports database requests and registered updates without
   assert.equal(output.requests.length, 2);
   assert.equal(output.databasePath, config.databasePath);
   assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }]);
-  assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "syncStart", "throughDate", "timezone"]);
+  assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "throughDate", "timezone"]);
+  assert.deepEqual(output.requests, [
+    { dataset: "availability", date: "2026-01-12" },
+    { dataset: "dut_utilization", date: "2026-01-12" },
+  ]);
   assert.deepEqual(readdirSync(directory), []);
 });
 

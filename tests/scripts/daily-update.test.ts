@@ -18,7 +18,7 @@ import { addDays, latestClosedBusinessDate, latestCompleteWeek } from "../../src
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { DashboardRow } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
-import type { SyncOptions, SyncResult } from "../../scripts/database/oee-data-store.ts";
+import type { ImportNewDayOptions, SyncResult } from "../../scripts/database/oee-data-store.ts";
 
 const logger: AppLogger = {
   info() {}, warn() {}, error() {}, child() { return this; },
@@ -50,24 +50,44 @@ test("resolves closed business dates at 08:30 and across month, year, and leap d
     ["2027-01-01T01:00:00Z", "2026-12-31"],
     ["2027-01-02T01:00:00Z", "2027-01-01"],
     ["2028-03-01T01:00:00Z", "2028-02-29"],
-  ]) assert.equal(latestClosedBusinessDate(new Date(instant!)), expected);
+  ]) {
+    assert.equal(latestClosedBusinessDate(new Date(instant!)), expected);
+    assert.deepEqual(dailyUpdatePlan([], new Date(instant!)).requests, [
+      { dataset: "availability", date: expected },
+      { dataset: "dut_utilization", date: expected },
+    ]);
+  }
   assert.throws(() => dashboardPeriods("2026-02-29"), /无效日期/u);
   assert.throws(() => dailyUpdatePlan(["--through-date", "2026-09-15"], new Date("2026-09-15T01:00:00Z")), /已结束/u);
   assert.throws(() => dailyUpdatePlan(["--through-date"]), /用法/u);
   assert.throws(() => dailyUpdatePlan(["--bad"]), /用法/u);
 });
 
-test("aligns the two API ranges and includes the previous year's complete week", () => {
+test("imports only the target business day while analysis keeps the previous year's complete week", () => {
   const plan = dailyUpdatePlan(["--dry-run"], new Date("2027-01-02T01:00:00Z"));
   assert.equal(plan.dryRun, true);
-  assert.equal(plan.syncStart, "2026-12-20");
   assert.deepEqual(dashboardPeriods(plan.throughDate).trend, { start: "2027-01-01", end: "2027-01-01" });
   assert.deepEqual(dashboardPeriods(plan.throughDate).week, { start: "2026-12-20", end: "2026-12-26" });
   assert.deepEqual(plan.requests, [
-    { dataset: "availability", initialStartDate: "2026-12-20", throughDate: "2027-01-01", overlapDays: 2 },
-    { dataset: "dut_utilization", initialStartDate: "2026-12-21", throughDate: "2027-01-02", overlapDays: 2 },
+    { dataset: "availability", date: "2027-01-01" },
+    { dataset: "dut_utilization", date: "2027-01-01" },
   ]);
   assert.deepEqual(dashboardPeriods("2026-09-13").week, { start: "2026-09-06", end: "2026-09-12" });
+});
+
+test("daily imports have no historical start or overlap and honor an explicit business date", () => {
+  const now = new Date("2026-10-09T01:00:00Z");
+  const plan = dailyUpdatePlan([], now);
+  assert.equal(plan.throughDate, "2026-10-08");
+  assert.equal(Object.hasOwn(plan, "syncStart"), false);
+  assert.deepEqual(plan.requests, [
+    { dataset: "availability", date: "2026-10-08" },
+    { dataset: "dut_utilization", date: "2026-10-08" },
+  ]);
+  assert.deepEqual(dailyUpdatePlan(["--through-date", "2026-09-18"], now).requests, [
+    { dataset: "availability", date: "2026-09-18" },
+    { dataset: "dut_utilization", date: "2026-09-18" },
+  ]);
 });
 
 test("complete weeks end on Saturday and keep business-day and year boundaries", () => {
@@ -259,7 +279,7 @@ function result(status: SyncResult["status"], dataset: "availability" | "dut_uti
 test("hard sync failures preserve the published default and still attempt the other dataset", async (t) => {
   const { config } = fixture(t);
   writeFileSync(config.defaultDashboardPath, "old snapshot");
-  const requests: SyncOptions[] = [];
+  const requests: ImportNewDayOptions[] = [];
   let closed = false;
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
     async generate() { assert.fail("must not build"); },
@@ -267,7 +287,7 @@ test("hard sync failures preserve the published default and still attempt the ot
   })]);
   const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), registry, logger, {
     openStore: () => ({
-      async sync(options) {
+      async importNewDay(options) {
         requests.push(options);
         if (options.dataset === "availability") throw new Error("API unavailable");
         return result("completed", "dut_utilization");
@@ -276,7 +296,10 @@ test("hard sync failures preserve the published default and still attempt the ot
     }),
   });
   assert.equal(closed, true);
-  assert.equal(requests.length, 2);
+  assert.deepEqual(requests, [
+    { dataset: "availability", date: "2026-09-14" },
+    { dataset: "dut_utilization", date: "2026-09-14" },
+  ]);
   assert.equal(outcome.status, "failed");
   assert.equal(outcome.dashboards[0]?.published, false);
   assert.equal(outcome.dashboards[0]?.status, "skipped");
@@ -300,7 +323,7 @@ test("sync warnings publish all thirteen cards with data coverage warnings", asy
   })]);
   const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), registry, logger, {
     openStore: () => ({
-      async sync(options) { return result("completed_with_warnings", options.dataset as "availability" | "dut_utilization"); },
+      async importNewDay(options) { return result("completed_with_warnings", options.dataset); },
       close() {},
     }),
   });
@@ -316,7 +339,7 @@ test("calculation failures never publish a partial dashboard", async (t) => {
   })]);
   const outcome = await runDailyUpdate(config, dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z")), registry, logger, {
     openStore: () => ({
-      async sync(options) { return result("completed", options.dataset as "availability" | "dut_utilization"); },
+      async importNewDay(options) { return result("completed", options.dataset); },
       close() {},
     }),
   });

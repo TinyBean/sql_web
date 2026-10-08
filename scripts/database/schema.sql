@@ -132,6 +132,10 @@ CREATE TABLE IF NOT EXISTS oee_import_windows (
   missing_dates_json TEXT NOT NULL DEFAULT '[]',
   unexpected_dates_json TEXT NOT NULL DEFAULT '[]',
   source_sha256 TEXT,
+  coverage_version INTEGER NOT NULL DEFAULT 0,
+  committed_dates_json TEXT NOT NULL DEFAULT '[]',
+  incomplete_dates_json TEXT NOT NULL DEFAULT '[]',
+  ignored_boundary_row_count INTEGER NOT NULL DEFAULT 0,
   error_stage TEXT,
   error_name TEXT,
   error_code TEXT,
@@ -145,4 +149,4 @@ ON oee_import_windows(dataset, requested_start_date, requested_end_date, complet
 CREATE INDEX IF NOT EXISTS idx_oee_import_windows_status
 ON oee_import_windows(status, dataset);
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

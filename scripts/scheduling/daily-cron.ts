@@ -13,7 +13,7 @@ export function dailyCronBlock(projectRoot: string, nodePath: string): string {
     " /bin/bash " + shellQuote(path.join(root, "scripts", "oee-daily.sh")) + " --cron";
   return [
     "# BEGIN " + marker,
-    "# Daily at 09:00 Asia/Shanghai (host timezone); refresh the last closed business day.",
+    "# Daily at 09:00 Asia/Shanghai (host timezone); import the last closed business day if uncommitted.",
     "0 9 * * * " + command.replaceAll("%", "\\%"),
     "# END " + marker,
   ].join("\n");

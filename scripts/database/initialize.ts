@@ -26,6 +26,16 @@ export function initializeOeeDatabase(databasePath: string): void {
     database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; BEGIN IMMEDIATE;");
     try {
       database.exec(readFileSync(schemaPath, "utf8"));
+      const columns = new Set(database.prepare("PRAGMA table_info(oee_import_windows)")
+        .all().map((column) => column["name"]));
+      for (const [name, definition] of [
+        ["coverage_version", "INTEGER NOT NULL DEFAULT 0"],
+        ["committed_dates_json", "TEXT NOT NULL DEFAULT '[]'"],
+        ["incomplete_dates_json", "TEXT NOT NULL DEFAULT '[]'"],
+        ["ignored_boundary_row_count", "INTEGER NOT NULL DEFAULT 0"],
+      ]) {
+        if (!columns.has(name)) database.exec(`ALTER TABLE oee_import_windows ADD COLUMN ${name} ${definition}`);
+      }
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");

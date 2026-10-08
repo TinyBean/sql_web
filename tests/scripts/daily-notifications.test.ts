@@ -19,7 +19,7 @@ import { dailyDashboard } from "../helpers/daily-dashboard.ts";
 
 const plan = dailyUpdatePlan([], new Date("2026-09-15T01:00:00Z"));
 const database: DailyDatabaseDependencies = { openStore: () => ({
-  async sync() { return { runId: "sync", status: "completed", datasets: [] }; }, close() {},
+  async importNewDay() { return { runId: "sync", status: "completed", datasets: [] }; }, close() {},
 }) };
 
 function fixture(t: TestContext) {

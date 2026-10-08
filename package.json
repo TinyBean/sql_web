@@ -21,6 +21,7 @@
     "data:pull": "tsx scripts/oee-data.ts pull",
     "data:sync": "tsx scripts/oee-data.ts sync",
     "data:reimport": "tsx scripts/oee-data.ts reimport",
+    "data:repair-dut": "bash scripts/repair-dut.sh",
     "data:status": "tsx scripts/oee-data.ts status",
     "data:daily": "bash scripts/oee-daily.sh",
     "schedule:install": "node --import tsx scripts/install-daily-schedule.ts",

@@ -154,8 +154,8 @@ oee_dut_utilization:
 导入审计表:
 
 - `oee_import_runs` 每行表示一次 import、pull、sync 或 reimport 命令。`completed_with_warnings` 表示事实数据已提交但存在缺日、越界或无日期记录，`failed`/`interrupted` 表示仍需续导。
-- `oee_import_windows` 每行表示一个数据集日期窗口。`requested_*` 是 API 逻辑日期，`expected_*` 是应用 DUT 固定日期偏移后的事实日期。
+- `oee_import_windows` 每行表示一个数据集日期窗口。`requested_*` 是 API 逻辑日期，`expected_*` 是目标业务日期，`requested_*` 保留实际 API 参数；DUT 目标日 D 请求 D 至 D+2。
 - `missing_dates_json`、`unexpected_dates_json`、`unscoped_row_count` 用于判断需要重导或人工清理的范围；`source_sha256` 用于核对原始响应是否变化。
-- 事实表没有导入窗口外键。正常预期日期可原子替换；无日期和越界 DUT 行无法按窗口精确清理。
+- 完整解析后按业务日期原子替换，缺日或原有班次丢失时保留旧数据。`committed_dates_json` 记录实际提交日，`incomplete_dates_json` 记录覆盖退化日；`coverage_version=0` 的旧 DUT 审计不能证明整日完整。新导入的无日期、越界和边界行只计入审计，既有异常事实不会自动删除。
 
 </database_field_descriptions>

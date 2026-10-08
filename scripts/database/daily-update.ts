@@ -1,5 +1,5 @@
 import type { AppLogger } from "../../src/server/logger.ts";
-import { addDays, assertDate, latestClosedBusinessDate, latestCompleteWeek } from "../../src/server/database/business-dates.ts";
+import { assertDate, latestClosedBusinessDate } from "../../src/server/database/business-dates.ts";
 import { OeeDataStore, type OeeDataStoreOptions, type SyncResult, type RunOutcome } from "./oee-data-store.ts";
 
 export function dailyUpdatePlan(args: readonly string[], now = new Date()) {
@@ -15,24 +15,18 @@ export function dailyUpdatePlan(args: readonly string[], now = new Date()) {
     } else throw new Error("用法：npm run data:daily -- [--through-date YYYY-MM-DD] [--dry-run]");
   }
   assertDate(throughDate);
-  const yearStart = throughDate.slice(0, 4) + "-01-01";
-  const weekStart = latestCompleteWeek(throughDate).start;
-  const syncStart = weekStart < yearStart ? weekStart : yearStart;
   if (throughDate > latestClosedBusinessDate(now)) throw new Error("截止日期不能晚于最近已结束的业务日");
   return {
-    dryRun, throughDate, timezone: "Asia/Shanghai", syncStart,
+    dryRun, throughDate, timezone: "Asia/Shanghai",
     requests: [
-      { dataset: "availability", initialStartDate: syncStart, throughDate, overlapDays: 2 },
-      {
-        dataset: "dut_utilization",
-        initialStartDate: addDays(syncStart, 1), throughDate: addDays(throughDate, 1), overlapDays: 2,
-      },
+      { dataset: "availability", date: throughDate },
+      { dataset: "dut_utilization", date: throughDate },
     ] as const,
   };
 }
 
 export interface DailyDatabaseDependencies {
-  openStore(options: OeeDataStoreOptions): Pick<OeeDataStore, "sync" | "close">;
+  openStore(options: OeeDataStoreOptions): Pick<OeeDataStore, "importNewDay" | "close">;
 }
 
 export interface DailyDatabaseResult {
@@ -62,10 +56,10 @@ export async function syncDailyDatabase(
     store = dependencies.openStore({ ...options, logger });
     for (const request of plan.requests) {
       try {
-        const result = await store.sync(request);
+        const result = await store.importNewDay(request);
         datasets.push({ dataset: request.dataset, status: result.status, result });
         if (result.status === "completed_with_warnings") {
-          warnings.push(request.dataset + " 同步存在缺日、越界或无日期记录；详情见数据同步审计日志");
+          warnings.push(request.dataset + " 同步存在缺日、班次覆盖退化、越界或无日期记录；未提交日期保留旧数据，详情见数据同步审计日志");
         }
         logger.info("daily.dataset.completed", { dataset: request.dataset, ...result });
       } catch (error) {

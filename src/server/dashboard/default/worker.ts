@@ -31,11 +31,13 @@ async function run(request: DefaultDashboardWorkerRequest, signal: AbortSignal):
     const analysisCards = prepareAnalysisCards(database, request.throughDate, request.warnings);
     const state = parseDashboardState({ ...template, dateRange: dashboardPeriods(request.throughDate).trend,
       widgets: [...numericCards, ...analysisCards] });
-    await send({ type: "base", state });
+    const deadline = Date.now() + request.config.timeoutMs;
+    await send({ type: "base", state, deadline });
     let completed: Promise<void> | undefined;
-    await analyzeCards(database, state, request.throughDate, request.config, request.runDir, (analyzed) => {
-      completed = send({ type: "analysis", state: analyzed });
-    }, signal);
+    await analyzeCards(database, state, request.throughDate, request.config, request.runDir, (analyzed, quality) => {
+      signal.throwIfAborted();
+      completed = send({ type: "analysis", state: analyzed, quality });
+    }, signal, deadline);
     await completed;
     database.exec("COMMIT");
   } finally {

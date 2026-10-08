@@ -166,3 +166,25 @@ test("dry-run never resolves notification config or starts any update", async (t
   }), /dry-run/u);
   assert.deepEqual(readdirSync(f.directory), []);
 });
+
+
+test("degraded analysis publishes before sending marked daily mail and reports warnings", async (t) => {
+  const f = fixture(t); f.saveRoute();
+  const smtp = await smtpServer(t);
+  const order: string[] = [];
+  const notify = createNotificationDispatcher({ ...f.config.notificationOptions, loadEmail: () => smtp.config }, async (config, input) => {
+    order.push("send");
+    assert.deepEqual(JSON.parse(readFileSync(f.config.defaultDashboardPath, "utf8")), f.state);
+    return sendEmail(config, input);
+  });
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition({ ...f.config, notify }, {
+    async generate() { return { ...f.generated, analysisStatus: "degraded", analysisReason: "季度 MT 剔除 1 条建议",
+      analysisExclusions: [{ period: "quarter", kind: "MT", priority: 3, codes: ["METRIC_CATEGORY_MISMATCH"] }] }; },
+    publish(file, state) { order.push("publish"); writeDefaultDashboard(file, state); },
+  })]);
+  const result = await runDailyUpdate(f.config, plan, registry, f.logger, database);
+  assert.deepEqual(order, ["publish", "send"]);
+  assert.equal(result.status, "completed_with_warnings"); assert.equal(outcomeExitCode(result.status), 2);
+  assert.equal(smtp.messages.length, 1);
+  assert.match(decodedBody(smtp.messages[0]!, "text/plain"), /报告降级.*季度 MT 剔除 1 条/u);
+});

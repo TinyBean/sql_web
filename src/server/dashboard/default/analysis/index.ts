@@ -8,7 +8,7 @@ import { readDailyOee, coverageWarnings } from "../data.ts";
 import { dashboardPeriods, periodLabel, isPartialPeriod, ANALYSIS_PERIOD_KEYS, PERIOD_GRAINS } from "../periods.ts";
 import { createAnalysisTemplate } from "../template.ts";
 import { AnalysisEvidence } from "./evidence.ts";
-import { applyAnalysisReport } from "./report.ts";
+import { applyAnalysisReport, type AnalysisPublication } from "./report.ts";
 
 export function prepareAnalysisCards(
   database: DatabaseSync, throughDate: string, syncWarnings: readonly string[] = [],
@@ -37,8 +37,8 @@ export function prepareAnalysisCards(
 /** The caller keeps the numeric cards' read transaction open until analysis completes. */
 export async function analyzeCards(
   database: DatabaseSync, state: DashboardState, throughDate: string,
-  config: DefaultDashboardAnalysisConfig, runDir: string, onResult: (state: DashboardState) => void,
-  signal?: AbortSignal,
+  config: DefaultDashboardAnalysisConfig, runDir: string, onResult: (state: DashboardState, quality: AnalysisPublication) => void,
+  signal?: AbortSignal, deadline = Date.now() + config.timeoutMs,
 ): Promise<void> {
   const log = (name: string, event: unknown): void => {
     appendFileSync(path.join(runDir, name + ".jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event as object }) + "\n", { mode: 0o600 });
@@ -51,6 +51,10 @@ export async function analyzeCards(
   const { runAnalysisAgent } = await import("./agent.ts");
   await runAnalysisAgent(config, context, evidence, (event) => log("events", event), (result) => {
     writeFileSync(path.join(runDir, "report.json"), JSON.stringify(result.report, null, 2), { mode: 0o600 });
-    onResult(applyAnalysisReport(state, result));
-  }, signal);
+    const quality: AnalysisPublication = { status: result.status, exclusions: result.exclusions.map((entry) => ({
+      period: entry.period, kind: entry.kind, priority: entry.priority, codes: [...new Set(entry.issues.map((issue) => issue.code))],
+    })) };
+    writeFileSync(path.join(runDir, "report-quality.json"), JSON.stringify(quality, null, 2), { mode: 0o600 });
+    onResult(applyAnalysisReport(state, result), quality);
+  }, signal, deadline);
 }

@@ -53,9 +53,9 @@ const now = new Date(); // Identical dashboard timestamps avoid irrelevant basel
 for (let pair = 1; pair <= pairs; pair += 1) {
   for (const variant of pair % 2 ? ["baseline", "candidate"] : ["candidate", "baseline"]) {
     const root = variant === "baseline" ? baselineRoot : candidateRoot;
-    const generate = variant === "baseline"
-      ? (await import(pathToFileURL(path.join(root, "src/server/dashboard/default/analysis/run.ts")).href)).generateAnalyzedDashboard as typeof generateDefaultDashboard
-      : (await import(pathToFileURL(path.join(root, "src/server/dashboard/default/run.ts")).href)).generateDefaultDashboard as typeof generateDefaultDashboard;
+    const currentEntry = path.join(root, "src/server/dashboard/default/run.ts");
+    const module = await import(pathToFileURL(existsSync(currentEntry) ? currentEntry : path.join(root, "src/server/dashboard/default/analysis/run.ts")).href);
+    const generate = (module.generateDefaultDashboard ?? module.generateAnalyzedDashboard) as typeof generateDefaultDashboard;
     const runId = variant + "-" + pair;
     console.log(JSON.stringify({ event: "benchmark.started", runId, at: new Date().toISOString() }));
     const result = await generate({ databasePath, analysis: {
@@ -80,12 +80,16 @@ const median = (values: number[]) => {
 const stats = (variant: string) => {
   const runs = results.filter((result) => result.variant === variant);
   const successful = runs.filter((result) => result.status === "completed");
-  return { successful: successful.length, total: runs.length,
+  return { successful: successful.length, degraded: runs.filter((result) => result.status === "degraded").length,
+    failed: runs.filter((result) => result.status === "failed").length, timedOut: runs.filter((result) => result.status === "timed_out").length,
+    completeSuccessRate: successful.length / runs.length, degradationRate: runs.filter((result) => result.status === "degraded").length / runs.length, total: runs.length,
     medianMs: median(successful.map((result) => result.metrics.durationMs)),
     medianOutputTokens: median(successful.map((result) => result.metrics.outputTokens)),
+    repairMs: runs.map((result) => result.metrics.validation.repairMs),
+    outputTokens: runs.map((result) => result.metrics.outputTokens),
     pythonCalls: runs.map((result) => result.metrics.tools["code_interpreter"]?.calls ?? 0),
     submissionErrors: runs.map((result) => (result.metrics.tools["submit_analysis"]?.errors ?? 0) +
-      (result.metrics.tools["finalize_analysis"]?.errors ?? 0)) };
+      (result.metrics.tools["finalize_analysis"]?.errors ?? 0) + (result.metrics.tools["repair_analysis_group"]?.errors ?? 0)) };
 };
 const baseline = stats("baseline"), candidate = stats("candidate");
 const reduction = baseline.successful >= 2 && baseline.medianMs && candidate.medianMs ? 1 - candidate.medianMs / baseline.medianMs : null;

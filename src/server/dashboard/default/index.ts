@@ -49,11 +49,13 @@ export function createDefaultDashboardDefinition(
         let notification: NotificationResult | undefined;
         if (notify) {
           notification = skippedNotification("每日分析未成功完成");
-          if (details.analysisStatus === "completed") {
+          if (["completed", "degraded"].includes(details.analysisStatus)) {
             try {
               notification = await notify({
                 messageType: DAILY_IMPROVEMENT_NOTIFICATION,
-                buildEmail: () => createDailyImprovementEmail(state, context.throughDate),
+                buildEmail: () => createDailyImprovementEmail(state, context.throughDate, {
+                  status: details.analysisStatus === "degraded" ? "degraded" : "completed", exclusions: details.analysisExclusions ?? [],
+                }),
               }, context);
             } catch {
               // A notification failure must never turn a successful publication into published:false.

@@ -49,3 +49,18 @@ test("missing and unavailable daily cards cannot become a notification", () => {
     assert.throws(() => createDailyImprovementEmail({ ...state, widgets }, "2026-09-14"), /不可用/u);
   }
 });
+
+
+test("degraded email marks quality and affected periods while retaining only daily rows", () => {
+  const state = dailyDashboard();
+  const email = createDailyImprovementEmail(state, "2026-09-14", { status: "degraded", exclusions: [
+    { period: "quarter", kind: "MT", priority: 3, codes: ["METRIC_CATEGORY_MISMATCH"] },
+  ] });
+  assert.match(email.subject, /报告降级/u);
+  for (const body of [email.text, email.html!]) {
+    assert.match(body, /季度 MT 剔除 1 条/u);
+    assert.match(body, /仅展示已通过证据校验的日建议/u);
+    assert.match(body, /换线时间偏长/u);
+    assert.doesNotMatch(body, /METRIC_CATEGORY_MISMATCH|q35/u);
+  }
+});

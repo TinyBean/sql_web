@@ -1,6 +1,7 @@
 import type { DashboardState } from "../../../shared/dashboard.ts";
 import type { NotificationEmail } from "../../notifications.ts";
 import { dashboardPeriods } from "./periods.ts";
+import { analysisExclusionSummary, type AnalysisPublication } from "./analysis/report.ts";
 import { createAnalysisTemplate } from "./template.ts";
 
 export const DAILY_IMPROVEMENT_NOTIFICATION = "daily-improvement";
@@ -10,7 +11,7 @@ function escapeHtml(value: string): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;").replaceAll("\n", "<br>");
 }
 
-export function createDailyImprovementEmail(state: DashboardState, throughDate: string): NotificationEmail {
+export function createDailyImprovementEmail(state: DashboardState, throughDate: string, quality?: AnalysisPublication): NotificationEmail {
   const template = createAnalysisTemplate("day");
   const card = state.widgets.find((widget) => widget.id === template.id);
   if (!card || card.kind !== "table" || card.warnings.some((warning) => warning.startsWith("本次分析暂不可用"))) {
@@ -22,6 +23,7 @@ export function createDailyImprovementEmail(state: DashboardState, throughDate: 
     "统计业务日：" + period.end,
     "截止业务日：" + throughDate, card.subtitle,
   ];
+  if (quality?.status === "degraded") description.push(analysisExclusionSummary(quality.exclusions), "仅展示已通过证据校验的日建议。其他周期的建议请查看看板。 ");
   const columns = template.encoding.columns;
   const headers = columns.map((column) => column.label);
   const rows = card.data.map((row) => columns.map(({ key }) => {
@@ -32,7 +34,7 @@ export function createDailyImprovementEmail(state: DashboardState, throughDate: 
   const emptyMessage = "本期未生成改善建议，原因见下方提示。";
   const notes = ["统计口径：" + card.metricDefinition, ...card.warnings.map((warning) => "提示：" + warning)];
   return {
-    subject: title + " · 截止 " + throughDate,
+    subject: (quality?.status === "degraded" ? "【报告降级】" : "") + title + " · 截止 " + throughDate,
     text: [title, ...description, "", headers.join("\t"),
       ...(rows.length ? rows.map((row) => row.join("\t")) : [emptyMessage]), "", ...notes].join("\n"),
     html: "<h2>" + escapeHtml(title) + "</h2>" + description.map((line) => "<p>" + escapeHtml(line) + "</p>").join("") +

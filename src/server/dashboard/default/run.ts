@@ -6,13 +6,14 @@ import type { AppLogger } from "../../logger.ts";
 import { parseDashboardState, type DashboardState } from "../../../shared/dashboard.ts";
 import type { DefaultDashboardGenerationConfig } from "./config.ts";
 import type { DefaultDashboardWorkerRequest } from "./worker.ts";
-import { analysisUnavailable } from "./analysis/report.ts";
+import { analysisUnavailable, analysisExclusionSummary, type AnalysisPublication, type AnalysisExclusionSummary } from "./analysis/report.ts";
 import { readAnalysisEvents, summarizeAnalysisEvents } from "./analysis/metrics.ts";
 
 export interface DefaultDashboardResult {
   readonly state: DashboardState;
-  readonly analysisStatus: "completed" | "failed" | "timed_out";
+  readonly analysisStatus: "completed" | "degraded" | "failed" | "timed_out";
   readonly analysisReason: string | null;
+  readonly analysisExclusions?: readonly AnalysisExclusionSummary[];
   readonly analysisRunId: string;
   readonly analysisArtifactDir: string;
 }
@@ -34,8 +35,9 @@ export async function generateDefaultDashboard(
     provider: config.analysis.provider, model: config.analysis.model,
     timeoutMs: config.analysis.timeoutMs,
   };
+  let quality: AnalysisPublication = { status: "completed", exclusions: [] };
   const saveOutcome = (status: string, reason: string | null): void => writeFileSync(
-    path.join(runDir, "run.json"), JSON.stringify({ ...metadata, status, reason, durationMs: Date.now() - started }, null, 2), { mode: 0o600 },
+    path.join(runDir, "run.json"), JSON.stringify({ ...metadata, status, reason, analysisExclusions: quality.exclusions, durationMs: Date.now() - started }, null, 2), { mode: 0o600 },
   );
   saveOutcome("running", null);
   logger.info("daily.analysis.started", { ...metadata, runDir });
@@ -75,9 +77,15 @@ export async function generateDefaultDashboard(
           baseReadyAt = Date.now();
           writeFileSync(path.join(runDir, "base-dashboard.json"), JSON.stringify(base), { mode: 0o600 });
           clearTimeout(timer);
-          timer = setTimeout(timeout, config.analysis.timeoutMs);
+          const deadline = "deadline" in message && typeof message.deadline === "number" ? message.deadline : Date.now() + config.analysis.timeoutMs;
+          timer = setTimeout(timeout, Math.max(0, deadline - Date.now()));
           logger.info("daily.analysis.base_ready", { runId, throughDate });
         } else if (message.type === "analysis" && "state" in message && base) {
+          if ("quality" in message) {
+            const supplied = message.quality as AnalysisPublication;
+            if (!supplied || !["completed", "degraded"].includes(supplied.status) || !Array.isArray(supplied.exclusions)) throw new Error("无效的分析质量状态");
+            quality = supplied;
+          }
           analyzed = parseDashboardState(message.state);
           clearTimeout(timer);
           // Give SDK cleanup a brief chance; do not leave a finished worker alive.
@@ -106,13 +114,13 @@ export async function generateDefaultDashboard(
           reject(new Error(reason));
           return;
         }
-        const analysisStatus = analyzed ? "completed" : timedOut ? "timed_out" : "failed";
-        const analysisReason = analyzed ? null : failure ?? "分析子进程未提交有效报告 (" + (signal ?? code) + ")";
+        const analysisStatus = analyzed ? quality.status : timedOut ? "timed_out" : "failed";
+        const analysisReason = analyzed ? (quality.status === "degraded" ? analysisExclusionSummary(quality.exclusions) : null) : failure ?? "分析子进程未提交有效报告 (" + (signal ?? code) + ")";
         saveOutcome(analysisStatus, analysisReason);
         logger.info("daily.analysis.completed", { runId, analysisStatus, analysisReason, durationMs: Date.now() - started, runDir });
         resolve({
           state: analyzed ?? analysisUnavailable(base, analysisReason!),
-          analysisStatus, analysisReason, analysisRunId: runId, analysisArtifactDir: runDir,
+          analysisStatus, analysisReason, analysisExclusions: quality.exclusions, analysisRunId: runId, analysisArtifactDir: runDir,
         });
       } catch (error) { reject(error); }
     });

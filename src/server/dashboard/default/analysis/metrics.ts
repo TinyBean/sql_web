@@ -40,7 +40,7 @@ function summarizeAgentEvents(events: readonly Event[], startedAt: number, ended
       const parts = Array.isArray(message["content"]) ? message["content"].map(object) : [];
       const names = parts.filter((part) => part["type"] === "toolCall").map((part) => part["name"]);
       // Older workers labelled draft submissions as investigation; keep their original metrics.
-      const legacyPhase = names.includes("finalize_analysis") ? "review" : names.includes("submit_analysis")
+      const legacyPhase = names.includes("finalize_analysis") ? "review" : (names.includes("submit_analysis") || names.includes("repair_analysis_group"))
         ? (draft ? "review" : "draft") : draft ? "review_investigation" : "investigation";
       const phase = event["phase"] === "aggregation" || event["phase"] === "submission" ? event["phase"] : legacyPhase;
       if (Number(usage["output"] ?? 0) || Number(usage["input"] ?? 0) || parts.length || message["stopReason"] === "error") {
@@ -112,8 +112,24 @@ export function summarizeAnalysisEvents(events: readonly Event[], startedAt: num
     }
     for (const [phase, ms] of Object.entries(entry.phaseMs)) phaseMs[phase] = (phaseMs[phase] ?? 0) + ms;
   }
+  const validationEvents = events.filter((event) => event["type"] === "analysis_validation_failed");
+  // Baseline workers recorded rejections only as tool errors; include their repair window too.
+  const submissionFailures = events.filter((event) => event["type"] === "tool_result" && event["isError"] &&
+    (event["agentId"] === undefined || event["agentId"] === "root") &&
+    ["submit_analysis", "repair_analysis_group", "finalize_analysis"].includes(String(event["name"])));
+  const acceptedEvent = events.findLast((event) => event["type"] === "analysis_accepted");
+  const firstFailureAt = timestamp((validationEvents[0] ?? submissionFailures[0])?.["at"]);
+  const validationCodes: Record<string, number> = {};
+  for (const event of validationEvents) for (const issue of Array.isArray(event["issues"]) ? event["issues"].map(object) : []) {
+    const code = String(issue["code"]); validationCodes[code] = (validationCodes[code] ?? 0) + 1;
+  }
   return {
     ...root, schemaVersion: 2,
+    validation: { failures: validationEvents.length || submissionFailures.length, codes: validationCodes,
+      groupRepairs: events.filter((event) => event["type"] === "analysis_group_repair").length,
+      repairMs: Number.isFinite(firstFailureAt) ? Math.max(0, (timestamp(acceptedEvent?.["at"]) || endedAt) - firstFailureAt) : 0,
+      degraded: acceptedEvent?.["status"] === "degraded",
+      exclusions: Array.isArray(acceptedEvent?.["exclusions"]) ? acceptedEvent["exclusions"].length : 0 },
     timingDefinition: "durationMs is wall time; modelObservedMs and toolMs sum per-agent client-observed intervals and may overlap. toolMs excludes subagent orchestration waits (delegationMs).",
     inputTokens: sum("inputTokens"), outputTokens: sum("outputTokens"), modelObservedMs: sum("modelObservedMs"),
     retryCount: sum("retryCount"), compactionCount: sum("compactionCount"),

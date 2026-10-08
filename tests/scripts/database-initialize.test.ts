@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -62,7 +63,7 @@ test("initializes the OEE schema idempotently and preserves existing data", (t) 
   assert.deepEqual(dutColumns.filter((column) => column["pk"] === 1).map((column) => column["name"]), ["id"]);
 });
 
-test("upgrades v2 without changing facts or historical audit and distrusts legacy DUT completeness", (t) => {
+test("upgrades v2 without changing facts or historical audit and distrusts legacy DUT completeness", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "oee-v2-migration-"));
   const databasePath = path.join(directory, "oee.sqlite");
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -91,9 +92,25 @@ test("upgrades v2 without changing facts or historical audit and distrusts legac
   assert.deepEqual(reader.prepare("SELECT status,coverage_version,committed_dates_json FROM oee_import_windows ORDER BY sequence")
     .all().map((row) => ({ ...row })), [0, 1].map(() => ({ status: "completed", coverage_version: 0, committed_dates_json: "[]" })));
   reader.close();
-  const store = OeeDataStore.open({ databasePath });
-  assert.equal(store.getStatus()[0]?.tracking.completedThroughDate, "2026-01-01");
-  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, null);
-  assert.deepEqual(store.getStatus()[1]?.tracking.unresolvedRanges, [{ startDate: "2026-01-01", endDate: "2026-01-01" }]);
-  store.close();
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url!);
+    response.writeHead(503);
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const store = OeeDataStore.open({ databasePath, apiBaseUrl: `http://127.0.0.1:${address.port}/`, fetchRetries: 0 });
+  try {
+    assert.deepEqual((await store.importNewDay({ dataset: "availability", date: "2026-01-01" })).datasets[0]?.plannedWindows, []);
+    const dut = await store.importNewDay({ dataset: "dut_utilization", date: "2026-01-01" });
+    assert.equal(dut.status, "failed");
+    assert.deepEqual(dut.datasets[0]?.plannedWindows, [{ startDate: "2026-01-01", endDate: "2026-01-01" }]);
+    assert.equal(requests.length, 1);
+    assert.match(requests[0]!, /DUT_UTILIZATION/u);
+  } finally {
+    store.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

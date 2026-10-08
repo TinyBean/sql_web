@@ -114,16 +114,16 @@ const productionDashboard: DashboardDefinition = {
 手动执行与定时任务使用同一入口：
 
 ```bash
-npm run data:daily -- --dry-run
-npm run data:daily
-npm run data:daily -- --through-date 2026-09-14
+npm run daily:update -- --dry-run
+npm run daily:update
+npm run daily:update -- --through-date 2026-09-14
 ```
 
 业务日为上海时间当天 08:30 至次日 08:30。任务在 08:30 后默认同步到昨天，之前同步到前天；显式截止日期也必须是已结束的业务日。`--dry-run` 仅显示数据库路径、同步请求和已注册看板的 `dashboardId`、`hasUpdate`（是否配置更新入口），不预测看板是否跳过，不访问 API，也不创建日志、锁或数据库文件。
 
 任务按 Availability、DUT 的顺序串行导入，仅处理本次截止业务日 D，不刷新已提交日期、不扫描或补齐历史缺日。每个数据集独立判断：D 日已有可信成功提交记录时跳过接口请求和事实写入，仍继续后续分析；带警告的窗口中实际已提交的 D 日也会跳过，旧 DUT 审计的 completed 标记不能单独证明成功提交。Availability 仅请求 D 日；DUT 请求 D 至 D+2，并只写入 DATE=D 的记录，相邻日期只计入边界审计。例如 10 月 9 日 09:00 仅导入 10 月 8 日，DUT 请求 10 月 8 至 10 日。两张事实表原始日期保持不变，已有历史数据继续用于看板各周期的计算。
 
-目标日未成功提交时，同日重跑可再次尝试；下一天的每日任务只处理新的目标日，不自动重试前一天或停跑期间的遗漏日期。历史补数继续使用 `data:sync`、`data:pull` 或 `data:reimport`；显式 `--through-date` 只选择该业务日，已成功提交则跳过。`--dry-run` 的 `requests` 仅列出各数据集及目标 `date`，不查询提交状态，也不执行导入或分析。
+目标日未成功提交时，同日重跑可再次尝试；下一天的每日任务只处理新的目标日，不自动重试前一天或停跑期间的遗漏日期。历史补数使用 `data:sync`；显式 `--through-date` 只选择该业务日，已成功提交则跳过。`--dry-run` 的 `requests` 仅列出各数据集及目标 `date`，不查询提交状态，也不执行导入或分析。
 
 数据库同步范围独立于看板配置，即使没有注册更新策略也照常同步。同步完成并关闭写入连接后，按注册顺序串行执行各看板策略。默认看板每次都更新，在同一个只读 SQLite 事务中重算 12 张卡片。业务周为周日至周六，周编号采用 `%U`，每年首个周日之前为 W00；例如 2026-W36 为 09-06 至 09-12。趋势每年从 1 月 1 日重新开始；最高/最低点排除 NULL，按未舍入值比较，并列取最早期间。改善清单分别对应最近完整周、截止业务日所在月累计和季度累计；最近完整周截至不晚于截止业务日的最近周六，向前覆盖七天。由临时 Agent 结合年内最低点与历史覆盖自主查询、判断并排序，不限制损失类别。顶层日期范围是年内趋势范围；部分周期、缺日和最新业务日未就绪会显示提示。已保存的历史会话和快照保留原日期与口径，新生成的周指标使用新定义。
 
@@ -211,7 +211,7 @@ OEE API 默认地址：
 - `R_OEE_MT_TOP_AVAILABILITY_2W`
 - `R_OEE_MT_TOP_DUT_UTILIZATION_2W`
 
-参数使用 `pSTARTDAY=YYYYMMDD&pENDDAY=YYYYMMDD`，单次 API 请求的日期标签跨度最多 3 天。所有数据命令位置日期参数均使用业务日期（不再对 DUT 手动加一天）；文件导入的 `--request-start` / `--request-end` 专门记录原始 API 参数。Availability 按最多 3 个业务日拆分；DUT 每个业务日 D 请求 D 至 D+2，窗口相互重叠。如果 API 要求 HTTP Basic 鉴权，在 `.env` 中同时配置 `API_USER` 和 `API_PWD`；鉴权信息只会通过请求头发送，不会写入 URL 或日志。
+参数使用 `pSTARTDAY=YYYYMMDD&pENDDAY=YYYYMMDD`，单次 API 请求的日期标签跨度最多 3 天。所有数据命令位置日期参数均使用业务日期（不再对 DUT 手动加一天）。Availability 按最多 3 个业务日拆分；DUT 每个业务日 D 请求 D 至 D+2，窗口相互重叠。如果 API 要求 HTTP Basic 鉴权，在 `.env` 中同时配置 `API_USER` 和 `API_PWD`；鉴权信息只会通过请求头发送，不会写入 URL 或日志。
 
 DUT 的窗口首尾日期可能只返回部分记录，不能用固定日期偏移推断完整业务日。DATE 已是业务日标签，原样保存；只提交被完整请求范围覆盖的目标业务日期，外围日期、无日期和越界记录计入审计，不追加到事实表。
 
@@ -247,76 +247,25 @@ FROM oee_availability;
 npm run data:init
 ```
 
-其余数据命令只打开已经初始化的数据库；数据库不存在或未初始化时会直接失败。
+数据命令只保留 `data:init` 和 `data:sync`，每日导入、看板更新和邮件发送使用独立命令 `daily:update`。
 
-导入已经下载的 JSON：
-
-```bash
-npm run data:import -- availability .data/availability.json 2026-08-20 2026-08-30
-npm run data:import -- dut_utilization .data/dut.json 2026-08-20 2026-08-20 --request-start 2026-08-20 --request-end 2026-08-22
-```
-
-DUT 文件必须提供真实原始请求范围，跨度最多三个日期，且该范围覆盖目标日 D 至 D+2；缺少范围、范围过长或覆盖不足时拒绝整日替换。
-
-直接拉取并导入一个窗口（DUT 只接受一个业务日，多日使用 `data:reimport`）：
+同步用法为 `npm run data:sync -- <dataset|all> <through-date> [initial-start-date]`。数据集可选 `availability`、`dut_utilization` 或 `all`，日期为 `YYYY-MM-DD` 业务日期：
 
 ```bash
-npm run data:pull -- availability 2026-08-20 2026-08-22
-npm run data:pull -- dut_utilization 2026-08-20 2026-08-20
-```
-
-根据审计状态同步到指定日期。命令会自动补齐失败、中断、未覆盖和新增日期，并刷新最近两天：
-
-```bash
-npm run data:sync -- all 2026-09-02
-```
-
-空数据库首次同步或现有数据库历史回填时，提供明确的起始日期：
-
-```bash
+# 首次导入或历史补数：提供起始日期
 npm run data:sync -- all 2026-09-02 2026-08-20
+# 后续同步：按审计记录确定范围
+npm run data:sync -- all 2026-09-02
+# 单表同步
+npm run data:sync -- availability 2026-09-02
+npm run data:sync -- dut_utilization 2026-09-02
 ```
 
-例如，在保留现有数据的前提下回填 2026 年 1 月 1 日至 9 月 2 日的两个数据集：
+`sync` 只打开已初始化的数据库；数据库不存在或 Schema 需要升级时直接失败，请先执行 `data:init`。空表首次同步必须提供起始日期，已有事实数据缺少审计历史时也可显式提供起始日期建立可信覆盖。
 
-```bash
-npm run data:sync -- all 2026-09-02 2026-01-01
-```
+同步会补齐失败、中断、未覆盖和新增日期，保留已有可信提交日期并刷新最近两天。Availability 按最多三个业务日、DUT 按每个业务日拆分请求，串行执行。警告窗口中未提交的日期会重试，单个窗口失败仍继续处理后续窗口和另一个数据集。
 
-显式提供起始日期时，同步会在该范围内跳过已有可信提交的业务日期，只补缺口并保留最近两天刷新。警告窗口中未提交的日期会自动重试。单个窗口失败不会阻止其他窗口和另一个数据集继续执行；下次运行会自动重试失败或中断范围。
-
-强制重新拉取并原子替换指定日期范围：
-
-```bash
-npm run data:reimport -- availability 2026-08-20 2026-08-30
-npm run data:reimport -- dut_utilization 2026-08-20 2026-08-30
-```
-
-较长范围按 Availability 最多三日、DUT 每个业务日拆分，HTTP 请求串行执行。重导成功会关闭相同业务日期上的旧异常建议，但不会自动清理已有无法按日期归属的 DUT 异常行。
-
-恢复最近一个月（30 个已结束业务日期）的 DUT 历史数据并重算当前看板：
-
-```bash
-npm run data:repair-dut
-# 只备份并在副本核验，不改变生产库：
-npm run data:repair-dut -- --verify-only
-# 指定已结束的业务日期范围：
-npm run data:repair-dut -- --start-date 2026-09-08 --through-date 2026-10-07
-```
-
-恢复命令与每日任务使用同一把 flock 锁。先通过 SQLite 在线备份 API 生成包含已提交 WAL 数据的一致性备份，再建立独立验证副本；原始备份不执行迁移或导入。副本核验范围内的 10 月 5 日及下一日（不在范围时使用起始日），以及截止日，要求目标日通过暂存/事实汇总验收且包含白班、夜班。任一接口失败或覆盖核验失败，都不迁移或重导生产库。通过后才升级生产 Schema、逐日重导指定范围（默认最近 30 日），未就绪日期保留旧数据；硬失败时不重算看板，否则按运行时最近已结束业务日重算当前看板并传递警告，不随历史重导截止日回退。整个恢复流程不注册邮件通知器。
-
-备份、验证副本和包含逐日源文件哈希及班次/关键数量验收结果的 `report.json` 保留在 `.data/backups/dut-repair-*`；正常/警告/硬失败分别退出 0/2/1，锁被占用时退出 75。接口恢复后重跑此命令即可重新核验并继续恢复。首次部署修复时先执行恢复命令，让覆盖核验通过后升级生产 Schema；单独执行 `data:init` 升级不会自动回填历史 DUT 日期，历史补数需显式执行恢复或同步命令。
-
-查看状态：
-
-```bash
-npm run data:status
-```
-
-`data:status` 为每个数据集输出四组 JSON：`facts` 是事实日期范围、行数、缺口和无日期行数；`tracking` 是审计覆盖、连续完成日期、下一起始日期和最新任务；`issues` 是当前有效异常；`recommendations` 给出结构化的 `sync` 或 `reimport` 建议。
-
-生产环境可定期执行 `data:sync`。正常完成返回 0，已提交但存在缺日/越界/无日期异常返回 2，硬失败返回 1，可由 cron、systemd timer 或调度平台分别告警。旧事实数据没有审计历史时会显示 `legacy_untracked`，应使用显式起始日期同步或 `data:reimport` 建立可信覆盖。
+正常完成返回 0，存在缺日、越界或无日期等警告时返回 2，硬失败返回 1，可由 cron、systemd timer 或调度平台分别告警。
 
 数据拉取、重试、导入和同步结果按上海自然日写入 `.data/logs/oee-data-YYYY-MM-DD.log`；网站服务日志写入 `.data/logs/sql_web-YYYY-MM-DD.log`。两类日志的时间戳均使用上海时区（`+08:00`），不会由应用自动删除。
 
@@ -430,7 +379,7 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 
 ## 每日邮件通知与发送群组
 
-每日任务仅在本次默认看板分析成功（`analysisStatus: completed`）且快照发布成功后发送日改善措施表（不再发送周改善措施表）。定时任务和手动 `npm run data:daily` 使用同一流程；每次成功都会发送，包括相同截止业务日的手动重跑，不按天去重。分析失败、超时、同步硬失败或发布失败时不发送；`--dry-run` 不读取通知规则、不发送，也不创建通知产物。
+每日任务仅在本次默认看板分析成功（`analysisStatus: completed`）且快照发布成功后发送日改善措施表（不再发送周改善措施表）。定时任务和手动 `npm run daily:update` 使用同一流程；每次成功都会发送，包括相同截止业务日的手动重跑，不按天去重。分析失败、超时、同步硬失败或发布失败时不发送；`--dry-run` 不读取通知规则、不发送，也不创建通知产物。
 
 收件人配置保存在项目 `.data/notifications.json`，不纳入 Git。新部署可将下方 JSON 示例保存为该文件，并配置上文 SMTP。示例启用 `daily-improvement`，通过群组发送给 `Cheng.Wu@sdsscn.com`。文件不存在、没有对应规则或 `enabled: false` 时正常跳过；不会自动创建配置或发送历史快照。
 

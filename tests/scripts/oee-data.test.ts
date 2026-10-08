@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { OeeDataStore, outcomeExitCode } from "../../scripts/database/oee-data-store.ts";
-import type { AppLogger } from "../../src/server/logger.ts";
+import { OeeDataStore, outcomeExitCode, type OeeDataStoreOptions, type SyncResult } from "../../scripts/database/oee-data-store.ts";
 import { FileLogger } from "../../src/server/logger.ts";
 import { addDays } from "../../src/server/database/business-dates.ts";
 
@@ -107,21 +108,77 @@ function dutResponse(rows: readonly Record<string, unknown>[]): string {
   });
 }
 
-function createStore(
-  directory: string,
-  apiBaseUrl?: string,
-  logger?: AppLogger,
-  apiCredentials?: { readonly apiUsername: string; readonly apiPassword: string },
-): OeeDataStore {
+async function fixture(t: TestContext, overrides: Partial<OeeDataStoreOptions> = {}) {
+  const directory = mkdtempSync(path.join(tmpdir(), "oee-sync-test-"));
   const databasePath = path.join(directory, "oee.sqlite");
   initializeOeeDatabase(databasePath);
-  return OeeDataStore.open({
-    databasePath,
-    ...(apiBaseUrl ? { apiBaseUrl } : {}),
-    ...(logger ? { logger } : {}),
-    ...apiCredentials,
-    requestTimeoutMs: 5_000,
-    fetchRetries: 0,
+  const requests: Array<{ url: URL; authorization: string | undefined }> = [];
+  const reply = {
+    status: 200, body: undefined as string | undefined, render: undefined as ((url: URL) => string) | undefined,
+  };
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    requests.push({ url, authorization: request.headers.authorization });
+    const dates = requestedDateKeys(url);
+    const defaultBody = url.pathname.includes("AVAILABILITY")
+      ? availabilityResponse(dates.map((date) => availabilityRow(date, date)))
+      : dutResponse(dates.flatMap((date) => ["day", "night"].map((shift) => ({
+        ...dutRow(date + shift), "ORPTSIP.DATE": date + "T00:00:00.000Z",
+        "ORPTSIP.SHIFT": shift, "ORPTSIP.LOT_ID": date + shift,
+      }))));
+    response.writeHead(reply.status, { "content-type": "application/json" });
+    response.end(reply.body ?? reply.render?.(url) ?? defaultBody);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const apiBaseUrl = `http://127.0.0.1:${address.port}/`;
+  const logFilePath = path.join(directory, "oee-data.log");
+  const store = OeeDataStore.open({
+    databasePath, apiBaseUrl, logger: new FileLogger(logFilePath),
+    requestTimeoutMs: 5_000, fetchRetries: 0, ...overrides,
+  });
+  const database = new DatabaseSync(databasePath);
+  t.after(async () => {
+    database.close();
+    store.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return {
+    directory, databasePath, apiBaseUrl, logFilePath, store, database, requests, reply,
+    windows() { return requests.map(({ url }) => {
+      const dates = requestedDateKeys(url);
+      return [dates[0]!, dates.at(-1)!];
+    }); },
+  };
+}
+
+function importedWindow(result: SyncResult) {
+  assert.notEqual(result.status, "failed", JSON.stringify(result));
+  const window = result.datasets[0]?.imports[0];
+  assert.ok(window);
+  assert.ok(window.status !== "failed", JSON.stringify(window));
+  return window;
+}
+
+function failedWindow(result: SyncResult) {
+  assert.equal(result.status, "failed");
+  const window = result.datasets[0]?.imports[0];
+  assert.ok(window && window.status === "failed");
+  return window;
+}
+
+const availabilityTarget = {
+  dataset: "availability" as const, initialStartDate: "2026-08-20", throughDate: "2026-08-21",
+};
+const dutTarget = {
+  dataset: "dut_utilization" as const, initialStartDate: "2026-10-05", throughDate: "2026-10-05",
+};
+
+function logEntries(filePath: string) {
+  return readFileSync(filePath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as {
+    event: string; level: string; error?: { message?: string };
   });
 }
 
@@ -135,810 +192,410 @@ test("requires explicit database initialization", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "oee-missing-test-"));
   const databasePath = path.join(directory, "database", "oee.sqlite");
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-
   assert.throws(() => OeeDataStore.open({ databasePath }), /npm run data:init/u);
   assert.equal(existsSync(databasePath), false);
   assert.equal(existsSync(path.dirname(databasePath)), false);
 });
 
-test("preserves every Availability row and syncs from live fact-table coverage", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-import-test-"));
-  const initialPath = path.join(directory, "initial.json");
-  const initialRows = [
-    availabilityRow("2026-08-20", "20"),
-    availabilityRow("2026-08-20", "20"),
-    availabilityRow("2026-08-22", "22"),
-  ];
-  writeFileSync(initialPath, availabilityResponse(initialRows));
+test("first sync requires a start date for empty datasets and then imports both tables", async (t) => {
+  const f = await fixture(t);
+  const empty = await f.store.sync({ dataset: "all", throughDate: "2026-08-21" });
+  assert.equal(empty.status, "failed");
+  assert.ok(empty.datasets.every((result) => /首次同步必须提供/u.test(result.planningError?.message ?? "")));
+  assert.equal(f.requests.length, 0);
+  const result = await f.store.sync({ ...availabilityTarget, dataset: "all" });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.datasets.map(({ dataset }) => dataset), ["availability", "dut_utilization"]);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_availability").get()?.["n"], 2);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 4);
+  assert.deepEqual(f.windows(), [
+    ["2026-08-20", "2026-08-21"], ["2026-08-20", "2026-08-22"], ["2026-08-21", "2026-08-23"],
+  ]);
+});
 
-  const requestedUrls: URL[] = [];
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    requestedUrls.push(url);
-    const rows = requestedDateKeys(url).map((date) => availabilityRow(date, date.slice(-2)));
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(availabilityResponse(rows));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const logFilePath = path.join(directory, "logs", "oee-data.log");
-  const logger = new FileLogger(logFilePath);
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`, logger);
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  const first = await store.importFile({
-    dataset: "availability",
-    filePath: initialPath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-22",
-  });
+test("preserves every Availability row and fills gaps while refreshing recent dates", async (t) => {
+  const f = await fixture(t);
+  f.reply.body = availabilityResponse([
+    availabilityRow("2026-08-20", "20"), availabilityRow("2026-08-20", "20"), availabilityRow("2026-08-22", "22"),
+  ]);
+  const first = importedWindow(await f.store.sync({ ...availabilityTarget, throughDate: "2026-08-22" }));
   assert.equal(first.rowsReceived, 3);
   assert.equal(first.rowsInserted, 3);
-
-  const synced = await store.sync({
-    dataset: "availability",
-    throughDate: "2026-08-24",
-  });
-  assert.deepEqual(synced.datasets[0]?.plannedWindows, [
-    { startDate: "2026-08-21", endDate: "2026-08-23" },
-    { startDate: "2026-08-24", endDate: "2026-08-24" },
+  f.reply.body = undefined;
+  const result = await f.store.sync({ dataset: "availability", throughDate: "2026-08-24" });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.datasets[0]?.plannedWindows, [
+    { startDate: "2026-08-21", endDate: "2026-08-23" }, { startDate: "2026-08-24", endDate: "2026-08-24" },
   ]);
-  assert.equal(requestedUrls.length, 2);
-  assert.equal(requestedUrls[0]?.searchParams.get("pSTARTDAY"), "20260821");
-  assert.equal(requestedUrls[0]?.searchParams.get("pENDDAY"), "20260823");
-  assert.equal(requestedUrls[1]?.searchParams.get("pSTARTDAY"), "20260824");
-  assert.equal(requestedUrls[1]?.searchParams.get("pENDDAY"), "20260824");
-  const status = store.getStatus()[0];
-  assert.equal(status?.facts.rowCount, 6);
-  assert.equal(status?.facts.minDataDate, "2026-08-20");
-  assert.equal(status?.facts.maxDataDate, "2026-08-24");
-
-  const logEntries = readFileSync(logFilePath, "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as { event: string });
-  assert.ok(logEntries.some((entry) => entry.event === "oee.run.started"));
-  assert.ok(logEntries.some((entry) => entry.event === "oee.window.started"));
-  assert.ok(logEntries.some((entry) => entry.event === "oee.window.completed"));
-  assert.equal(logEntries.at(-1)?.event, "oee.sync.completed");
+  assert.deepEqual(f.windows(), [
+    ["2026-08-20", "2026-08-22"], ["2026-08-21", "2026-08-23"], ["2026-08-24", "2026-08-24"],
+  ]);
+  assert.deepEqual({ ...f.database.prepare("SELECT COUNT(*) n, MIN(substr(date,1,10)) first, MAX(substr(date,1,10)) last FROM oee_availability").get() },
+    { n: 6, first: "2026-08-20", last: "2026-08-24" });
+  const events = logEntries(f.logFilePath).map(({ event }) => event);
+  assert.ok(events.includes("oee.run.started"));
+  assert.ok(events.includes("oee.window.started"));
+  assert.ok(events.includes("oee.window.completed"));
+  assert.equal(events.at(-1), "oee.sync.completed");
 });
 
 test("assigns separate auto-increment IDs to completely identical API rows", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-duplicate-conflict-test-"));
-  const sourcePath = path.join(directory, "conflict.json");
-  writeFileSync(sourcePath, availabilityResponse([
-    availabilityRow("2026-08-20", "conflict", 60),
-    availabilityRow("2026-08-20", "conflict", 60),
-  ]));
-  const store = createStore(directory);
-  let reader: DatabaseSync | undefined;
-  t.after(() => {
-    reader?.close();
-    store.close();
-    rmSync(directory, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 50,
-    });
-  });
-
-  const result = await store.importFile({
-    dataset: "availability",
-    filePath: sourcePath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-20",
-  });
+  const f = await fixture(t);
+  f.reply.body = availabilityResponse([
+    availabilityRow("2026-08-20", "conflict"), availabilityRow("2026-08-20", "conflict"),
+  ]);
+  const result = importedWindow(await f.store.sync({ ...availabilityTarget, throughDate: "2026-08-20" }));
   assert.equal(result.rowsReceived, 2);
   assert.equal(result.rowsInserted, 2);
-
-  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  assert.deepEqual(
-    reader.prepare("SELECT id, time_span FROM oee_availability ORDER BY id").all()
-      .map((row) => ({ ...row })),
-    [{ id: 1, time_span: 60 }, { id: 2, time_span: 60 }],
-  );
+  assert.deepEqual(f.database.prepare("SELECT id, time_span FROM oee_availability ORDER BY id").all().map((row) => ({ ...row })),
+    [{ id: 1, time_span: 60 }, { id: 2, time_span: 60 }]);
 });
 
 test("atomically replaces returned dates while preserving duplicate rows within one response", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-replace-test-"));
-  const sourcePath = path.join(directory, "replace.json");
-  const store = createStore(directory);
-  let reader: DatabaseSync | undefined;
-  t.after(() => {
-    reader?.close();
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  writeFileSync(sourcePath, availabilityResponse([
-    availabilityRow("2026-08-20", "first", 60),
-    availabilityRow("2026-08-20", "first", 60),
-  ]));
-  const first = await store.importFile({
-    dataset: "availability",
-    filePath: sourcePath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-20",
-  });
-  assert.equal(first.status, "completed");
-  assert.equal(first.rowsDeleted, 0);
-
-  writeFileSync(sourcePath, availabilityResponse([
-    availabilityRow("2026-08-20", "replacement", 120),
-  ]));
-  const second = await store.importFile({
-    dataset: "availability",
-    filePath: sourcePath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-20",
-  });
-  assert.equal(second.rowsDeleted, 2);
-  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  assert.deepEqual(
-    reader.prepare("SELECT tool_name, time_span FROM oee_availability").all().map((row) => ({ ...row })),
-    [{ tool_name: "TOOL-replacement", time_span: 120 }],
-  );
-  assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM oee_import_runs").get()?.["count"], 2);
+  const f = await fixture(t);
+  const target = { ...availabilityTarget, throughDate: "2026-08-20" };
+  f.reply.body = availabilityResponse([availabilityRow("2026-08-20", "first"), availabilityRow("2026-08-20", "first")]);
+  assert.equal(importedWindow(await f.store.sync(target)).rowsDeleted, 0);
+  f.reply.body = availabilityResponse([availabilityRow("2026-08-20", "replacement", 120)]);
+  assert.equal(importedWindow(await f.store.sync(target)).rowsDeleted, 2);
+  assert.deepEqual(f.database.prepare("SELECT tool_name, time_span FROM oee_availability").all().map((row) => ({ ...row })),
+    [{ tool_name: "TOOL-replacement", time_span: 120 }]);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_import_runs").get()?.["n"], 2);
 });
 
-test("preserves old rows for missing response dates and recommends a reimport", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-missing-day-test-"));
-  const sourcePath = path.join(directory, "missing.json");
-  const store = createStore(directory);
-  let reader: DatabaseSync | undefined;
-  t.after(() => {
-    reader?.close();
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  writeFileSync(sourcePath, availabilityResponse([
-    availabilityRow("2026-08-20", "old-20", 20),
-    availabilityRow("2026-08-21", "old-21", 21),
-  ]));
-  await store.importFile({
-    dataset: "availability",
-    filePath: sourcePath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-21",
-  });
-  writeFileSync(sourcePath, availabilityResponse([
-    availabilityRow("2026-08-20", "new-20", 120),
-  ]));
-  const result = await store.importFile({
-    dataset: "availability",
-    filePath: sourcePath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-21",
-  });
+test("preserves old rows for missing response dates and records missing dates in audit", async (t) => {
+  const f = await fixture(t);
+  await f.store.sync(availabilityTarget);
+  f.reply.body = availabilityResponse([availabilityRow("2026-08-20", "new-20", 120)]);
+  const result = importedWindow(await f.store.sync(availabilityTarget));
   assert.equal(result.status, "completed_with_warnings");
   assert.deepEqual(result.missingDates, ["2026-08-21"]);
-
-  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  assert.deepEqual(
-    reader.prepare("SELECT tool_name, time_span FROM oee_availability ORDER BY date").all()
-      .map((row) => ({ ...row })),
-    [
-      { tool_name: "TOOL-new-20", time_span: 120 },
-      { tool_name: "TOOL-old-21", time_span: 21 },
-    ],
-  );
-  const status = store.getStatus()[0];
-  assert.deepEqual(status?.issues[0]?.missingDates, ["2026-08-21"]);
-  assert.equal(status?.recommendations.some((item) => item.action === "reimport"), true);
-  assert.equal(status?.tracking.completedThroughDate, "2026-08-20");
-  assert.deepEqual(status?.tracking.unresolvedRanges, [{ startDate: "2026-08-21", endDate: "2026-08-21" }]);
+  assert.deepEqual(f.database.prepare("SELECT tool_name, time_span FROM oee_availability ORDER BY date").all().map((row) => ({ ...row })),
+    [{ tool_name: "TOOL-new-20", time_span: 120 }, { tool_name: "TOOL-2026-08-21", time_span: 60 }]);
+  assert.deepEqual({ ...f.database.prepare("SELECT status, missing_dates_json, committed_dates_json FROM oee_import_windows WHERE id=?").get(result.windowId) },
+    { status: "completed_with_warnings", missing_dates_json: '["2026-08-21"]', committed_dates_json: '["2026-08-20"]' });
 });
 
 async function dutApiFixture(t: TestContext, firstDate: string, lastDate: string) {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-business-window-"));
+  const f = await fixture(t);
   const rows: Record<string, unknown>[] = [];
   for (let date = addDays(firstDate, -1); date <= addDays(lastDate, 1); date = addDays(date, 1)) {
-    for (const [shift, end] of [["day", date + "T12:00:00.000Z"],
-      ["night", addDays(date, 1) + "T04:00:00.000Z"]]) {
+    for (const [shift, end] of [["day", date + "T12:00:00.000Z"], ["night", addDays(date, 1) + "T04:00:00.000Z"]]) {
       const row = { ...dutRow(date + shift), "ORPTSIP.DATE": date + "T00:00:00.000Z",
         "ORPTSIP.SHIFT": shift, "ORPTSIP.END_TIME": end, "ORPTSIP.LOT_ID": date + shift };
       rows.push(row);
-      if (shift === "day") rows.push(row); // Identical source rows remain distinct facts.
+      if (shift === "day") rows.push(row);
     }
   }
-  const requests: string[][] = [];
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  f.reply.render = (url) => {
     const dates = requestedDateKeys(url);
-    requests.push([dates[0]!, dates.at(-1)!]);
     const received = rows.filter((row) => String(row["ORPTSIP.END_TIME"]) >= dates[0]! + "T00:00:00.000Z" &&
       String(row["ORPTSIP.END_TIME"]) < dates.at(-1)! + "T00:00:00.000Z");
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(dutResponse(received));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
-  const reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  t.after(async () => {
-    reader.close(); store.close();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    rmSync(directory, { recursive: true, force: true });
-  });
-  return { directory, store, reader, requests };
+    return dutResponse(received);
+  };
+  return f;
 }
 
 test("DUT manual sync overlap and same-day reruns keep both shifts and ignore partial boundary days", async (t) => {
-  const { store, reader, requests } = await dutApiFixture(t, "2026-10-05", "2026-10-06");
-  const first = await store.pullWindow({ dataset: "dut_utilization", startDate: "2026-10-05", endDate: "2026-10-05" });
+  const f = await dutApiFixture(t, "2026-10-05", "2026-10-06");
+  const first = importedWindow(await f.store.sync(dutTarget));
   assert.deepEqual(first.committedDates, ["2026-10-05"]);
   assert.equal(first.ignoredBoundaryRowCount, 3);
-  const options = { dataset: "dut_utilization" as const, initialStartDate: "2026-10-05", throughDate: "2026-10-06" };
-  assert.equal((await store.sync(options)).status, "completed");
-  assert.equal((await store.sync(options)).status, "completed");
-  assert.deepEqual(requests, [
+  const options = { ...dutTarget, throughDate: "2026-10-06" };
+  assert.equal((await f.store.sync(options)).status, "completed");
+  assert.equal((await f.store.sync(options)).status, "completed");
+  assert.deepEqual(f.windows(), [
     ["2026-10-05", "2026-10-07"], ["2026-10-05", "2026-10-07"], ["2026-10-06", "2026-10-08"],
     ["2026-10-05", "2026-10-07"], ["2026-10-06", "2026-10-08"],
   ]);
-  assert.deepEqual(reader.prepare("SELECT substr(date,1,10) date, shift, COUNT(*) n FROM oee_dut_utilization GROUP BY date,shift ORDER BY date,shift")
+  assert.deepEqual(f.database.prepare("SELECT substr(date,1,10) date, shift, COUNT(*) n FROM oee_dut_utilization GROUP BY date,shift ORDER BY date,shift")
     .all().map((row) => ({ ...row })), ["2026-10-05", "2026-10-06"].flatMap((date) =>
       [{ date, shift: "day", n: 2 }, { date, shift: "night", n: 1 }]));
-  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, "2026-10-06");
 });
 
 test("DUT backfill splits business dates with overlapping HTTP windows across a year boundary", async (t) => {
-  const { store, reader, requests } = await dutApiFixture(t, "2026-12-30", "2027-01-02");
-  const result = await store.reimport({ dataset: "dut_utilization", startDate: "2026-12-30", endDate: "2027-01-02" });
-  assert.equal(result.status, "completed");
-  assert.deepEqual(requests, [["2026-12-30", "2027-01-01"], ["2026-12-31", "2027-01-02"],
+  const f = await dutApiFixture(t, "2026-12-30", "2027-01-02");
+  const options = { dataset: "dut_utilization" as const, initialStartDate: "2026-12-30", throughDate: "2027-01-02" };
+  assert.equal((await f.store.sync(options)).status, "completed");
+  assert.deepEqual(f.windows(), [["2026-12-30", "2027-01-01"], ["2026-12-31", "2027-01-02"],
     ["2027-01-01", "2027-01-03"], ["2027-01-02", "2027-01-04"]]);
-  assert.equal(reader.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 12);
-  await store.reimport({ dataset: "dut_utilization", startDate: "2026-12-30", endDate: "2027-01-02" });
-  assert.equal(reader.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 12);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 12);
+  await f.store.sync(options);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 12);
+  assert.deepEqual(f.windows().slice(4), [["2027-01-01", "2027-01-03"], ["2027-01-02", "2027-01-04"]]);
 });
 
-test("file imports reject insufficient DUT envelopes and preserve old shifts when coverage regresses", async (t) => {
-  const { directory, store, reader } = await dutApiFixture(t, "2026-10-05", "2026-10-05");
-  const filePath = path.join(directory, "partial.json");
-  const partial = { ...dutRow("partial"), "ORPTSIP.DATE": "2026-10-05T00:00:00.000Z", "ORPTSIP.SHIFT": "night" };
-  writeFileSync(filePath, dutResponse([partial]));
-  const target = { dataset: "dut_utilization" as const, filePath, startDate: "2026-10-05", endDate: "2026-10-05" };
-  await assert.rejects(store.importFile(target), /原始请求范围/u);
-  await assert.rejects(store.importFile({ ...target, requestedStartDate: "2026-10-06", requestedEndDate: "2026-10-07" }), /未完整覆盖/u);
-  await assert.rejects(store.importFile({ ...target, requestedStartDate: "2026-10-04", requestedEndDate: "2026-10-07" }), /不能超过三个日期/u);
-  await store.pullWindow(target);
-  const before = reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
-  const result = await store.importFile({ ...target, requestedStartDate: "2026-10-05", requestedEndDate: "2026-10-07" });
+test("DUT sync preserves old shifts when coverage regresses and retries the incomplete date", async (t) => {
+  const f = await fixture(t);
+  await f.store.sync(dutTarget);
+  const before = f.database.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
+  f.reply.body = dutResponse([{ ...dutRow("partial"), "ORPTSIP.DATE": "2026-10-05T00:00:00.000Z", "ORPTSIP.SHIFT": "night" }]);
+  const result = importedWindow(await f.store.sync(dutTarget));
   assert.equal(result.status, "completed_with_warnings");
   assert.deepEqual(result.incompleteDates, ["2026-10-05"]);
   assert.deepEqual(result.committedDates, []);
   assert.equal(result.rowsDeleted, 0);
   assert.equal(result.rowsInserted, 0);
-  assert.deepEqual(reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), before);
-  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, null);
-  assert.deepEqual(store.getStatus()[1]?.tracking.unresolvedRanges, [{ startDate: "2026-10-05", endDate: "2026-10-05" }]);
-  const retry = await store.sync({ dataset: "dut_utilization", throughDate: "2026-10-05" });
+  assert.deepEqual(f.database.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), before);
+  f.reply.body = undefined;
+  const retry = await f.store.sync({ dataset: "dut_utilization", throughDate: "2026-10-05" });
+  assert.equal(retry.status, "completed");
   assert.deepEqual(retry.datasets[0]?.plannedWindows, [{ startDate: "2026-10-05", endDate: "2026-10-05" }]);
-  assert.equal(store.getStatus()[1]?.tracking.completedThroughDate, "2026-10-05");
+  assert.deepEqual(importedWindow(retry).committedDates, ["2026-10-05"]);
 });
 
 test("DUT quantity validation rolls back database-side changes to otherwise successful inserts", async (t) => {
-  const { directory, store, reader } = await dutApiFixture(t, "2026-10-05", "2026-10-05");
-  const target = { dataset: "dut_utilization" as const, startDate: "2026-10-05", endDate: "2026-10-05" };
-  await store.pullWindow(target);
-  const before = reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
-  const writer = new DatabaseSync(path.join(directory, "oee.sqlite"));
-  writer.exec(`CREATE TRIGGER change_quantity AFTER INSERT ON oee_dut_utilization
+  const f = await fixture(t);
+  await f.store.sync(dutTarget);
+  const before = f.database.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all();
+  f.database.exec(`CREATE TRIGGER change_quantity AFTER INSERT ON oee_dut_utilization
     BEGIN UPDATE oee_dut_utilization SET out_qty='0' WHERE id=NEW.id; END`);
-  writer.close();
-  await assert.rejects(store.pullWindow(target), /DUT 写入验收失败/u);
-  assert.deepEqual(reader.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), before);
+  const failure = failedWindow(await f.store.sync(dutTarget));
+  assert.match(failure.errorMessage, /DUT 写入验收失败/u);
+  assert.equal(failure.errorStage, "import");
+  assert.deepEqual(f.database.prepare("SELECT * FROM oee_dut_utilization ORDER BY id").all(), before);
 });
 
 test("a truncated JSON envelope, trailing garbage, bad row or failed write leaves the whole window intact", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-staging-rollback-"));
-  const store = createStore(directory);
-  const filePath = path.join(directory, "source.json");
-  const writer = new DatabaseSync(path.join(directory, "oee.sqlite"));
-  t.after(() => { writer.close(); store.close(); rmSync(directory, { recursive: true, force: true }); });
-  const target = { dataset: "availability" as const, filePath, startDate: "2026-08-20", endDate: "2026-08-21" };
-  writeFileSync(filePath, availabilityResponse([availabilityRow("2026-08-20", "old"), availabilityRow("2026-08-21", "old-21")]));
-  await store.importFile(target);
-  const before = writer.prepare("SELECT * FROM oee_availability ORDER BY id").all();
+  const f = await fixture(t);
+  await f.store.sync(availabilityTarget);
+  const before = f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all();
   const good = availabilityResponse([availabilityRow("2026-08-20", "new"), availabilityRow("2026-08-21", "new-21")]);
   for (const body of [good.slice(0, -2), good + "garbage", availabilityResponse([
     availabilityRow("2026-08-20", "new"), { ...availabilityRow("2026-08-21", "bad"), "ORPTSIP.TIME_SPAN": "bad" },
   ])]) {
-    writeFileSync(filePath, body);
-    await assert.rejects(store.importFile(target));
-    assert.deepEqual(writer.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
+    f.reply.body = body;
+    assert.equal(failedWindow(await f.store.sync(availabilityTarget)).errorStage, "import");
+    assert.deepEqual(f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
   }
-  writer.exec("CREATE TRIGGER reject_second_date BEFORE INSERT ON oee_availability WHEN NEW.tool_name='TOOL-new-21' BEGIN SELECT RAISE(ABORT,'write rejected'); END");
-  writeFileSync(filePath, good);
-  await assert.rejects(store.importFile(target), /write rejected/u);
-  assert.deepEqual(writer.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
+  f.database.exec("CREATE TRIGGER reject_second_date BEFORE INSERT ON oee_availability WHEN NEW.tool_name='TOOL-new-21' BEGIN SELECT RAISE(ABORT,'write rejected'); END");
+  f.reply.body = good;
+  assert.match(failedWindow(await f.store.sync(availabilityTarget)).errorMessage, /write rejected/u);
+  assert.deepEqual(f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
 });
 
 test("audits undated DUT rows and boundary rows without accumulating them in facts", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-dut-anomaly-test-"));
-  const sourcePath = path.join(directory, "dut-anomaly.json");
+  const f = await fixture(t);
   const normal = dutRow("normal");
-  const undated = dutRow("undated");
-  undated["ORPTSIP.DATE"] = null;
-  const unexpected = dutRow("unexpected");
-  unexpected["ORPTSIP.DATE"] = "2026-08-18T00:00:00.000Z";
-  writeFileSync(sourcePath, dutResponse([normal, undated, unexpected]));
-  const store = createStore(directory);
-  t.after(() => {
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  const first = await store.importFile({
-    dataset: "dut_utilization",
-    filePath: sourcePath,
-    startDate: "2026-08-19",
-    endDate: "2026-08-19",
-    requestedStartDate: "2026-08-19",
-    requestedEndDate: "2026-08-21",
-  });
+  const undated = { ...dutRow("undated"), "ORPTSIP.DATE": null };
+  const boundary = { ...dutRow("boundary"), "ORPTSIP.DATE": "2026-08-18T00:00:00.000Z" };
+  f.reply.body = dutResponse([normal, undated, boundary]);
+  const options = { dataset: "dut_utilization" as const, initialStartDate: "2026-08-19", throughDate: "2026-08-19" };
+  const first = importedWindow(await f.store.sync(options));
   assert.equal(first.status, "completed_with_warnings");
   assert.equal(first.unscopedRowCount, 1);
   assert.deepEqual(first.unexpectedDates, []);
   assert.equal(first.ignoredBoundaryRowCount, 1);
   assert.deepEqual(first.missingDates, []);
-
-  await store.importFile({
-    dataset: "dut_utilization",
-    filePath: sourcePath,
-    startDate: "2026-08-19",
-    endDate: "2026-08-19",
-    requestedStartDate: "2026-08-19",
-    requestedEndDate: "2026-08-21",
-  });
-  const status = store.getStatus()[1];
-  assert.equal(status?.facts.rowCount, 1);
-  assert.equal(status?.facts.unscopedRowCount, 0);
+  await f.store.sync(options);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_dut_utilization").get()?.["n"], 1);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_dut_utilization WHERE date IS NULL").get()?.["n"], 0);
 });
 
-test("marks abandoned audit runs as interrupted when their owner process is gone", (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-recovery-test-"));
-  const databasePath = path.join(directory, "oee.sqlite");
-  initializeOeeDatabase(databasePath);
-  const writer = new DatabaseSync(databasePath);
-  writer.prepare(
-    `INSERT INTO oee_import_runs
-       (id, command, parameters_json, status, owner_pid, started_at)
-     VALUES ('abandoned-run', 'sync', '{}', 'running', 999999999, '2026-08-20T00:00:00+08:00')`,
-  ).run();
-  writer.prepare(
-    `INSERT INTO oee_import_windows (
-       id, run_id, sequence, dataset, source_kind, source_ref,
-       requested_start_date, requested_end_date, expected_start_date, expected_end_date, status
-     ) VALUES (
-       'abandoned-window', 'abandoned-run', 0, 'availability', 'api', 'test',
-       '2026-08-20', '2026-08-22', '2026-08-20', '2026-08-22', 'downloading'
-     )`,
-  ).run();
-  writer.close();
-  const store = OeeDataStore.open({ databasePath });
-  t.after(() => {
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-  const status = store.getStatus()[0];
-  assert.equal(status?.issues[0]?.status, "interrupted");
-  assert.deepEqual(status?.tracking.unresolvedRanges, [{
-    startDate: "2026-08-20",
-    endDate: "2026-08-22",
-  }]);
+test("marks abandoned audit runs as interrupted and retries their unfinished window", async (t) => {
+  const f = await fixture(t);
+  f.store.close();
+  f.database.exec(`INSERT INTO oee_import_runs(id,command,parameters_json,status,owner_pid,started_at)
+    VALUES('abandoned-run','sync','{}','running',999999999,'2026-08-20T00:00:00+08:00');
+    INSERT INTO oee_import_windows(id,run_id,sequence,dataset,source_kind,source_ref,
+      requested_start_date,requested_end_date,expected_start_date,expected_end_date,status)
+    VALUES('abandoned-window','abandoned-run',0,'availability','api','test',
+      '2026-08-20','2026-08-22','2026-08-20','2026-08-22','downloading');`);
+  const store = OeeDataStore.open({ databasePath: f.databasePath, apiBaseUrl: f.apiBaseUrl, fetchRetries: 0 });
+  try {
+    assert.equal(f.database.prepare("SELECT status FROM oee_import_runs WHERE id='abandoned-run'").get()?.["status"], "interrupted");
+    assert.equal(f.database.prepare("SELECT status FROM oee_import_windows WHERE id='abandoned-window'").get()?.["status"], "interrupted");
+    const result = await store.sync({ dataset: "availability", throughDate: "2026-08-22" });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(result.datasets[0]?.plannedWindows, [{ startDate: "2026-08-20", endDate: "2026-08-22" }]);
+  } finally { store.close(); }
 });
 
-test("labels pre-audit facts as legacy data", (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-legacy-status-test-"));
-  const databasePath = path.join(directory, "oee.sqlite");
-  initializeOeeDatabase(databasePath);
-  const writer = new DatabaseSync(databasePath);
-  writer.prepare(
-    `INSERT INTO oee_availability
-       (tool_name, lot_id, final_state, step, date, shift, time_span)
-     VALUES ('TOOL-1', 'LOT-1', 'Running', '1000', '2026-08-20T00:00:00Z', NULL, 60)`,
-  ).run();
-  writer.close();
-  const store = OeeDataStore.open({ databasePath });
-  t.after(() => {
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
-  const status = store.getStatus()[0];
-  assert.equal(status?.tracking.state, "legacy_untracked");
-  assert.equal(status?.tracking.nextStartDate, "2026-08-21");
-  assert.equal(status?.recommendations[0]?.action, "reimport");
+test("syncs pre-audit Availability facts from their existing date coverage", async (t) => {
+  const f = await fixture(t);
+  f.database.exec(`INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span)
+    VALUES('old','old','Running','1000','2026-08-20T00:00:00Z',60);`);
+  const result = await f.store.sync({ dataset: "availability", throughDate: "2026-08-21" });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(f.windows(), [["2026-08-19", "2026-08-21"]]);
+  assert.equal(importedWindow(result).coverage.rowCount, 3);
 });
 
-test("limits API pulls to three inclusive dates", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-window-limit-test-"));
-  let requestCount = 0;
-  let authorization: string | undefined;
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    requestCount += 1;
-    authorization = request.headers.authorization;
-    const rows = requestedDateKeys(url).map((date) => availabilityRow(date, date));
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(availabilityResponse(rows));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const store = createStore(
-    directory,
-    `http://127.0.0.1:${address.port}/`,
-    undefined,
-    { apiUsername: "oee-user", apiPassword: "oee-password" },
-  );
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  await store.pullWindow({
-    dataset: "availability",
-    startDate: "2026-08-20",
-    endDate: "2026-08-22",
-  });
-  await assert.rejects(
-    store.pullWindow({
-      dataset: "availability",
-      startDate: "2026-08-20",
-      endDate: "2026-08-23",
-    }),
-    /不能超过 3 天/u,
-  );
-  assert.equal(requestCount, 1);
-  assert.equal(
-    authorization,
-    `Basic ${Buffer.from("oee-user:oee-password").toString("base64")}`,
-  );
-  assert.throws(
-    () => OeeDataStore.open({
-      databasePath: path.join(directory, "oee.sqlite"),
-      apiUsername: "oee-user",
-    }),
-    /API_USER 和 API_PWD 必须同时配置/u,
-  );
+test("splits API syncs into at most three inclusive dates and sends Basic authentication only in headers", async (t) => {
+  const f = await fixture(t, { apiUsername: "oee-user", apiPassword: "oee-password" });
+  assert.equal((await f.store.sync({ ...availabilityTarget, throughDate: "2026-08-23" })).status, "completed");
+  assert.deepEqual(f.windows(), [["2026-08-20", "2026-08-22"], ["2026-08-23", "2026-08-23"]]);
+  for (const request of f.requests) {
+    assert.equal(request.authorization, `Basic ${Buffer.from("oee-user:oee-password").toString("base64")}`);
+    assert.ok(!request.url.href.includes("oee-user"));
+    assert.ok(!request.url.href.includes("oee-password"));
+  }
+  assert.ok(!readFileSync(f.logFilePath, "utf8").includes("oee-password"));
+  await assert.rejects(f.store.sync({ ...availabilityTarget, maxWindowDays: 4 }), /maxWindowDays/u);
+  assert.equal(f.requests.length, 2);
+  assert.throws(() => OeeDataStore.open({ databasePath: f.databasePath, apiUsername: "oee-user" }), /API_USER 和 API_PWD 必须同时配置/u);
 });
 
-test("reimports a warning range and closes the active issue", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-reimport-test-"));
-  let complete = false;
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    const dates = requestedDateKeys(url);
-    const returnedDates = complete ? dates : dates.slice(0, 1);
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(availabilityResponse(
-      returnedDates.map((date) => availabilityRow(date, complete ? "complete" : "partial")),
-    ));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  const partial = await store.pullWindow({
-    dataset: "availability",
-    startDate: "2026-08-20",
-    endDate: "2026-08-21",
-  });
+test("sync retries a warning range and records the recovered commit", async (t) => {
+  const f = await fixture(t);
+  f.reply.body = availabilityResponse([availabilityRow("2026-08-20", "partial")]);
+  const partial = importedWindow(await f.store.sync(availabilityTarget));
   assert.equal(partial.status, "completed_with_warnings");
-  assert.equal(store.getStatus()[0]?.issues.length, 1);
-
-  complete = true;
-  const repaired = await store.reimport({
-    dataset: "availability",
-    startDate: "2026-08-20",
-    endDate: "2026-08-21",
-  });
-  assert.equal(repaired.status, "completed");
-  const status = store.getStatus()[0];
-  assert.equal(status?.issues.length, 0);
-  assert.equal(status?.facts.rowCount, 2);
+  f.reply.body = undefined;
+  const recovered = await f.store.sync(availabilityTarget);
+  assert.equal(recovered.status, "completed");
+  assert.deepEqual(importedWindow(recovered).committedDates, ["2026-08-20", "2026-08-21"]);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_availability").get()?.["n"], 2);
+  assert.equal(f.database.prepare("SELECT status FROM oee_import_windows WHERE id=?").get(partial.windowId)?.["status"], "completed_with_warnings");
 });
 
-test("accepts an empty API result array without creating auxiliary records", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-empty-result-test-"));
-  const server = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(emptyAvailabilityResponse());
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  const result = await store.pullWindow({
-    dataset: "availability",
-    startDate: "2026-04-04",
-    endDate: "2026-04-06",
-  });
+test("accepts an empty API result array and audits the missing dates without creating facts", async (t) => {
+  const f = await fixture(t);
+  f.reply.body = emptyAvailabilityResponse();
+  const result = importedWindow(await f.store.sync({ dataset: "availability", initialStartDate: "2026-04-04", throughDate: "2026-04-06" }));
+  assert.equal(result.status, "completed_with_warnings");
   assert.equal(result.rowsReceived, 0);
   assert.equal(result.rowsInserted, 0);
   assert.equal(result.coverage.rowCount, 0);
-  assert.equal(store.getStatus()[0]?.facts.rowCount, 0);
+  assert.deepEqual(result.missingDates, ["2026-04-04", "2026-04-05", "2026-04-06"]);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_availability").get()?.["n"], 0);
 });
 
-test("replays an explicit initial range after a failed window", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-backfill-resume-test-"));
-  const initialPath = path.join(directory, "initial.json");
-  writeFileSync(initialPath, availabilityResponse([
-    availabilityRow("2026-08-17", "17"),
-    availabilityRow("2026-08-20", "20"),
-    availabilityRow("2026-08-22", "22"),
-  ]));
-
-  const requestedWindows: string[][] = [];
-  let failedWindowOnce = false;
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+test("replays an explicit initial range after a failed window and keeps later successful windows", async (t) => {
+  const f = await fixture(t);
+  f.reply.body = availabilityResponse([
+    availabilityRow("2026-08-17", "17"), availabilityRow("2026-08-20", "20"), availabilityRow("2026-08-22", "22"),
+  ]);
+  await f.store.sync({ ...availabilityTarget, throughDate: "2026-08-22" });
+  f.reply.body = undefined;
+  let failedOnce = false;
+  f.reply.render = (url) => {
     const dates = requestedDateKeys(url);
-    requestedWindows.push(dates);
-    if (dates[0] === "2026-08-21" && !failedWindowOnce) {
-      failedWindowOnce = true;
-      response.writeHead(500, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: "temporary failure" }));
-      return;
+    if (dates[0] === "2026-08-21" && !failedOnce) {
+      failedOnce = true;
+      return "invalid JSON";
     }
-    const rows = dates.map((date) => availabilityRow(date, date.slice(-2)));
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(availabilityResponse(rows));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  await store.importFile({
-    dataset: "availability",
-    filePath: initialPath,
-    startDate: "2026-08-20",
-    endDate: "2026-08-22",
-  });
-  const syncOptions = {
-    dataset: "availability" as const,
-    initialStartDate: "2026-08-17",
-    throughDate: "2026-08-24",
+    return availabilityResponse(dates.map((date) => availabilityRow(date, date.slice(-2))));
   };
-  const failed = await store.sync(syncOptions);
+  const options = { ...availabilityTarget, initialStartDate: "2026-08-17", throughDate: "2026-08-24" };
+  const failed = await f.store.sync(options);
   assert.equal(failed.status, "failed");
-  assert.deepEqual(requestedWindows, [
-    ["2026-08-17", "2026-08-18", "2026-08-19"],
-    ["2026-08-21", "2026-08-22", "2026-08-23"],
-    ["2026-08-24"],
-  ]);
-
-  const resumed = await store.sync(syncOptions);
+  assert.deepEqual(failed.datasets[0]?.imports.map(({ status }) => status), ["completed", "failed", "completed"]);
+  assert.deepEqual(f.windows().slice(1), [["2026-08-17", "2026-08-19"], ["2026-08-21", "2026-08-23"], ["2026-08-24", "2026-08-24"]]);
+  const resumed = await f.store.sync(options);
+  assert.equal(resumed.status, "completed");
   assert.deepEqual(resumed.datasets[0]?.plannedWindows, [
-    { startDate: "2026-08-21", endDate: "2026-08-23" },
-    { startDate: "2026-08-24", endDate: "2026-08-24" },
+    { startDate: "2026-08-21", endDate: "2026-08-23" }, { startDate: "2026-08-24", endDate: "2026-08-24" },
   ]);
-  assert.deepEqual(requestedWindows, [
-    ["2026-08-17", "2026-08-18", "2026-08-19"],
-    ["2026-08-21", "2026-08-22", "2026-08-23"],
-    ["2026-08-24"],
-    ["2026-08-21", "2026-08-22", "2026-08-23"],
-    ["2026-08-24"],
-  ]);
-  const status = store.getStatus()[0];
-  assert.equal(status?.facts.minDataDate, "2026-08-17");
-  assert.equal(status?.facts.maxDataDate, "2026-08-24");
-  assert.equal(status?.facts.distinctDateCount, 8);
-  assert.equal(status?.facts.rowCount, 8);
+  assert.deepEqual({ ...f.database.prepare("SELECT MIN(substr(date,1,10)) first, MAX(substr(date,1,10)) last, COUNT(DISTINCT substr(date,1,10)) days, COUNT(*) n FROM oee_availability").get() },
+    { first: "2026-08-17", last: "2026-08-24", days: 8, n: 8 });
 });
 
 test("continues a healthy dataset when another dataset cannot be planned", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-partial-planning-test-"));
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    const rows = requestedDateKeys(url).map((date) => availabilityRow(date, date));
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(availabilityResponse(rows));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const store = createStore(directory, `http://127.0.0.1:${address.port}/`);
-  const writer = new DatabaseSync(path.join(directory, "oee.sqlite"));
-  writer.prepare(
-    `INSERT INTO oee_availability
-       (tool_name, lot_id, final_state, step, date, shift, time_span)
-     VALUES ('TOOL-1', 'LOT-1', 'Running', '1000', '2026-08-20T00:00:00Z', NULL, 60)`,
-  ).run();
-  writer.close();
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  const result = await store.sync({ dataset: "all", throughDate: "2026-08-21" });
+  const f = await fixture(t);
+  f.database.exec(`INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span)
+    VALUES('old','old','Running','1000','2026-08-20T00:00:00Z',60);`);
+  const result = await f.store.sync({ dataset: "all", throughDate: "2026-08-21" });
   assert.equal(result.status, "failed");
   assert.equal(result.datasets[0]?.imports[0]?.status, "completed");
   assert.match(result.datasets[1]?.planningError?.message ?? "", /首次同步必须提供/u);
-  assert.equal(store.getStatus()[0]?.facts.maxDataDate, "2026-08-21");
-  assert.equal(store.getStatus()[1]?.tracking.latestRun?.status, "failed");
-  assert.match(store.getStatus()[1]?.tracking.latestRun?.errorMessage ?? "", /首次同步必须提供/u);
+  assert.equal(f.database.prepare("SELECT MAX(substr(date,1,10)) last FROM oee_availability").get()?.["last"], "2026-08-21");
+  const audit = f.database.prepare("SELECT status, error_message FROM oee_import_runs WHERE id=?").get(result.runId);
+  assert.equal(audit?.["status"], "failed");
+  assert.match(String(audit?.["error_message"]), /首次同步必须提供/u);
 });
 
 test("keeps DUT payload fields inline and permits nulls in nonessential fields", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-dut-test-"));
-  const sourcePath = path.join(directory, "dut.json");
+  const f = await fixture(t);
   const sourceRow = dutRow("0".repeat(70_000));
-  sourceRow["ORPTSIP.TOOLING"] = null;
-  sourceRow["ORPTSIP.TRAY_ID"] = null;
-  sourceRow["ORPTSIP.START_TIME"] = null;
-  sourceRow["ORPTSIP.END_TIME"] = null;
-  sourceRow["ORPTSIP.PART_NUM"] = null;
-  writeFileSync(sourcePath, dutResponse([sourceRow, sourceRow]));
-  const store = createStore(directory);
-  let reader: DatabaseSync | undefined;
-  t.after(() => {
-    reader?.close();
-    store.close();
-    rmSync(directory, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 50,
-    });
-  });
-
-  const result = await store.importFile({
-    dataset: "dut_utilization",
-    filePath: sourcePath,
-    startDate: "2026-08-19",
-    endDate: "2026-08-19",
-    requestedStartDate: "2026-08-19",
-    requestedEndDate: "2026-08-21",
-  });
+  for (const field of ["TOOLING", "TRAY_ID", "START_TIME", "END_TIME", "PART_NUM"]) sourceRow["ORPTSIP." + field] = null;
+  f.reply.body = dutResponse([sourceRow, sourceRow]);
+  const result = importedWindow(await f.store.sync({ dataset: "dut_utilization", initialStartDate: "2026-08-19", throughDate: "2026-08-19" }));
   assert.equal(result.rowsInserted, 2);
   assert.equal(result.expectedStartDate, "2026-08-19");
   assert.equal(result.expectedEndDate, "2026-08-19");
-
-  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  const rows = reader.prepare(
-    "SELECT id, length(dut_lot_map) AS payload_length, tooling, tray_id, start_time, end_time, part_num " +
-    "FROM oee_dut_utilization ORDER BY id",
-  ).all();
-  assert.deepEqual(rows.map((row) => ({ ...row })), [1, 2].map((id) => ({
-    id,
-    payload_length: 70_000,
-    tooling: null,
-    tray_id: null,
-    start_time: null,
-    end_time: null,
-    part_num: null,
-  })));
+  assert.deepEqual(f.database.prepare("SELECT id, length(dut_lot_map) payload_length, tooling, tray_id, start_time, end_time, part_num FROM oee_dut_utilization ORDER BY id")
+    .all().map((row) => ({ ...row })), [1, 2].map((id) => ({
+      id, payload_length: 70_000, tooling: null, tray_id: null, start_time: null, end_time: null, part_num: null,
+    })));
 });
 
-test("logs API download and pull failures", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-pull-log-test-"));
-  const server = createServer((_request, response) => {
-    response.writeHead(400, { "content-type": "application/json" });
-    response.end(JSON.stringify({ error: "bad request" }));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const logFilePath = path.join(directory, "logs", "oee-data.log");
-  const store = createStore(
-    directory,
-    `http://127.0.0.1:${address.port}/`,
-    new FileLogger(logFilePath),
-  );
-  t.after(async () => {
-    store.close();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  await assert.rejects(
-    store.pullWindow({
-      dataset: "availability",
-      startDate: "2026-08-20",
-      endDate: "2026-08-20",
-    }),
-    /API 返回 HTTP 400/u,
-  );
-
-  const events = readFileSync(logFilePath, "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => (JSON.parse(line) as { event: string }).event);
-  assert.deepEqual(events, [
-    "oee.run.started",
-    "oee.window.started",
-    "oee.download.attempt_started",
-    "oee.download.failed",
-    "oee.window.failed",
-    "oee.run.completed",
+test("logs API download failures and records failed sync audit", async (t) => {
+  const f = await fixture(t);
+  f.reply.status = 400;
+  const failure = failedWindow(await f.store.sync(availabilityTarget));
+  assert.equal(failure.errorStage, "download");
+  assert.match(failure.errorMessage, /API 返回 HTTP 400/u);
+  assert.deepEqual(logEntries(f.logFilePath).map(({ event }) => event), [
+    "oee.run.started", "oee.sync.windows_planned", "oee.window.started", "oee.download.attempt_started",
+    "oee.download.failed", "oee.window.failed", "oee.run.completed", "oee.sync.completed",
   ]);
+  assert.equal(f.database.prepare("SELECT status FROM oee_import_runs").get()?.["status"], "failed");
 });
 
-test("logs file import failures", async (t) => {
-  const directory = mkdtempSync(path.join(tmpdir(), "oee-import-log-test-"));
-  const sourcePath = path.join(directory, "invalid.json");
-  const logFilePath = path.join(directory, "logs", "oee-data.log");
-  writeFileSync(sourcePath, JSON.stringify({ unexpected: [] }));
-  const store = createStore(directory, undefined, new FileLogger(logFilePath));
-  let reader: DatabaseSync | undefined;
-  t.after(() => {
-    reader?.close();
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
+test("logs malformed API response import failures and preserves failed audit", async (t) => {
+  const f = await fixture(t);
+  f.reply.body = JSON.stringify({ unexpected: [] });
+  assert.match(failedWindow(await f.store.sync(availabilityTarget)).errorMessage, /未能完整读取/u);
+  const entries = logEntries(f.logFilePath);
+  const error = entries.find(({ event }) => event === "oee.window.failed");
+  assert.equal(error?.level, "ERROR");
+  assert.match(error?.error?.message ?? "", /未能完整读取/u);
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM oee_availability").get()?.["n"], 0);
+  assert.equal(f.database.prepare("SELECT status FROM oee_import_runs").get()?.["status"], "failed");
+  assert.equal(f.database.prepare("SELECT status FROM oee_import_windows").get()?.["status"], "failed");
+});
 
-  await assert.rejects(
-    store.importFile({
-      dataset: "availability",
-      filePath: sourcePath,
-      startDate: "2026-08-20",
-      endDate: "2026-08-20",
-    }),
-    /未能完整读取/u,
-  );
-
-  const entries = readFileSync(logFilePath, "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as {
-      event: string;
-      level: string;
-      error?: { message?: string };
+function cli(args: readonly string[], databasePath: string, apiBaseUrl: string) {
+  const compiled = import.meta.url.endsWith(".js");
+  const entry = fileURLToPath(new URL(compiled ? "../../scripts/oee-data.js" : "../../scripts/oee-data.ts", import.meta.url));
+  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [...(compiled ? [] : ["--import", "tsx"]), entry, ...args], {
+      env: {
+        ...process.env, NODE_NO_WARNINGS: "1", SQL_WEB_DB_PATH: databasePath, OEE_API_BASE_URL: apiBaseUrl,
+        API_USER: "test-user", API_PWD: "test-password",
+      },
     });
-  assert.deepEqual(entries.map((entry) => entry.event), [
-    "oee.run.started",
-    "oee.window.started",
-    "oee.window.failed",
-    "oee.run.completed",
-  ]);
-  assert.equal(entries[2]?.level, "ERROR");
-  assert.match(entries[2]?.error?.message ?? "", /未能完整读取/u);
-  reader = new DatabaseSync(path.join(directory, "oee.sqlite"), { readOnly: true });
-  assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM oee_availability").get()?.["count"], 0);
-  assert.equal(reader.prepare("SELECT status FROM oee_import_runs").get()?.["status"], "failed");
-  assert.equal(reader.prepare("SELECT status FROM oee_import_windows").get()?.["status"], "failed");
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("CLI rejects removed commands and invalid arguments before opening the database", async (t) => {
+  const f = await fixture(t);
+  f.database.exec(`INSERT INTO oee_import_runs(id,command,parameters_json,status,owner_pid,started_at)
+    VALUES('untouched','sync','{}','running',999999999,'2026-08-20T00:00:00+08:00');`);
+  for (const args of [[], ["import"], ["pull"], ["reimport"], ["status"], ["repair-dut"], ["init", "extra"],
+    ["sync"], ["sync", "all"], ["sync", "unknown", "2026-08-21"], ["sync", "all", "2026-02-30"],
+    ["sync", "all", "2026-08-21", "bad"], ["sync", "all", "2026-08-21", "2026-08-22"],
+    ["sync", "all", "2026-08-21", "2026-08-20", "extra"]]) {
+    const result = await cli(args, f.databasePath, f.apiBaseUrl);
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /用法|数据集|日期|不能晚于/u);
+    assert.equal(f.database.prepare("SELECT status FROM oee_import_runs WHERE id='untouched'").get()?.["status"], "running", args.join(" "));
+  }
+  assert.equal(f.requests.length, 0);
+});
+
+test("CLI init preserves facts and sync supports all datasets, single datasets and warning exits", async (t) => {
+  const f = await fixture(t);
+  const initialized = await cli(["init"], f.databasePath, f.apiBaseUrl);
+  assert.equal(initialized.code, 0, initialized.stderr);
+  assert.equal((JSON.parse(initialized.stdout) as { initialized: boolean }).initialized, true);
+  const all = await cli(["sync", "all", "2026-08-21", "2026-08-20"], f.databasePath, f.apiBaseUrl);
+  assert.equal(all.code, 0, all.stderr);
+  assert.equal((JSON.parse(all.stdout) as SyncResult).datasets.length, 2);
+  const before = f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all();
+  assert.equal((await cli(["init"], f.databasePath, f.apiBaseUrl)).code, 0);
+  assert.deepEqual(f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
+  const single = await cli(["sync", "dut_utilization", "2026-08-21"], f.databasePath, f.apiBaseUrl);
+  assert.equal(single.code, 0, single.stderr);
+  assert.deepEqual((JSON.parse(single.stdout) as SyncResult).datasets.map(({ dataset }) => dataset), ["dut_utilization"]);
+  f.reply.body = emptyAvailabilityResponse();
+  const warning = await cli(["sync", "availability", "2026-08-21"], f.databasePath, f.apiBaseUrl);
+  assert.equal(warning.code, 2, warning.stderr);
 });

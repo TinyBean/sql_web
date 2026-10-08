@@ -13,7 +13,6 @@ export const OEE_DATASETS = ["availability", "dut_utilization"] as const;
 export type OeeDataset = (typeof OEE_DATASETS)[number];
 
 type JsonRecord = Record<string, unknown>;
-type SourceKind = "file" | "api";
 
 interface DatasetSpec {
   readonly dataset: OeeDataset;
@@ -55,23 +54,6 @@ interface ResolvedOeeDataStoreOptions {
   readonly requestTimeoutMs: number;
   readonly fetchRetries: number;
   readonly logger: AppLogger;
-}
-
-export interface ImportFileOptions {
-  readonly dataset: OeeDataset;
-  readonly filePath: string;
-  readonly startDate: string;
-  readonly endDate: string;
-  readonly requestedStartDate?: string;
-  readonly requestedEndDate?: string;
-  readonly sourceKind?: SourceKind;
-  readonly sourceRef?: string;
-}
-
-export interface PullWindowOptions {
-  readonly dataset: OeeDataset;
-  readonly startDate: string;
-  readonly endDate: string;
 }
 
 export interface ImportNewDayOptions {
@@ -142,62 +124,6 @@ export interface FailedWindowResult {
 }
 
 export type ImportWindowResult = ImportResult | FailedWindowResult;
-
-export interface DateRange {
-  readonly startDate: string;
-  readonly endDate: string;
-}
-
-export interface DatasetFacts extends DatabaseCoverage {
-  readonly missingDateRanges: readonly DateRange[];
-  readonly unscopedRowCount: number;
-}
-
-export interface ImportIssue {
-  readonly windowId: string;
-  readonly status: "completed_with_warnings" | "failed" | "interrupted";
-  readonly requestedStartDate: string;
-  readonly requestedEndDate: string;
-  readonly expectedStartDate: string;
-  readonly expectedEndDate: string;
-  readonly incompleteDates: readonly string[];
-  readonly missingDates: readonly string[];
-  readonly unexpectedDates: readonly string[];
-  readonly unscopedRowCount: number;
-  readonly errorStage: string | null;
-  readonly errorMessage: string | null;
-}
-
-export interface ImportRecommendation extends DateRange {
-  readonly action: "sync" | "reimport";
-  readonly reason: string;
-  readonly windowIds: readonly string[];
-}
-
-export interface DatasetStatus {
-  readonly dataset: OeeDataset;
-  readonly apiEndpoint: string;
-  readonly facts: DatasetFacts;
-  readonly tracking: {
-    readonly state: "empty" | "legacy_untracked" | "partially_tracked" | "tracked";
-    readonly trackedStartDate: string | null;
-    readonly trackedEndDate: string | null;
-    readonly completedThroughDate: string | null;
-    readonly nextStartDate: string | null;
-    readonly unresolvedRanges: readonly DateRange[];
-    readonly latestRun: {
-      readonly runId: string;
-      readonly command: string;
-      readonly status: string;
-      readonly startedAt: string;
-      readonly completedAt: string | null;
-      readonly errorStage: string | null;
-      readonly errorMessage: string | null;
-    } | null;
-  };
-  readonly issues: readonly ImportIssue[];
-  readonly recommendations: readonly ImportRecommendation[];
-}
 
 export interface SyncResult {
   readonly runId: string;
@@ -693,24 +619,7 @@ interface RegisteredWindow extends DateWindow {
   readonly runId: string;
   readonly sequence: number;
   readonly dataset: OeeDataset;
-  readonly sourceKind: SourceKind;
   readonly sourceRef: string;
-  readonly filePath?: string;
-}
-
-interface WindowAuditRow {
-  readonly id: string;
-  readonly status: WindowState;
-  readonly requestedStartDate: string;
-  readonly requestedEndDate: string;
-  readonly expectedStartDate: string;
-  readonly expectedEndDate: string;
-  readonly incompleteDates: readonly string[];
-  readonly missingDates: readonly string[];
-  readonly unexpectedDates: readonly string[];
-  readonly unscopedRowCount: number;
-  readonly errorStage: string | null;
-  readonly errorMessage: string | null;
 }
 
 const COMPLETED_WINDOW_STATES = new Set<WindowState>([
@@ -755,9 +664,9 @@ function errorColumns(error: unknown): {
   return { name: error.name, code, message: errorMessage(error) };
 }
 
-function coalesceDates(values: readonly string[]): DateRange[] {
+function coalesceDates(values: readonly string[]): DateWindow[] {
   const dates = [...new Set(values)].sort();
-  const ranges: DateRange[] = [];
+  const ranges: DateWindow[] = [];
   for (const date of dates) {
     const previous = ranges.at(-1);
     if (previous && date === addDays(previous.endDate, 1)) {
@@ -863,95 +772,10 @@ export class OeeDataStore {
     }
   }
 
-  async importFile(options: ImportFileOptions): Promise<ImportResult> {
-    this.#assertOpen();
-    dateRange(options.startDate, options.endDate);
-    if ((options.requestedStartDate === undefined) !== (options.requestedEndDate === undefined)) {
-      throw new Error("原始请求起止日期必须同时提供");
-    }
-    if (options.dataset === "dut_utilization" && (!options.requestedStartDate || !options.requestedEndDate)) {
-      throw new Error("DUT 文件导入必须提供原始请求范围 --request-start 和 --request-end");
-    }
-    const requestedStartDate = options.requestedStartDate ?? options.startDate;
-    const requestedEndDate = options.requestedEndDate ?? options.endDate;
-    const requestedDays = dateRange(requestedStartDate, requestedEndDate);
-    if (options.dataset === "dut_utilization" && requestedDays.length > MAX_API_WINDOW_DAYS) {
-      throw new Error("DUT 文件原始 API 请求范围不能超过三个日期；请按完整业务日分别导入");
-    }
-    const required = apiWindow(options.dataset, options);
-    if (requestedStartDate > required.startDate || requestedEndDate < required.endDate) {
-      throw new Error("原始请求范围未完整覆盖目标业务日，不能进行整日替换");
-    }
-    const filePath = path.resolve(options.filePath);
-    const sourceKind = options.sourceKind ?? "file";
-    const sourceRef = options.sourceRef ?? filePath;
-    const runId = this.#createRun("import", {
-      dataset: options.dataset,
-      filePath,
-      startDate: options.startDate, endDate: options.endDate,
-      requestedStartDate, requestedEndDate,
-    });
-    try {
-      const window = this.#registerWindow(runId, 0, {
-        id: "",
-        runId,
-        sequence: 0,
-        dataset: options.dataset,
-        sourceKind,
-        sourceRef,
-        filePath,
-        startDate: options.startDate,
-        endDate: options.endDate,
-        requestedStartDate, requestedEndDate,
-      });
-      const result = await this.#executeWindow(window);
-      this.#finalizeRun(runId);
-      return result;
-    } catch (error) {
-      this.#markRemainingWindowsInterrupted(runId);
-      this.#finishSingleRunFailure(runId, error);
-      throw error;
-    }
-  }
-
-  async pullWindow(options: PullWindowOptions): Promise<ImportResult> {
-    this.#assertOpen();
-    const days = dateRange(options.startDate, options.endDate);
-    if (days.length > businessWindowSize(options.dataset)) {
-      throw new Error(options.dataset === "dut_utilization"
-        ? "DUT 单次拉取仅支持一个完整业务日；多日请使用 data:reimport"
-        : `单次 API 拉取不能超过 ${MAX_API_WINDOW_DAYS} 天`);
-    }
-    const runId = this.#createRun("pull", options);
-    try {
-      const spec = DATASET_SPECS[options.dataset];
-      const requested = apiWindow(options.dataset, options);
-      const window = this.#registerWindow(runId, 0, {
-        id: "",
-        runId,
-        sequence: 0,
-        dataset: options.dataset,
-        sourceKind: "api",
-        sourceRef: sourceUrl(this.#apiBaseUrl, spec, requested),
-        startDate: options.startDate,
-        endDate: options.endDate,
-        requestedStartDate: requested.startDate,
-        requestedEndDate: requested.endDate,
-      });
-      const result = await this.#executeWindow(window);
-      this.#finalizeRun(runId);
-      return result;
-    } catch (error) {
-      this.#markRemainingWindowsInterrupted(runId);
-      this.#finishSingleRunFailure(runId, error);
-      throw error;
-    }
-  }
-
   async importNewDay(options: ImportNewDayOptions): Promise<SyncResult> {
     this.#assertOpen();
     normalizeDateKey(options.date, "date");
-    return this.#executeMultiWindowRun("sync", [options.dataset], {
+    return this.#executeMultiWindowRun([options.dataset], {
       mode: "new-day-only", date: options.date,
     }, (dataset) => {
       if (this.#hasCommittedDate(dataset, options.date)) {
@@ -982,7 +806,7 @@ export class OeeDataStore {
     const datasets = options.dataset && options.dataset !== "all"
       ? [options.dataset]
       : [...OEE_DATASETS];
-    return this.#executeMultiWindowRun("sync", datasets, {
+    return this.#executeMultiWindowRun(datasets, {
       throughDate: options.throughDate,
       initialStartDate: options.initialStartDate,
       overlapDays,
@@ -994,22 +818,6 @@ export class OeeDataStore {
       overlapDays,
       maxWindowDays,
     ));
-  }
-
-  async reimport(options: PullWindowOptions): Promise<SyncResult> {
-    this.#assertOpen();
-    dateRange(options.startDate, options.endDate);
-    return this.#executeMultiWindowRun(
-      "reimport",
-      [options.dataset],
-      { startDate: options.startDate, endDate: options.endDate },
-      () => mergeAndSplitWindows([options], businessWindowSize(options.dataset)),
-    );
-  }
-
-  getStatus(): DatasetStatus[] {
-    this.#assertOpen();
-    return OEE_DATASETS.map((dataset) => this.#datasetStatus(dataset));
   }
 
   close(): void {
@@ -1049,7 +857,8 @@ export class OeeDataStore {
     if (interrupted > 0) this.#logger.warn("oee.recovery.interrupted", { runCount: interrupted });
   }
 
-  #createRun(command: "import" | "pull" | "sync" | "reimport", parameters: unknown): string {
+  #createRun(parameters: unknown): string {
+    const command = "sync";
     const runId = randomUUID();
     let transactionOpen = false;
     try {
@@ -1089,7 +898,7 @@ export class OeeDataStore {
       runId,
       sequence,
       window.dataset,
-      window.sourceKind,
+      "api",
       window.sourceRef,
       window.requestedStartDate,
       window.requestedEndDate,
@@ -1101,12 +910,11 @@ export class OeeDataStore {
   }
 
   async #executeMultiWindowRun(
-    command: "sync" | "reimport",
     datasets: readonly OeeDataset[],
     parameters: unknown,
     plan: (dataset: OeeDataset) => DateWindow[],
   ): Promise<SyncResult> {
-    const runId = this.#createRun(command, { datasets, ...parameters as object });
+    const runId = this.#createRun({ datasets, ...parameters as object });
     const logger = this.#logger.child({ importRunId: runId });
     const datasetResults: DatasetSyncResult[] = [];
     let sequence = 0;
@@ -1128,7 +936,6 @@ export class OeeDataStore {
                 runId,
                 sequence: sequence - 1,
                 dataset,
-                sourceKind: "api",
                 sourceRef: sourceUrl(this.#apiBaseUrl, spec, requested),
                 ...window,
                 requestedStartDate: requested.startDate,
@@ -1178,7 +985,7 @@ export class OeeDataStore {
           : { stage: "planning", error: firstPlanningError },
       );
       logger.info("oee.sync.completed", {
-        command,
+        command: "sync",
         status,
         windowCount: sequence,
         durationMs: this.#runDuration(runId),
@@ -1188,7 +995,7 @@ export class OeeDataStore {
       this.#markRemainingWindowsInterrupted(runId);
       this.#finalizeRun(runId, { stage: "planning", error });
       const status: RunOutcome = "failed";
-      logger.error("oee.sync.failed", error, { command, status, stage: "planning" });
+      logger.error("oee.sync.failed", error, { command: "sync", status, stage: "planning" });
       throw error;
     }
   }
@@ -1196,25 +1003,19 @@ export class OeeDataStore {
   async #executeWindow(window: RegisteredWindow): Promise<ImportResult> {
     const logger = this.#logger.child({ importRunId: window.runId, windowId: window.id });
     const startedAt = Date.now();
-    let filePath = window.filePath;
-    let downloaded = false;
-    let stage = "import";
+    let filePath: string | undefined;
+    let stage = "download";
     logger.info("oee.window.started", {
       dataset: window.dataset,
-      sourceKind: window.sourceKind,
+      sourceKind: "api",
       requestedStartDate: window.requestedStartDate,
       requestedEndDate: window.requestedEndDate,
       expectedStartDate: window.startDate,
       expectedEndDate: window.endDate,
     });
     try {
-      if (window.sourceKind === "api") {
-        stage = "download";
-        this.#setWindowState(window.id, "downloading", true);
-        filePath = await this.#download(window.sourceRef, window.dataset, window.id, logger);
-        downloaded = true;
-      }
-      if (!filePath) throw new Error("导入窗口缺少源文件");
+      this.#setWindowState(window.id, "downloading", true);
+      filePath = await this.#download(window.sourceRef, window.dataset, window.id, logger);
       stage = "import";
       this.#setWindowState(window.id, "importing", true);
       const result = await this.#importIntoWindow(window, filePath);
@@ -1246,7 +1047,7 @@ export class OeeDataStore {
       });
       throw error;
     } finally {
-      if (downloaded && filePath) {
+      if (filePath) {
         await unlink(filePath).catch((error: unknown) => {
           logger.warn("oee.download.cleanup_failed", {
             stage: "cleanup",
@@ -1433,31 +1234,6 @@ export class OeeDataStore {
     ).run(operationalTimestamp(), runId);
   }
 
-  #markRunFailed(runId: string, stage: string, error: unknown): void {
-    const details = errorColumns(error);
-    this.#database.prepare(
-      `UPDATE oee_import_runs
-       SET status = 'failed', completed_at = ?, error_stage = ?, error_name = ?,
-           error_code = ?, error_message = ?
-       WHERE id = ?`,
-    ).run(
-      operationalTimestamp(),
-      stage,
-      details.name,
-      details.code,
-      details.message,
-      runId,
-    );
-  }
-
-  #finishSingleRunFailure(runId: string, error: unknown): void {
-    const row = this.#database.prepare(
-      "SELECT COUNT(*) AS count FROM oee_import_windows WHERE run_id = ?",
-    ).get(runId);
-    if (row && numberColumn(row, "count") > 0) this.#finalizeRun(runId);
-    else this.#markRunFailed(runId, "registration", error);
-  }
-
   #finalizeRun(
     runId: string,
     forcedFailure?: { readonly stage: string; readonly error: unknown },
@@ -1535,24 +1311,23 @@ export class OeeDataStore {
       : dataset === "availability" && !jsonStringArray(row["missing_dates_json"]).includes(date));
   }
 
-  #latestWindowStates(dataset: OeeDataset): Map<string, { status: WindowState; windowId: string; complete: boolean }> {
-    const latest = new Map<string, { status: WindowState; windowId: string; complete: boolean }>();
+  #latestWindowStates(dataset: OeeDataset): Map<string, boolean> {
+    const latest = new Map<string, boolean>();
     const rows = this.#database.prepare(
-      `SELECT w.id, w.status, w.expected_start_date, w.expected_end_date,
+      `SELECT w.status, w.expected_start_date, w.expected_end_date,
               w.coverage_version, w.committed_dates_json, w.missing_dates_json
        FROM oee_import_windows w JOIN oee_import_runs r ON r.id = w.run_id
        WHERE w.dataset = ? ORDER BY r.started_at, r.rowid, w.sequence`,
     ).all(dataset);
     for (const row of rows) {
       const status = stringColumn(row, "status") as WindowState;
-      const windowId = stringColumn(row, "id");
       const version = numberColumn(row, "coverage_version");
       const committed = new Set(jsonStringArray(row["committed_dates_json"]));
       const missing = new Set(jsonStringArray(row["missing_dates_json"]));
       for (const date of dateRange(stringColumn(row, "expected_start_date"), stringColumn(row, "expected_end_date"))) {
         const complete = COMPLETED_WINDOW_STATES.has(status) && (version >= COVERAGE_VERSION
           ? committed.has(date) : dataset === "availability" && !missing.has(date));
-        latest.set(date, { status, windowId, complete });
+        latest.set(date, complete);
       }
     }
     return latest;
@@ -1587,10 +1362,10 @@ export class OeeDataStore {
     if (!startDate) throw new Error(`${dataset} 尚无可追踪的同步起始日期`);
     const planned = new Set<string>();
     for (const date of dateRange(startDate, throughDate)) {
-      if (!latest.get(date)?.complete) planned.add(date);
+      if (!latest.get(date)) planned.add(date);
     }
     const completed = knownDates.filter((date) =>
-      date <= throughDate && latest.get(date)!.complete);
+      date <= throughDate && latest.get(date));
     const latestCompleted = completed.at(-1);
     if (latestCompleted) {
       const anchor = latestCompleted < throughDate ? latestCompleted : throughDate;
@@ -1602,146 +1377,7 @@ export class OeeDataStore {
     return mergeAndSplitWindows(coalesceDates([...planned]), businessWindowSize(dataset, maxWindowDays));
   }
 
-  #datasetStatus(dataset: OeeDataset): DatasetStatus {
-    const spec = DATASET_SPECS[dataset];
-    const facts = this.#facts(spec);
-    const latest = this.#latestWindowStates(dataset);
-    const trackedDates = [...latest.keys()].sort();
-    const unresolvedDates = trackedDates.filter((date) =>
-      !latest.get(date)!.complete);
-    let completedThroughDate: string | null = null;
-    for (const date of trackedDates) {
-      if (!latest.get(date)!.complete) break;
-      if (completedThroughDate && date !== addDays(completedThroughDate, 1)) break;
-      completedThroughDate = date;
-    }
-    const auditRows = this.#windowAuditRows(dataset);
-    const activeWindowIds = new Set([...latest.values()].map((state) => state.windowId));
-    const issues: ImportIssue[] = auditRows
-      .filter((row) => activeWindowIds.has(row.id) && (
-        row.status === "completed_with_warnings" || row.status === "failed" || row.status === "interrupted"
-      ))
-      .map((row) => ({
-        windowId: row.id,
-        status: row.status as ImportIssue["status"],
-        requestedStartDate: row.requestedStartDate,
-        requestedEndDate: row.requestedEndDate,
-        expectedStartDate: row.expectedStartDate, expectedEndDate: row.expectedEndDate,
-        incompleteDates: row.incompleteDates,
-        missingDates: row.missingDates,
-        unexpectedDates: row.unexpectedDates,
-        unscopedRowCount: row.unscopedRowCount,
-        errorStage: row.errorStage,
-        errorMessage: row.errorMessage,
-      }));
-    const unresolvedRanges = coalesceDates(unresolvedDates);
-    const recommendations: ImportRecommendation[] = unresolvedRanges.map((range) => ({
-      action: "sync",
-      ...range,
-      reason: "存在未提交、完整性未验证、失败或中断的业务日期",
-      windowIds: [...new Set(
-        dateRange(range.startDate, range.endDate)
-          .map((date) => latest.get(date)?.windowId)
-          .filter((id): id is string => Boolean(id)),
-      )],
-    }));
-    for (const issue of issues) {
-      if (issue.status !== "completed_with_warnings") continue;
-      recommendations.push({
-        action: "reimport",
-        startDate: issue.expectedStartDate,
-        endDate: issue.expectedEndDate,
-        reason: "最近一次提交存在缺日、班次覆盖退化、越界或无日期数据",
-        windowIds: [issue.windowId],
-      });
-    }
-
-    const factLogicalStart = facts.minDataDate;
-    const factLogicalEnd = facts.maxDataDate;
-    let state: DatasetStatus["tracking"]["state"];
-    if (!trackedDates.length && facts.rowCount === 0) state = "empty";
-    else if (!trackedDates.length) state = "legacy_untracked";
-    else if (factLogicalStart && factLogicalStart < trackedDates[0]!) state = "partially_tracked";
-    else state = "tracked";
-    if (state === "legacy_untracked" && factLogicalStart && factLogicalEnd) {
-      recommendations.push({
-        action: "reimport",
-        startDate: factLogicalStart,
-        endDate: factLogicalEnd,
-        reason: "现有事实数据没有导入审计历史",
-        windowIds: [],
-      });
-    }
-    const nextStartDate = unresolvedDates.at(0)
-      ?? (completedThroughDate ? addDays(completedThroughDate, 1) : factLogicalEnd ? addDays(factLogicalEnd, 1) : null);
-    return {
-      dataset,
-      apiEndpoint: endpointUrl(this.#apiBaseUrl, spec),
-      facts,
-      tracking: {
-        state,
-        trackedStartDate: trackedDates.at(0) ?? null,
-        trackedEndDate: trackedDates.at(-1) ?? null,
-        completedThroughDate,
-        nextStartDate,
-        unresolvedRanges,
-        latestRun: this.#latestRun(dataset),
-      },
-      issues,
-      recommendations,
-    };
-  }
-
-  #windowAuditRows(dataset: OeeDataset): WindowAuditRow[] {
-    return this.#database.prepare(
-      `SELECT w.id, w.status, w.requested_start_date, w.requested_end_date,
-              w.expected_start_date, w.expected_end_date, w.incomplete_dates_json,
-              w.missing_dates_json, w.unexpected_dates_json, w.unscoped_row_count,
-              w.error_stage, w.error_message
-       FROM oee_import_windows w
-       JOIN oee_import_runs r ON r.id = w.run_id
-       WHERE w.dataset = ?
-       ORDER BY r.started_at, r.rowid, w.sequence`,
-    ).all(dataset).map((row): WindowAuditRow => ({
-      id: stringColumn(row, "id"),
-      status: stringColumn(row, "status") as WindowState,
-      requestedStartDate: stringColumn(row, "requested_start_date"),
-      requestedEndDate: stringColumn(row, "requested_end_date"),
-      expectedStartDate: stringColumn(row, "expected_start_date"),
-      expectedEndDate: stringColumn(row, "expected_end_date"),
-      incompleteDates: jsonStringArray(row["incomplete_dates_json"]),
-      missingDates: jsonStringArray(row["missing_dates_json"]),
-      unexpectedDates: jsonStringArray(row["unexpected_dates_json"]),
-      unscopedRowCount: numberColumn(row, "unscoped_row_count"),
-      errorStage: nullableStringColumn(row, "error_stage"),
-      errorMessage: nullableStringColumn(row, "error_message"),
-    }));
-  }
-
-  #latestRun(dataset: OeeDataset): DatasetStatus["tracking"]["latestRun"] {
-    const row = this.#database.prepare(
-      `SELECT r.id, r.command, r.status, r.started_at, r.completed_at,
-              r.error_stage, r.error_message
-       FROM oee_import_runs r
-       WHERE EXISTS (SELECT 1 FROM oee_import_windows w WHERE w.run_id = r.id AND w.dataset = ?)
-          OR json_extract(r.parameters_json, '$.dataset') = ?
-          OR EXISTS (
-            SELECT 1 FROM json_each(r.parameters_json, '$.datasets') WHERE value = ?
-          )
-       ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1`,
-    ).get(dataset, dataset, dataset);
-    return row ? {
-      runId: stringColumn(row, "id"),
-      command: stringColumn(row, "command"),
-      status: stringColumn(row, "status"),
-      startedAt: stringColumn(row, "started_at"),
-      completedAt: nullableStringColumn(row, "completed_at"),
-      errorStage: nullableStringColumn(row, "error_stage"),
-      errorMessage: nullableStringColumn(row, "error_message"),
-    } : null;
-  }
-
-  #facts(spec: DatasetSpec): DatasetFacts {
+  #coverage(spec: DatasetSpec): DatabaseCoverage {
     const grouped = this.#database.prepare(
       `SELECT ${spec.dataDateExpression} AS data_date, COUNT(*) AS row_count
        FROM ${spec.tableName}
@@ -1750,7 +1386,6 @@ export class OeeDataStore {
     ).all();
     const dates: string[] = [];
     let rowCount = 0;
-    let unscopedRowCount = 0;
     for (const row of grouped) {
       const count = numberColumn(row, "row_count");
       rowCount += count;
@@ -1760,30 +1395,14 @@ export class OeeDataStore {
         normalizeDateKey(date, "data_date");
         dates.push(date);
       } catch {
-        unscopedRowCount += count;
+        // Undated or invalid historical facts do not anchor sync windows.
       }
     }
-    const dateSet = new Set(dates);
-    const missingDateRanges = dates.length > 1
-      ? coalesceDates(dateRange(dates[0]!, dates.at(-1)!).filter((date) => !dateSet.has(date)))
-      : [];
     return {
       minDataDate: dates.at(0) ?? null,
       maxDataDate: dates.at(-1) ?? null,
       rowCount,
       distinctDateCount: dates.length,
-      missingDateRanges,
-      unscopedRowCount,
-    };
-  }
-
-  #coverage(spec: DatasetSpec): DatabaseCoverage {
-    const facts = this.#facts(spec);
-    return {
-      minDataDate: facts.minDataDate,
-      maxDataDate: facts.maxDataDate,
-      rowCount: facts.rowCount,
-      distinctDateCount: facts.distinctDateCount,
     };
   }
 

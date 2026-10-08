@@ -12,7 +12,7 @@ export function dailyUpdatePlan(args: readonly string[], now = new Date()) {
     else if (argument === "--through-date" && !explicitDate && args[index + 1]) {
       throughDate = args[++index]!;
       explicitDate = true;
-    } else throw new Error("用法：npm run data:daily -- [--through-date YYYY-MM-DD] [--dry-run]");
+    } else throw new Error("用法：npm run daily:update -- [--through-date YYYY-MM-DD] [--dry-run]");
   }
   assertDate(throughDate);
   if (throughDate > latestClosedBusinessDate(now)) throw new Error("截止日期不能晚于最近已结束的业务日");

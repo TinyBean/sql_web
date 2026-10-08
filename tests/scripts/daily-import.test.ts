@@ -194,7 +194,7 @@ test("successful committed dates skip even with warnings or a later failed attem
     assert.equal((await store.importNewDay({ dataset: "dut_utilization", date: "2026-10-08" })).status, "completed_with_warnings");
     const before = f.facts("dut_utilization");
     f.overrides.set("dut_utilization2026-10-08", { status: 200, body: "invalid JSON" });
-    await assert.rejects(store.pullWindow({ dataset: "dut_utilization", startDate: "2026-10-08", endDate: "2026-10-08" }));
+    assert.equal((await store.sync({ dataset: "dut_utilization", initialStartDate: "2026-10-08", throughDate: "2026-10-08" })).status, "failed");
     const skipped = await store.importNewDay({ dataset: "dut_utilization", date: "2026-10-08" });
     assert.equal(skipped.status, "completed");
     assert.deepEqual(skipped.datasets[0]?.imports, []);
@@ -212,7 +212,7 @@ test("legacy Availability commits are recognized per date, excluding missing day
   const store = OeeDataStore.open(f.options);
   try {
     f.overrides.set("availability2026-10-07", { status: 200, body: response("availability", rows("availability", "2026-10-07")) });
-    await store.pullWindow({ dataset: "availability", startDate: "2026-10-07", endDate: "2026-10-08" });
+    await store.sync({ dataset: "availability", initialStartDate: "2026-10-07", throughDate: "2026-10-08" });
     f.database.exec("UPDATE oee_import_windows SET coverage_version=0,committed_dates_json='[]'");
     assert.deepEqual((await store.importNewDay({ dataset: "availability", date: "2026-10-07" })).datasets[0]?.plannedWindows, []);
     assert.equal((await store.importNewDay({ dataset: "availability", date: "2026-10-08" })).datasets[0]?.imports.length, 1);

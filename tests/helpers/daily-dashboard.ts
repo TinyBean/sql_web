@@ -15,8 +15,8 @@ export function dailyDashboard(throughDate = "2026-09-14"): DashboardState {
     data: [
       { kind: "MT", priority: 1, issue: "换线时间偏长", measure: "复查换线步骤",
         suggested_owner: "生产主管（职能建议，待人工确认）", loss_hours: 2.5 },
-      { kind: "ST", priority: 1, issue: "测试时间波动", measure: "验证测试参数",
-        suggested_owner: "测试工程（职能建议，待人工确认）", loss_hours: null },
+      { kind: "ST", priority: 1, issue: "测试等待偏长", measure: "核查等待记录并复测等待时长",
+        suggested_owner: "测试工程（职能建议，待人工确认）", loss_hours: 1.2 },
     ],
   }) };
 }

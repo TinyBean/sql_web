@@ -206,27 +206,31 @@ test("reports and email share server TOP3 text and reject wrong type, period, me
   const { a, d, database, queries, artifacts } = fixture(t);
   a("ADH001", 10, "Test(Normal)"); d("ADH001");
   a("ADH092", 10, "Test(Normal)", "ST"); d("ADH092", 10, 8, 20, "ST");
+  a("ADH001", 4, "Conversion"); a("ADH092", 3, "Conversion", "ST");
   const base = calculatedDashboard(database, "2026-01-01");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-01");
-  const rankings = (["MT", "ST"] as const).map((kind) => evidence.recordMachineRanking(
-    rankMachines(createOeeSkillRuntime(queries, artifacts), { start_date: "2026-01-01", end_date: "2026-01-01", kind, metric: "dut_on" }), { period: "day", agentId: "test" }));
   const report = { periods: (["day", "week", "month", "quarter"] as const).map((period) => ({
     period, comparison: "覆盖有限，根因待验证。", minimum_evidence: context.comparisons[period].minimum.id,
     history_evidence: context.comparisons[period].history.id,
-    groups: (["MT", "ST"] as const).map((kind, index) => ({ kind, evidence_ids: [context.comparisons[period].current.id],
-      no_findings_reason: period === "day" ? "" : "数据不足", items: period !== "day" ? [] : [{ priority: 1,
-        category: "performance", issue: "Socket 使用率偏低，ADH001 的配置需核查。", measure: "核查配置", suggested_owner: "测试工程",
-        evidence_ids: [context.comparisons[period].current.id, rankings[index]!.id], machine_evidence_ids: [rankings[index]!.id], loss_reference: null }],
+    groups: (["MT", "ST"] as const).map((kind) => ({ kind, evidence_ids: [context.comparisons[period].current.id, context.losses[period].evidence_id],
+      no_findings_reason: "无匹配损失记录，覆盖需核查", items: context.losses[period].by_kind[kind].map((candidate) => {
+        const ranking = evidence.recordMachineRanking(rankMachines(createOeeSkillRuntime(queries, artifacts), {
+          start_date: context.periods[period].start, end_date: context.periods[period].end, kind, metric: "loss_hours", states: [candidate.state_group],
+        }), { period, agentId: "test" });
+        return { priority: candidate.priority, category: "availability", issue: "Conversion（换线）损失，ADH001 的准备过程需核查。", measure: "核查准备过程并复测换线时长", suggested_owner: "测试工程",
+          evidence_ids: [context.comparisons[period].current.id, context.losses[period].evidence_id, ranking.id], machine_evidence_ids: [ranking.id],
+          loss_reference: { evidence_id: context.losses[period].evidence_id, row_index: candidate.row_index } };
+      }),
     })),
   })) };
   const result = validateAnalysisReport(report, context, evidence.records);
-  assert.match(result.rows.day[0]!["issue"] as string, /T5773\/ADH001.*50.00%/u);
+  assert.match(result.rows.day[0]!["issue"] as string, /T5773\/ADH001.*4.0 小时/u);
   assert.match(result.rows.day[1]!["issue"] as string, /T5851\/ADH092/u);
   const email = createDailyImprovementEmail(applyAnalysisReport(base, result), "2026-01-01");
   assert.ok(email.text.includes(String(result.rows.day[0]!["issue"])));
   assert.ok(email.html?.includes("T5773/ADH001"));
-  const rank = rankings[0]!;
+  const rank = evidence.records.get(report.periods[0]!.groups[0]!.items[0]!.machine_evidence_ids[0]!)!;
   for (const override of [
     { truncated: true }, { owner: { period: "week" as const, agentId: "test" } },
     { rankingScope: { ...rank.rankingScope!, kind: "ST" as const } },
@@ -235,7 +239,7 @@ test("reports and email share server TOP3 text and reject wrong type, period, me
     { range: { start: "2026-01-02", end: "2026-01-02" } },
   ]) {
     evidence.records.set(rank.id, { ...rank, ...override });
-    assert.throws(() => validateAnalysisReport(report, context, evidence.records), /证据|TOP3/u);
+    assert.throws(() => validateAnalysisReport(report, context, evidence.records), /证据|TOP3|排名/u);
   }
   evidence.records.set(rank.id, rank);
   const missing = structuredClone(report); missing.periods[0]!.groups[0]!.items[0]!.machine_evidence_ids = [];

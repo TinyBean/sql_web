@@ -16,7 +16,7 @@ test("daily email preserves the six columns and published values, without includ
   assert.equal(email.subject, "日改善措施表（2026-09-14） · 截止 2026-09-14");
   for (const body of [email.text, email.html!]) {
     for (const text of ["统计业务日：2026-09-14", "截止业务日：2026-09-14", "MT", "ST", "换线时间偏长",
-      "测试时间波动", "2.5", "—", "职能建议，待人工确认", "数据缺失：仅反映已有数据", "统计口径："]) {
+      "测试等待偏长", "2.5", "1.2", "职能建议，待人工确认", "数据缺失：仅反映已有数据", "统计口径："]) {
       assert.ok(body.includes(text), text);
     }
     assert.doesNotMatch(body, /不得出现在日表中的周月季信息/u);
@@ -26,6 +26,21 @@ test("daily email preserves the six columns and published values, without includ
   assert.match(email.html!, /&lt;script&gt;bad\(\)&lt;\/script&gt; &amp; &quot;参数&quot;<br>核实原因/u);
   assert.doesNotMatch(email.html!, /<script>/u);
   assert.equal(email.html!.match(/<th>/gu)?.length, 6);
+});
+
+test("daily email rejects missing hours and blank required fields, and preserves measured zero", () => {
+  const state = dailyDashboard();
+  for (const [key, value] of [["loss_hours", null], ["loss_hours", undefined], ["loss_hours", NaN], ["loss_hours", Infinity],
+    ["loss_hours", "1.2"], ["issue", " "], ["measure", ""], ["suggested_owner", null]] as const) {
+    assert.throws(() => createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
+      ...widget, data: widget.data.map((row) => ({ ...row, [key]: value })),
+    }) } as typeof state, "2026-09-14"), /必填/u);
+  }
+  const email = createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
+    ...widget, data: widget.data.map((row) => ({ ...row, loss_hours: 0 })),
+  }) }, "2026-09-14");
+  assert.match(email.text, /\t0\.0/u);
+  assert.doesNotMatch(email.text, /—/u);
 });
 
 test("empty suggestions retain both kinds' explanations", () => {

@@ -5,31 +5,25 @@ import { type AnalysisContext, type Evidence } from "./evidence.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { createAnalysisTemplate } from "../template.ts";
 import { formatMachineMentions, hasMachineDistributionClaim } from "../../../skills/test-oee-calculator/assets/machine-platforms.ts";
-import { machineRankingView, type MachineMetric } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
+import { machineRankingView } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
 
 const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
 const readableDescription = "面向业务用户的中文说明，用实际日期、指标和数据来源解释结论，不含 q11 等内部证据编号、查询行号、工具名或字段名。";
 const text = Type.String({ minLength: 1, maxLength: 1800, description: readableDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
-export const ANALYSIS_CATEGORY_METRICS = {
-  availability: ["loss_hours", "availability", "effective_availability"],
-  performance: ["dut_on", "test_time_performance"], yield: ["final_yield"],
-  other: ["loss_hours", "availability", "effective_availability", "dut_on", "test_time_performance", "final_yield", "oee", "effective_oee"],
-} as const satisfies Record<string, readonly MachineMetric[]>;
-export const ANALYSIS_CATEGORY_RULES = Object.entries(ANALYSIS_CATEGORY_METRICS)
-  .map(([category, metrics]) => category + " 允许 " + metrics.join("、")).join("；") +
-  "。Performance 与 Yield 必须分别提交；同类别可以引用多个指标，不能用 other 合并 Performance/Yield。拆分后按影响、证据充分程度和改善价值重新选前三条，不折算损失小时。";
+export const ANALYSIS_CATEGORY_RULES = "类别固定为 availability；每项对应程序选定的一个损失状态，机台排名使用 loss_hours，并且 states 仅包含该状态。本期损失小时来自完整状态汇总，不折算 Performance/Yield。";
 export const PeriodKeySchema = Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
 export const AnalysisKindSchema = Type.Union([Type.Literal("MT"), Type.Literal("ST")]);
 export const AnalysisItemSchema = Type.Object({
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
-  category: Type.Union([Type.Literal("availability"), Type.Literal("performance"), Type.Literal("yield"), Type.Literal("other")], { description: ANALYSIS_CATEGORY_RULES }),
+  category: Type.Literal("availability", { description: ANALYSIS_CATEGORY_RULES }),
   issue: text, measure: text,
   suggested_owner: Type.String({ minLength: 1, maxLength: 160, description: readableDescription }),
   evidence_ids: refs,
   machine_evidence_ids: refs,
-  loss_reference: Type.Union([Type.Null(), Type.Object({ evidence_id: Type.String(), row_index: Type.Integer({ minimum: 0 }) }, { additionalProperties: false })]),
+  loss_reference: Type.Object({ evidence_id: Type.String({ minLength: 1 }), row_index: Type.Integer({ minimum: 0 }) },
+    { additionalProperties: false, description: "必填；引用程序提供的本期完整损失证据和入选状态原始行号。" }),
 }, { additionalProperties: false });
 export const AnalysisGroupSchema = Type.Object({
   kind: AnalysisKindSchema,
@@ -155,6 +149,13 @@ function assertReadableText(value: string, field: string): void {
 export function validateAnalysisReport(
   input: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
 ): AnalysisResult {
+  return validateReport(input, context, evidence);
+}
+
+/** Partial coverage is available only to degradation after invalid items have been excluded. */
+function validateReport(
+  input: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>, allowMissing = false,
+): AnalysisResult {
   const value = parseAnalysisReport(input);
   const issues: AnalysisValidationIssue[] = [];
   const rows = {} as Record<PeriodKey, DashboardRow[]>;
@@ -207,28 +208,40 @@ export function validateAnalysisReport(
       }
       const { group, index: groupIndex } = matchingGroups[0]!;
       const groupPath = periodPath + "/groups/" + groupIndex;
+      const selection = context.losses[key];
+      const candidates = selection.by_kind[kind];
       readable(group.no_findings_reason, groupLocation, groupPath + "/no_findings_reason");
       if (!group.items.length && hasMachineDistributionClaim(group.no_findings_reason)) {
         add(groupLocation, groupPath + "/no_findings_reason", "UNVERIFIED_DISTRIBUTION", "无建议原因不能包含未经机台排名证据核实的集中或分散结论", "数据不足或无充分依据的说明", "机台分布结论");
       }
       refs(group.evidence_ids, groupLocation, groupPath + "/evidence_ids");
       if (!group.evidence_ids.includes(expected.current.id)) add(groupLocation, groupPath + "/evidence_ids", "CURRENT_EVIDENCE_MISSING", "缺少本期指标证据", expected.current.id, group.evidence_ids);
+      if (!group.evidence_ids.includes(selection.evidence_id)) add(groupLocation, groupPath + "/evidence_ids", "CURRENT_LOSS_EVIDENCE_MISSING", "缺少程序提供的本期完整损失证据", selection.evidence_id, group.evidence_ids);
+      if (!allowMissing && group.items.length !== candidates.length) add(groupLocation, groupPath + "/items", "LOSS_TOP3_COVERAGE", "必须逐项分析程序选定的损失状态 Top3，不足三项时使用实际数量", candidates.length, group.items.length,
+        "使用上下文 losses 中本周期同类型的全部入选状态。");
       if (!group.items.length && !group.no_findings_reason.trim()) add(groupLocation, groupPath + "/no_findings_reason", "EMPTY_GROUP_REASON", "空清单必须解释数据不足或无充分依据的原因", "非空说明", "");
-      const ordered = [...group.items].sort((a, b) => a.priority - b.priority);
+      const seenStates = new Set<string>();
       for (const [itemIndex, item] of group.items.entries()) {
         const itemPath = groupPath + "/items/" + itemIndex;
         const location = { ...groupLocation, priority: item.priority, item_index: itemIndex };
         const itemIssueStart = issues.length;
-        if (item.priority !== ordered.indexOf(item) + 1) add(location, itemPath + "/priority", "PRIORITY_SEQUENCE", "同周期同类型优先级必须由 1 连续排列且不重复", ordered.indexOf(item) + 1, item.priority);
+        if ((!allowMissing && item.priority !== itemIndex + 1) || (itemIndex > 0 && item.priority <= group.items[itemIndex - 1]!.priority)) {
+          add(location, itemPath + "/priority", "PRIORITY_SEQUENCE", "优先级必须按损失排名由 1 连续排列且不重复；降级时保留原排名", allowMissing ? "原损失排名升序" : itemIndex + 1, item.priority);
+        }
         for (const field of ["issue", "measure", "suggested_owner"] as const) {
           if (!item[field].trim()) add(location, itemPath + "/" + field, "EMPTY_TEXT", "问题、措施、责任职能不能为空", "非空正文", "");
           readable(item[field], location, itemPath + "/" + field);
         }
         refs(item.evidence_ids, location, itemPath + "/evidence_ids");
-        const forbiddenHours = item.loss_reference !== null && (item.category === "performance" || item.category === "yield");
-        if (forbiddenHours) add(location, itemPath + "/loss_reference", "RATIO_LOSS_REFERENCE", "Performance/Yield 不得折算为损失小时，loss_reference 应为 null", null, item.loss_reference);
+        const reference = item.loss_reference;
+        const candidate = reference.evidence_id === selection.evidence_id
+          ? candidates.find((entry) => entry.row_index === reference.row_index) : undefined;
+        if (candidate) {
+          if (seenStates.has(candidate.state_group)) add(location, itemPath + "/loss_reference", "LOSS_STATE_DUPLICATE", "同类型损失状态不能重复提交", "每个入选状态一项", candidate.state_group);
+          seenStates.add(candidate.state_group);
+          if (item.priority !== candidate.priority) add(location, itemPath + "/priority", "LOSS_PRIORITY_MISMATCH", "优先级必须匹配程序确定的损失排名", candidate.priority, item.priority);
+        }
         const rankings: { record: Evidence; summary: string }[] = [];
-        const metrics = new Set<MachineMetric>();
         for (const [rankingIndex, id] of item.machine_evidence_ids.entries()) {
           const rankingPath = itemPath + "/machine_evidence_ids/" + rankingIndex;
           const ranking = ref(id, location, rankingPath);
@@ -239,32 +252,29 @@ export function validateAnalysisReport(
           }
           const scope = ranking.rankingScope;
           const rankingIssueStart = issues.length;
-          metrics.add(scope.metric);
           if (ranking.range?.start !== context.periods[key].start || ranking.range.end !== context.periods[key].end) add(location, rankingPath, "RANKING_RANGE_MISMATCH", "TOP3 日期范围不匹配本期", context.periods[key], ranking.range ?? null, "复用本周期完整日期范围的排名。", id);
           if (scope.kind !== kind || ranking.rows.some((row) => row["kind"] !== kind)) add(location, rankingPath, "RANKING_KIND_MISMATCH", "TOP3 必须引用同类型机台排名", kind, { scope: scope.kind, rows: [...new Set(ranking.rows.map((row) => row["kind"]))] }, "复用同 MT/ST 的排名。", id);
           if (scope.basis !== "report_period") add(location, rankingPath, "RANKING_BASIS_MISMATCH", "TOP3 必须引用完整整期排名证据", "report_period", scope.basis, "固定报告使用 report_period，不使用 machine_day。", id);
-          if (!(ANALYSIS_CATEGORY_METRICS[item.category] as readonly MachineMetric[]).includes(scope.metric)) add(location, rankingPath, "METRIC_CATEGORY_MISMATCH", "TOP3 问题类别与排名指标不匹配", ANALYSIS_CATEGORY_METRICS[item.category], { category: item.category, metric: scope.metric }, "Performance 与 Yield 拆分提交，复用已有对应排名；拆分后重新选前三条。", id);
+          if (scope.metric !== "loss_hours") add(location, rankingPath, "METRIC_CATEGORY_MISMATCH", "损失问题必须引用损失小时机台排名", ["loss_hours"], { category: item.category, metric: scope.metric }, "复用该损失状态的 loss_hours 排名。", id);
+          if (candidate && (scope.states.length !== 1 || scope.states[0] !== candidate.state_group)) add(location, rankingPath, "LOSS_STATE_MISMATCH", "损失问题的机台 TOP3 必须精确匹配单个入选状态", candidate.state_group, scope.states,
+            "仅使用该状态的已有排名；缺少时补查。", selection.evidence_id);
           if (issues.length === rankingIssueStart && !rankings.some(({ record }) => record.id === id)) rankings.push({ record: ranking, summary: machineRankingView({ rows: ranking.rows, range: ranking.range!, scope }).summary });
         }
-        if (item.category === "other" && metrics.has("final_yield") &&
-          (metrics.has("dut_on") || metrics.has("test_time_performance"))) add(location, itemPath + "/category", "MIXED_PERFORMANCE_YIELD", "不能用 other 合并 Performance/Yield", "分别提交 performance 和 yield", [...metrics], "拆分 Socket/测试时间与良率建议，分别引用对应排名。");
         let hours: number | null = null;
-        if (item.loss_reference !== null && !forbiddenHours) {
-          const reference = item.loss_reference;
+        {
           const lossPath = itemPath + "/loss_reference";
           const measured = ref(reference.evidence_id, location, lossPath + "/evidence_id");
           if (measured) {
             const row = measured.rows[reference.row_index];
             const validLoss = item.evidence_ids.includes(measured.id) && measured.source === "measure_loss" &&
               measured.range?.start === context.periods[key].start && measured.range.end === context.periods[key].end &&
-              row?.["kind"] === kind && typeof row["loss_hours"] === "number";
-            if (!validLoss) add(location, lossPath, "LOSS_REFERENCE_MISMATCH", "损失小时必须引用 measure_loss 返回的本期同类型实测行", { source: "measure_loss", range: context.periods[key], kind, numeric_loss_hours: true },
+              measured.lossScope?.byMachine === false && measured.lossScope.states.length === 0 && measured.lossScope.machines.length === 0 &&
+              candidate !== undefined && row?.["kind"] === kind && row["state_group"] === candidate.state_group &&
+              typeof row["loss_hours"] === "number" && Number.isFinite(row["loss_hours"]) && row["loss_hours"] === candidate.loss_hours;
+            if (!validLoss) add(location, lossPath, "LOSS_REFERENCE_MISMATCH", "损失小时必须引用程序通过 measure_loss 提供的本期同类型完整状态汇总入选行", { evidence_id: selection.evidence_id, source: "measure_loss", range: context.periods[key], kind, candidates },
               { source: measured.source ?? null, range: measured.range ?? null, row: row ?? null, included: item.evidence_ids.includes(measured.id) }, "保留原始行号，复用本期同类型的标准实测损失证据。", measured.id);
             else {
-              // Invalid ranking references already explain the failure; do not cascade a state error.
-              if (issues.length === itemIssueStart && !rankings.some(({ record }) => record.rankingScope!.metric === "loss_hours" &&
-                (!record.rankingScope!.states.length || record.rankingScope!.states.includes(String(row["state_group"]))))) add(location, itemPath + "/machine_evidence_ids", "LOSS_STATE_MISMATCH", "损失问题的 TOP3 状态范围与实测损失引用不匹配", row["state_group"], rankings.map(({ record }) => record.rankingScope!.states), "引用覆盖该损失状态的已有排名；缺少时补查。", measured.id);
-              hours = Math.round((row["loss_hours"] as number) * 10) / 10;
+              hours = Number((row["loss_hours"] as number).toFixed(1));
             }
           }
         }
@@ -312,7 +322,7 @@ export function validateAnalysisReport(
   return { report: value, rows, status: "completed", exclusions: [] };
 }
 
-/** Only item-scoped failures can be discarded; the remaining report must pass the same validator. */
+/** Only item-scoped failures can be discarded; survivors retain their audited state and rank. */
 export function degradeAnalysisReport(input: AnalysisReport, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>): AnalysisResult {
   let issues: readonly AnalysisValidationIssue[];
   try { return validateAnalysisReport(input, context, evidence); }
@@ -329,14 +339,14 @@ export function degradeAnalysisReport(input: AnalysisReport, context: AnalysisCo
         exclusions.push({ period: period.period, kind: group.kind, priority: item.priority, item: structuredClone(item), issues: itemIssues });
         affected = true;
         return false;
-      }).sort((a, b) => a.priority - b.priority).map((item, index) => ({ ...item, priority: index + 1 }));
+      }).sort((a, b) => a.priority - b.priority);
       if (!group.items.length && exclusions.some((entry) => entry.period === period.period && entry.kind === group.kind)) {
         group.no_findings_reason = "部分建议未通过证据校验，暂无可展示建议";
       }
     }
     if (affected) period.comparison = "本周期部分改善建议未通过证据校验，已从报告中剔除；周期趋势判断暂未提供，请结合已展示指标核对。";
   }
-  const result = validateAnalysisReport(candidate, context, evidence);
+  const result = validateReport(candidate, context, evidence, true);
   return { ...result, status: "degraded", exclusions };
 }
 

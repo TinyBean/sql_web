@@ -5,7 +5,7 @@ import { MAX_QUERY_ARTIFACT_BYTES, normalizeDataSnapshotName, type DataSnapshotD
 import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { dashboardPeriods, weekLabel, ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
-import type { LossMeasurement, LossScope } from "../../../tool/loss-tools.ts";
+import { measureLoss, type LossMeasurement, type LossScope } from "../../../tool/loss-tools.ts";
 import type { MachineRankingMeasurement, MachineRankingScope, MachineRankingCache } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
 import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
 
@@ -41,7 +41,30 @@ export interface AnalysisContext {
     readonly minimum: Evidence;
     readonly history: Evidence;
   }>;
+  readonly losses: Record<PeriodKey, {
+    readonly evidence_id: string;
+    readonly snapshot: DataSnapshotDescriptor;
+    readonly by_kind: Record<"MT" | "ST", readonly AnalysisLossCandidate[]>;
+  }>;
   readonly dashboard: DashboardState;
+}
+
+export interface AnalysisLossCandidate {
+  readonly priority: number;
+  readonly state_group: string;
+  readonly loss_hours: number;
+  readonly row_index: number;
+}
+
+/** Rank complete state totals before display rounding, retaining the audited row index. */
+function selectLosses(record: Evidence, kind: "MT" | "ST"): AnalysisLossCandidate[] {
+  return record.rows.map((row, row_index) => ({ row, row_index }))
+    .filter(({ row }) => row["kind"] === kind && typeof row["state_group"] === "string" &&
+      typeof row["loss_hours"] === "number" && Number.isFinite(row["loss_hours"]))
+    .sort((a, b) => Number(b.row["loss_hours"]) - Number(a.row["loss_hours"]) ||
+      (String(a.row["state_group"]) < String(b.row["state_group"]) ? -1 : String(a.row["state_group"]) > String(b.row["state_group"]) ? 1 : 0))
+    .slice(0, 3).map(({ row, row_index }, index) => ({ priority: index + 1,
+      state_group: String(row["state_group"]), loss_hours: Number(row["loss_hours"]), row_index }));
 }
 
 function normalize(row: Record<string, unknown>): DashboardRow {
@@ -110,7 +133,8 @@ export class AnalysisEvidence {
   }
 
   scope(context: AnalysisContext, period: PeriodKey, agentId: string): AnalysisEvidenceScope {
-    return { period, agentId, baselineIds: Object.values(context.comparisons[period]).map((record) => record.id) };
+    return { period, agentId, baselineIds: [...Object.values(context.comparisons[period]).map((record) => record.id),
+      context.losses[period].evidence_id] };
   }
 
   #visible(record: Evidence, scope: AnalysisEvidenceScope): boolean {
@@ -153,6 +177,7 @@ export class AnalysisEvidence {
   }
 
   context(state: DashboardState, throughDate: string): AnalysisContext {
+    if (!this.artifacts) throw new Error("每日分析需要独立的数据快照存储");
     const periods = dashboardPeriods(throughDate);
     const source = this.query(getDefaultTestOeeSql(periods.syncStart, throughDate).sql, [], 800);
     if (source.truncated) throw new Error("基础分析证据被截断");
@@ -163,6 +188,7 @@ export class AnalysisEvidence {
       truncated: false,
     });
     const comparisons = {} as AnalysisContext["comparisons"];
+    const losses = {} as AnalysisContext["losses"];
     for (const key of ANALYSIS_PERIOD_KEYS) {
       const days: string[] = [];
       if (key === "day") {
@@ -203,8 +229,13 @@ export class AnalysisEvidence {
           start: periods.trend.start, end: addDays(periods[key].start, -1),
         } : undefined),
       };
+      const loss = this.recordLoss(measureLoss(this.queries, this.artifacts.scoped("baseline/" + key), {
+        start_date: periods[key].start, end_date: periods[key].end,
+      }), { period: key, agentId: "baseline" });
+      losses[key] = { evidence_id: loss.id, snapshot: loss.snapshot!,
+        by_kind: { MT: selectLosses(loss, "MT"), ST: selectLosses(loss, "ST") } };
     }
-    return { throughDate, periods, comparisons, dashboard: state };
+    return { throughDate, periods, comparisons, losses, dashboard: state };
   }
 
   /** Only the shared standard measurement path can mark report loss references. */

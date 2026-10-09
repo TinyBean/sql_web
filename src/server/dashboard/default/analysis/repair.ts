@@ -4,7 +4,7 @@ import type { AnalysisContext, Evidence } from "./evidence.ts";
 import type { PeriodKey } from "../periods.ts";
 import { normalizeDataSnapshotName } from "../../../tool/artifact-store.ts";
 import {
-  ANALYSIS_CATEGORY_METRICS, AnalysisGroupSchema, AnalysisItemSchema, AnalysisKindSchema, PeriodKeySchema,
+  AnalysisGroupSchema, AnalysisItemSchema, AnalysisKindSchema, PeriodKeySchema,
   AnalysisValidationError, decodeAnalysisStructures, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport,
   type AnalysisReport, type AnalysisResult, type AnalysisValidationIssue,
 } from "./report.ts";
@@ -141,24 +141,27 @@ export class AnalysisRepairState {
   needsEvidence(period?: PeriodKey): boolean {
     return this.#issues.some((issue) => {
       if (period && issue.period !== period) return false;
-      if (!/^(EVIDENCE_|RANKING_(SOURCE|RANGE|KIND|BASIS)_|LOSS_(REFERENCE|STATE)_)/u.test(issue.code)) return false;
+      if (!/^(EVIDENCE_|RANKING_(SOURCE|RANGE|KIND|BASIS)_|LOSS_(REFERENCE|STATE)_|METRIC_CATEGORY_MISMATCH)/u.test(issue.code)) return false;
+      if (issue.code === "LOSS_STATE_DUPLICATE") return false;
       if (!issue.period || !issue.kind || issue.item_index === undefined || !this.#candidate) return true;
       const item = this.#candidate.periods.find((entry) => entry.period === issue.period)?.groups
         .find((group) => group.kind === issue.kind)?.items[issue.item_index];
       if (!item) return true;
       const range = this.context.periods[issue.period];
+      const selection = this.context.losses[issue.period];
+      const candidate = selection.by_kind[issue.kind].find((entry) => entry.row_index === item.loss_reference.row_index &&
+        item.loss_reference.evidence_id === selection.evidence_id) ?? selection.by_kind[issue.kind].find((entry) => entry.priority === item.priority);
       const scoped = [...this.evidence.values()].filter((record) => !record.truncated && record.owner?.period === issue.period &&
         record.range?.start === range.start && record.range.end === range.end);
       if (issue.code !== "LOSS_STATE_MISMATCH" && (issue.code === "LOSS_REFERENCE_MISMATCH" ||
           issue.path.includes("loss_reference") || item.loss_reference?.evidence_id === issue.evidence_id)) {
-        return !scoped.some((record) => record.source === "measure_loss" && record.rows.some((row) => row["kind"] === issue.kind && typeof row["loss_hours"] === "number"));
+        return !scoped.some((record) => record.id === selection.evidence_id && record.source === "measure_loss");
       }
       if (issue.path.includes("machine_evidence_ids") || issue.code === "LOSS_STATE_MISMATCH" || item.machine_evidence_ids.includes(issue.evidence_id ?? "")) {
         return !scoped.some((record) => record.source === "rank_machines" && record.rankingScope && record.rankingScope.kind === issue.kind &&
-          record.rankingScope.basis === "report_period" &&
-          (ANALYSIS_CATEGORY_METRICS[item.category] as readonly string[]).includes(record.rankingScope.metric) &&
+          record.rankingScope.basis === "report_period" && record.rankingScope.metric === "loss_hours" &&
           record.rows.every((row) => row["kind"] === issue.kind) &&
-          (issue.code !== "LOSS_STATE_MISMATCH" || !record.rankingScope.states.length || record.rankingScope.states.includes(String(issue.expected))));
+          candidate !== undefined && record.rankingScope.states.length === 1 && record.rankingScope.states[0] === candidate.state_group);
       }
       return true;
     });

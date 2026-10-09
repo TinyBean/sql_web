@@ -83,7 +83,7 @@ export function createAnalysisTemplate(key: PeriodKey): DashboardTableWidget {
       { key: "measure", label: "改善措施" }, { key: "suggested_owner", label: "建议责任人" }, { key: "loss_hours", label: "本期损失小时" },
     ] },
     format: { unit: "", precision: 1 },
-    metricDefinition: "问题、优先级、措施与责任职能由临时 Agent 根据查询证据生成;损失小时仅引用本期实测记录,无法直接量化时为 NULL",
+    metricDefinition: "MT/ST 分别按本期完整损失状态累计小时降序取 Top3,按未舍入小时排名,并列按状态名称排序;不足三项展示实际数量。每状态单独分析问题、措施与建议责任职能;本期损失小时直接引用该状态实测汇总且必填,缺失不补零。问题内的机台 TOP3 对应同周期、同类型、同状态的损失排名。",
   };
 }
 

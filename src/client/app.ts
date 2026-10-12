@@ -222,7 +222,10 @@ async function api<ResponseBody>(
 }
 
 function setChatOpen(open: boolean, focus = false): void {
+  const wasOpen = elements.chatDock.classList.contains("open");
+  if (!open && wasOpen) rememberSelectedScrollPosition();
   elements.chatDock.classList.toggle("open", open);
+  if (open && !wasOpen && state.sessionId !== null) restoreScrollPosition(state.sessionId);
   if (open && focus) window.setTimeout(() => elements.input.focus(), 0);
 }
 
@@ -943,11 +946,12 @@ function messagesAreNearBottom(): boolean {
 }
 
 function rememberSelectedScrollPosition(): void {
-  if (state.sessionId === null) return;
+  if (state.sessionId === null || !elements.chatDock.classList.contains("open")) return;
   state.scrollPositions.set(state.sessionId, elements.messages.scrollTop);
 }
 
 function restoreScrollPosition(sessionId: string): void {
+  if (!elements.chatDock.classList.contains("open")) return;
   scrollMessagesTo(state.scrollPositions.get(sessionId) ?? elements.messages.scrollHeight);
 }
 
@@ -979,7 +983,7 @@ function syncComposerState(): void {
   elements.sendButton.classList.toggle("streaming", streaming);
   elements.sendButton.setAttribute("aria-label", streaming ? "停止回答" : "发送问题");
   elements.sendButton.disabled = activeStream?.aborting ?? false;
-  elements.input.disabled = streaming;
+  elements.input.readOnly = streaming;
   elements.newChatButton.disabled = false;
   elements.chatDock.classList.toggle("streaming", streaming);
   const statusLabel = elements.composerStatus.querySelector("span");
@@ -1188,7 +1192,7 @@ function handleStreamEvent(
 ): void {
   const { node } = activeStream;
   const visible = activeStreamIsVisible(activeStream);
-  const followLatest = visible && messagesAreNearBottom();
+  const followLatest = visible && elements.chatDock.classList.contains("open") && messagesAreNearBottom();
   if (parsed.event === "dashboard_update") {
     clearPendingDashboardTool(activeStream, parsed.data.toolCallId);
     if (parsed.data.dashboard.revision >= activeStream.dashboard.revision) {
@@ -1793,7 +1797,7 @@ elements.composer.addEventListener("submit", (event) => {
 elements.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    elements.composer.requestSubmit();
+    if (!elements.input.readOnly) elements.composer.requestSubmit();
   }
 });
 elements.input.addEventListener("focus", () => setChatOpen(true));
@@ -1816,6 +1820,7 @@ elements.sessionList.addEventListener("click", (event) => {
   const button = candidate instanceof HTMLElement ? candidate : null;
   const sessionId = button?.dataset["sessionId"];
   if (sessionId) {
+    event.stopPropagation();
     toggleHistory(false);
     void loadSession(sessionId)
       .then(() => setChatOpen(true))

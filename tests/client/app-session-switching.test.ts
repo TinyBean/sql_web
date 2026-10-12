@@ -105,9 +105,11 @@ test("switches between independent live session answers without stealing the cur
   ]);
   const controllers = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
   const sessionLoads = new Map<string, number>();
+  const messageRequests: string[] = [];
   const aborts: string[] = [];
   const createdSessionIds = ["session-c", "session-d"];
   let resolveAbortA: (() => void) | undefined;
+  let failNextAbort = false;
   const encoder = new TextEncoder();
   const originalFetch = globalThis.fetch;
 
@@ -138,6 +140,7 @@ test("switches between independent live session answers without stealing the cur
     const messageMatch = /^\/api\/sessions\/([^/]+)\/messages$/u.exec(url);
     if (messageMatch && method === "POST") {
       const id = decodeURIComponent(messageMatch[1] ?? "");
+      messageRequests.push(id);
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controllers.set(id, controller);
@@ -153,6 +156,13 @@ test("switches between independent live session answers without stealing the cur
     if (abortMatch && method === "POST") {
       const id = decodeURIComponent(abortMatch[1] ?? "");
       aborts.push(id);
+      if (failNextAbort) {
+        failNextAbort = false;
+        return new Response(JSON.stringify({ error: "暂时无法停止回答", requestId: "abort-b" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (id === "session-a") {
         await new Promise<void>((resolve) => {
           resolveAbortA = resolve;
@@ -202,6 +212,12 @@ test("switches between independent live session answers without stealing the cur
   Object.defineProperty(messages, "scrollHeight", { configurable: true, value: 900 });
   const submit = (): void => {
     composer.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
+  };
+  Object.defineProperty(composer, "requestSubmit", { configurable: true, value: submit });
+  const pressEnter = (): void => {
+    const event = new browser.Event("keydown", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "key", { value: "Enter" });
+    input.dispatchEvent(event);
   };
   const sendSse = (id: string, event: string, data: unknown): void => {
     const controller = controllers.get(id);
@@ -282,6 +298,7 @@ test("switches between independent live session answers without stealing the cur
   chatDock.click();
   assert.equal(historyPanel.classList.contains("open"), false, "clicking chat should close history");
   input.value = "";
+  input.dispatchEvent(new browser.Event("focus"));
 
   messages.scrollTop = 125;
   sessionButton("session-b").click();
@@ -300,9 +317,10 @@ test("switches between independent live session answers without stealing the cur
   const sessionALoadsBeforeStreaming = sessionLoads.get("session-a");
 
   input.value = "问题 A";
-  submit();
+  pressEnter();
   await waitFor(() => controllers.has("session-a"), "session A stream did not start");
-  assert.equal(input.disabled, true);
+  assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, true);
   assert.equal(newChatButton.disabled, false);
   assert.equal(deleteButton("session-a").disabled, true);
   assert.equal(deleteButton("session-b").disabled, false);
@@ -315,9 +333,33 @@ test("switches between independent live session answers without stealing the cur
   });
   await waitFor(() => messages.textContent.includes("A 正在回答"), "session A progress was not rendered");
   assert.match(dashboardUpdatedAt.textContent ?? "", /r1/u);
+  messages.scrollTop = 180;
+  const liveTranscriptA = messages.firstElementChild;
   chatCollapseButton.click();
   assert.equal(chatDock.classList.contains("open"), false, "running chat can be collapsed");
   assert.equal(chatDock.classList.contains("streaming"), true);
+  messages.scrollTop = 0;
+  sendSse("session-a", "text_delta", { turn: 0, delta: "，收起时继续" });
+  await waitFor(() => messages.textContent.includes("收起时继续"), "collapsed chat did not receive new progress");
+  assert.equal(messages.scrollTop, 0, "progress must not scroll the hidden message area");
+  input.click();
+  assert.equal(chatDock.classList.contains("open"), true, "clicking the read-only input should reopen running chat");
+  assert.equal(messages.firstElementChild, liveTranscriptA, "reopening must preserve the live transcript");
+  assert.equal(messages.scrollTop, 180, "reopening must preserve the viewport");
+  assert.equal(messages.textContent.includes("A 正在回答"), true);
+  chatCollapseButton.click();
+  messages.scrollTop = 0;
+  input.dispatchEvent(new browser.Event("focus"));
+  assert.equal(chatDock.classList.contains("open"), true, "focusing the read-only input should reopen running chat");
+  assert.equal(messages.firstElementChild, liveTranscriptA);
+  assert.equal(messages.scrollTop, 180);
+  pressEnter();
+  assert.deepEqual(aborts, [], "Enter in the read-only input must not stop the answer");
+  assert.deepEqual(messageRequests, ["session-c", "session-a"], "reopening must not submit another question");
+  sendSse("session-a", "text_delta", { turn: 0, delta: "，重新展开后继续" });
+  await waitFor(() => messages.textContent.includes("重新展开后继续"), "reopened chat did not receive new progress");
+  assert.equal(messages.scrollTop, 180);
+  assert.equal(input.readOnly, true);
 
   messages.scrollTop = 180;
   newChatButton.click();
@@ -327,12 +369,14 @@ test("switches between independent live session answers without stealing the cur
   );
   assert.equal(document.querySelector('[data-session-id="session-d"]'), null);
   assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, false);
   assert.equal(sessionButton("session-a").classList.contains("streaming"), true);
 
   sessionButton("session-b").click();
   await waitFor(() => sessionButton("session-b").classList.contains("active"), "session B did not load");
   assert.match(dashboardUpdatedAt.textContent ?? "", /r0/u);
   assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, false);
   assert.equal(sendButton.getAttribute("aria-label"), "发送问题");
   assert.equal(sessionButton("session-a").classList.contains("streaming"), true);
   assert.equal(sessionLoads.get("session-a"), sessionALoadsBeforeStreaming);
@@ -341,7 +385,8 @@ test("switches between independent live session answers without stealing the cur
   input.value = "问题 B";
   submit();
   await waitFor(() => controllers.has("session-b"), "session B stream did not start");
-  assert.equal(input.disabled, true);
+  assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, true);
   assert.equal(sessionButton("session-a").classList.contains("streaming"), true);
   assert.equal(sessionButton("session-b").classList.contains("streaming"), true);
   sendSse("session-b", "turn_start", { turn: 0 });
@@ -361,6 +406,7 @@ test("switches between independent live session answers without stealing the cur
 
   sessionButton("session-a").click();
   await waitFor(() => sessionButton("session-a").classList.contains("active"), "session A was not restored");
+  assert.equal(chatDock.classList.contains("open"), true, "selecting a running session should reopen chat");
   assert.equal(messages.textContent.includes("A 正在回答"), true);
   assert.equal(messages.textContent.includes("B 正在回答"), false);
   assert.match(dashboardUpdatedAt.textContent ?? "", /r2/u);
@@ -383,14 +429,42 @@ test("switches between independent live session answers without stealing the cur
   await waitFor(() => aborts.length === 1, "session A abort did not start");
   assert.deepEqual(aborts, ["session-a"]);
   assert.equal(sendButton.disabled, true);
+  assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, true);
+  chatCollapseButton.click();
+  input.click();
+  assert.equal(chatDock.classList.contains("open"), true, "chat should reopen while a stop request is pending");
+  assert.equal(sendButton.disabled, true);
+  pressEnter();
+  assert.deepEqual(aborts, ["session-a"], "Enter must not repeat a pending stop request");
 
   sessionButton("session-b").click();
   await waitFor(() => sessionButton("session-b").classList.contains("active"), "session B was not restored");
   assert.equal(sendButton.disabled, false, "session A abort must not disable session B controls");
+  assert.equal(input.readOnly, true);
   assert.equal(messages.scrollTop, 240, "session B should restore the position saved before switching away");
   resolveAbortA?.();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(sendButton.disabled, false);
+  assert.equal(input.readOnly, true, "session A's stop response must not unlock session B's input");
+
+  failNextAbort = true;
+  submit();
+  await waitFor(
+    () => document.querySelector("#toast")?.textContent === "暂时无法停止回答（跟踪 ID：abort-b）" && !sendButton.disabled,
+    "failed stop request did not restore the stop button",
+  );
+  assert.deepEqual(aborts, ["session-a", "session-b"]);
+  assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, true, "a failed stop request must leave a running input read-only");
+  chatCollapseButton.click();
+  input.click();
+  assert.equal(chatDock.classList.contains("open"), true, "chat should reopen after a failed stop request");
+  pressEnter();
+  assert.deepEqual(aborts, ["session-a", "session-b"]);
+  sendSse("session-b", "text_delta", { turn: 0, delta: "，停止失败后继续" });
+  await waitFor(() => messages.textContent.includes("停止失败后继续"), "failed stop request interrupted the stream");
+  assert.deepEqual(messageRequests, ["session-c", "session-a", "session-b"]);
 
   messages.scrollTop = 23;
   sendSse("session-a", "text_delta", { turn: 0, delta: "，后台继续" });
@@ -409,7 +483,8 @@ test("switches between independent live session answers without stealing the cur
   );
   assert.equal(sessionButton("session-b").classList.contains("active"), true);
   assert.equal(sessionButton("session-b").classList.contains("streaming"), true);
-  assert.equal(input.disabled, true);
+  assert.equal(input.disabled, false);
+  assert.equal(input.readOnly, true);
   assert.equal(messages.textContent.includes("B 正在回答"), true);
   assert.equal(messages.textContent.includes("A 已完成"), false);
 
@@ -419,9 +494,21 @@ test("switches between independent live session answers without stealing the cur
   ]);
   stored.set("session-b", completedB);
   complete("session-b", completedB);
-  await waitFor(() => !input.disabled, "session B controls did not settle");
+  await waitFor(() => !input.readOnly, "session B controls did not settle");
+  assert.equal(input.disabled, false);
   assert.equal(sessionButton("session-b").classList.contains("active"), true);
   assert.equal(sessionButton("session-a").classList.contains("streaming"), false);
   assert.equal(sessionButton("session-b").classList.contains("streaming"), false);
+
+  input.value = "问题 B 再次回答";
+  pressEnter();
+  await waitFor(() => messageRequests.length === 4, "input did not allow a new question after completion");
+  assert.equal(input.readOnly, true);
+  sendSse("session-b", "error", { message: "模拟生成失败" });
+  controllers.get("session-b")?.close();
+  await waitFor(() => !input.readOnly, "input did not unlock after a failed generation");
+  assert.equal(input.disabled, false);
+  assert.equal(sessionButton("session-b").classList.contains("streaming"), false);
+  assert.equal(messages.textContent.includes("模拟生成失败"), true);
   await new Promise<void>((resolve) => setImmediate(resolve));
 });

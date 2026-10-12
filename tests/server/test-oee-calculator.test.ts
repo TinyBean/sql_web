@@ -520,91 +520,79 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
   assert.equal(actual["product"], expected.product);
 });
 
-test("publishes deterministic Skill tools without opening runtime resources", async () => {
+test("publishes four Skill tools and preserves default SQL views and numeric scales", async (t) => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
-    "get_default_sql",
-    "get_machine_daily_sql",
-    "get_default_dashboard_sql",
-    "get_sql_expressions",
-    "validate_lot_ids",
-    "classify_mt_st",
-    "classify_availability_states",
-    "rank_machines",
+    "get_default_sql", "get_machine_period_sql", "get_sql_expressions", "rank_machines",
   ]);
-  assert.equal(tools.some((tool) => tool.name === "calculate_test_oee"), false);
-  assert.equal(tools.some((tool) => tool.name === "classify_test_oee_record"), false);
-
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  const defaultSql = await executeTool(byName.get("get_default_sql")!, {
-    start_date: "2026-08-31",
-    end_date: "2026-09-06",
-  }) as {
-    sql: string;
-    dailyGrain: readonly string[];
-    periodAggregation: string;
+  const range = { start_date: "2026-08-31", end_date: "2026-09-06" };
+  const db = new DatabaseSync(":memory:");
+  t.after(() => db.close());
+  db.exec(readFileSync(path.join(process.cwd(), "scripts/database/schema.sql"), "utf8"));
+  db.exec(`INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES
+    ('ADH001','P1','Test(Normal)','5000','2026-08-31T00:00:00.000Z',43200),
+    ('ADH001','P1','IDLE','5000','2026-08-31',43200),
+    ('ADH001','P1','Test(Normal)','5000','2026-09-01',86400);
+    INSERT INTO oee_dut_utilization(machine_id,lot_id,step_id,date,in_qty,out_qty,dut_num,test_stage,touchdown_index,start_time,end_time) VALUES
+    ('ADH001','P1','5000','2026-08-31','10','8','20','1st','1','2026-08-31T08:30:00Z','2026-08-31T08:30:10Z'),
+    ('ADH001','P1','5000','2026-09-01','20','10','20','Rescreen','1','2026-09-01T08:30:00Z','2026-09-01T08:30:30Z');`);
+
+  const defaultSql = await executeTool(byName.get("get_default_sql")!, range) as {
+    sql: string; view: string; valueScale: string; dailyGrain: readonly string[]; periodAggregation: string;
   };
-  assert.match(defaultSql.sql, /LEFT JOIN dut_daily AS d ON d\.day=a\.day AND d\.kind=a\.kind/u);
-  assert.match(defaultSql.sql, /r\.dut_on AS performance/u);
-  assert.match(defaultSql.sql, /duration_trimmed/u);
-  assert.match(defaultSql.sql, /d\.test_time_performance/u);
-  assert.match(defaultSql.sql, /AVG\(r\.daily_test_oee\) OVER/u);
+  assert.equal(defaultSql.view, "daily");
+  assert.equal(defaultSql.valueScale, "ratio");
   assert.deepEqual(defaultSql.dailyGrain, ["day", "kind"]);
   assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");
-  const machineSql = await executeTool(byName.get("get_machine_daily_sql")!, {
-    start_date: "2026-08-31",
-    end_date: "2026-09-06",
-  }) as { dailyGrain: readonly string[]; trimPercent: number; testTimeUpperLimit: number };
-  assert.deepEqual(machineSql.dailyGrain, ["day", "machine", "kind"]);
-  assert.equal(machineSql.trimPercent, 1);
-  assert.equal(machineSql.testTimeUpperLimit, 1);
-  const dashboardSql = await executeTool(byName.get("get_default_dashboard_sql")!, {
-    start_date: "2026-08-31",
-    end_date: "2026-09-06",
-    view: "overview",
-  }) as { sql: string; valueScale: string; view: string };
-  assert.equal(dashboardSql.view, "overview");
-  assert.equal(dashboardSql.valueScale, "percentage_points");
-  assert.match(dashboardSql.sql, /100\.0 \* AVG\(daily_test_oee\) AS overall_oee_percent/u);
-  assert.match(dashboardSql.sql, /COUNT\(\*\) AS selected_day_type_count/u);
-  const sqlExpressions = await executeTool(byName.get("get_sql_expressions")!, {
-    source: "dut",
-    start_date: "2026-08-31",
-    end_date: "2026-09-06",
-    table_alias: "d",
-  }) as { kindExpression: string; dateRangePredicate: string; sourceLotPredicate: string };
-  assert.match(sqlExpressions.kindExpression, /d\.step_id/u);
-  assert.match(sqlExpressions.dateRangePredicate, /substr\(d\.date,1,10\)/u);
-  assert.equal(sqlExpressions.sourceLotPredicate, "substr(d.lot_id,1,1) NOT IN ('Q','E')");
-  assert.deepEqual(await executeTool(byName.get("validate_lot_ids")!, {
-    lot_ids: ["P1", "X1"],
-  }), [
-    { lotId: "P1", eligibleLot: true },
-    { lotId: "X1", eligibleLot: false },
+  const daily = db.prepare(defaultSql.sql).all();
+  assert.equal(daily.length, 14);
+  assert.ok(Math.abs(Number(daily[0]!["daily_test_oee"]) - .2) < 1e-12);
+  assert.ok(Math.abs(Number(daily[0]!["period_test_oee"]) - .35) < 1e-12);
+  assert.equal(daily[1]!["daily_test_oee"], null);
+  assert.deepEqual(daily, db.prepare(getDefaultTestOeeSql(range.start_date, range.end_date).sql).all());
+  assert.deepEqual(await executeTool(byName.get("get_default_sql")!, { ...range, view: "daily" }), defaultSql);
+  for (const view of ["overview", "trends"] as const) {
+    const result = await executeTool(byName.get("get_default_sql")!, { ...range, view }) as {
+      sql: string; view: string; valueScale: string;
+    };
+    assert.equal(result.view, view);
+    assert.equal(result.valueScale, "percentage_points");
+    const rows = db.prepare(result.sql).all();
+    assert.deepEqual(rows, db.prepare(getDefaultTestOeeDashboardSql(range.start_date, range.end_date, view).sql).all());
+    if (view === "overview") {
+      assert.equal(rows.length, 1);
+      assert.ok(Math.abs(Number(rows[0]!["mt_oee_percent"]) - 35) < 1e-12);
+      assert.ok(Math.abs(Number(rows[0]!["mt_effective_oee_percent"]) - 45) < 1e-12);
+      assert.equal(rows[0]!["mt_selected_day_count"], 7);
+      assert.equal(rows[0]!["mt_calculable_day_count"], 2);
+    } else {
+      assert.equal(rows.length, 7);
+      assert.ok(Math.abs(Number(rows[0]!["mt_oee_percent"]) - 20) < 1e-12);
+      assert.equal(rows[0]!["st_oee_percent"], null);
+    }
+  }
+  for (const grain of ["day", "week", "month", "quarter"] as const) {
+    const result = await executeTool(byName.get("get_machine_period_sql")!, { ...range, grain }) as {
+      sql: string; grain: string; trimPercent: number; testTimeUpperLimit: number;
+    };
+    assert.equal(result.grain, grain);
+    assert.equal(result.trimPercent, 1);
+    assert.equal(result.testTimeUpperLimit, 1);
+    const rows = db.prepare(result.sql).all();
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every((r) => r["test_time_performance"] === 1));
+  }
+  const e = await executeTool(byName.get("get_sql_expressions")!, {
+    ...range, source: "dut", table_alias: "d",
+  }) as { kindExpression: string; platformPredicate: string; sourceLotPredicate: string; yieldLotPredicate: string };
+  const samples = db.prepare(`WITH samples(machine_id,step_id,lot_id) AS
+    (VALUES ('ADH001','5000','P1'),('ADH001','7000','X1'),('TSPH001','5000','P1'),('ADH001','5000','Q1'))
+    SELECT ${e.kindExpression} AS kind, ${e.platformPredicate} AS included_platform,
+      ${e.sourceLotPredicate} AS included_source, ${e.yieldLotPredicate} AS yield_eligible FROM samples d`).all();
+  assert.deepEqual(samples.map(r => [r["kind"], r["included_platform"], r["included_source"], r["yield_eligible"]]), [
+    ["MT",1,1,1], ["ST",1,1,0], ["MT",0,1,1], ["MT",1,0,0],
   ]);
-  assert.deepEqual(await executeTool(byName.get("classify_mt_st")!, {
-    records: [{ step: "1000", machine_id: "TSPH001" }],
-  }), [
-    {
-      step: "1000",
-      machineId: "TSPH001",
-      kind: "ST",
-      source: "platform",
-      excludedPciePlatform: true,
-      includedInOee: false,
-    },
-  ]);
-  assert.deepEqual(await executeTool(byName.get("classify_availability_states")!, {
-    records: [{ final_state: "Test(Normal)", lot_id: "P1" }],
-  }), [
-    {
-      finalState: "Test(Normal)",
-      lotId: "P1",
-      stateGroup: "Machine_Running",
-      machineRunning: true,
-    },
-  ]);
-  assert.equal(byName.has("calculate_ratio_product"), false);
 });
 
 test("contains no Skill-owned database adapter or CLI", () => {

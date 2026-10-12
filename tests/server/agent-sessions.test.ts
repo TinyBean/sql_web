@@ -106,7 +106,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /数据库结构和字段含义由适用的 Skill 提供/u);
   assert.match(piSession.systemPrompt, /<available_skills>/u);
   assert.match(piSession.systemPrompt, /<name>test-oee-calculator<\/name>/u);
-  assert.match(piSession.systemPrompt, /<description>使用 Q\/E 源数据排除、Yield 专用 LOT 筛选、PCIe 平台排除、MT\/ST/u);
+  assert.match(piSession.systemPrompt, /<description>查询、计算和解释 Test OEE 与 Effective OEE/u);
   assert.doesNotMatch(piSession.systemPrompt, /## Test OEE 固定计算口径/u);
   assert.doesNotMatch(piSession.systemPrompt, /test_oee_calculator__get_sql_expressions/u);
   assert.doesNotMatch(piSession.systemPrompt, /Machine_Running、全部机台 Availability/u);
@@ -130,6 +130,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   for (const name of [
     "get_default_sql",
     "get_machine_daily_sql",
+    "get_machine_period_sql",
     "get_default_dashboard_sql",
     "get_sql_expressions",
     "validate_lot_ids",
@@ -145,32 +146,14 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.ok(skillLocation);
   const skillContent = readFileSync(skillLocation, "utf8");
   assert.match(skillContent, /references\/database\.md/u);
-  assert.match(skillContent, /snapshot_rows/u);
-  assert.match(skillContent, /list\[dict\]/u);
-  assert.match(skillContent, /严禁再用 `zip\(columns, row\)`/u);
   const databaseReference = readFileSync(
     path.join(path.dirname(skillLocation), "references", "database.md"),
     "utf8",
   );
-  assert.match(databaseReference, /## 数据库结构/u);
   assert.match(databaseReference, /<database_schema dialect="sqlite">/u);
   assert.match(databaseReference, /CREATE TABLE oee_availability/u);
   assert.match(databaseReference, /CREATE TABLE oee_dut_utilization/u);
-  assert.match(databaseReference, /## 字段业务含义/u);
-  assert.match(databaseReference, /<database_field_descriptions>/u);
-  assert.match(databaseReference, /tool_name\(TOOL_NAME\):机台号/u);
-  assert.match(databaseReference, /lot_id\(LOT_ID\):物料批次号/u);
-  assert.match(databaseReference, /final_state\(FINAL_STATE\):机台状态/u);
-  assert.match(databaseReference, /step\(STEP\):步骤/u);
-  assert.match(databaseReference, /date\(DATE\):ISO 格式的业务日标签/u);
-  assert.match(databaseReference, /shift\(SHIFT\):白班夜班的区分/u);
-  assert.match(databaseReference, /time_span\(TIME_SPAN\):机台状态对应的时间,单位秒/u);
-  assert.match(databaseReference, /machine_id\(MACHINE_ID\):机台号/u);
-  assert.match(databaseReference, /in_qty\(IN_QTY\):实际的 Socket 使用数量/u);
-  assert.match(databaseReference, /out_qty\(OUT_QTY\):好品数量\(包含复测\)/u);
-  assert.match(databaseReference, /test_stage\(TEST_STAGE\):1st 表示初测,Rescreen 表示复测/u);
-  assert.match(databaseReference, /dut_num\(DUT_NUM\):Socket 数量/u);
-  assert.match(databaseReference, /step_id\(STEP_ID\):步骤/u);
+  assert.doesNotMatch(databaseReference, /CREATE TABLE oee_import_/u);
   const readTool = piSession.getToolDefinition("read");
   assert.ok(readTool);
   await assert.rejects(
@@ -204,12 +187,15 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     undefined as never,
   );
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_sql"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_machine_daily_sql"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_default_dashboard_sql"));
+  assert.ok(piSession.getToolDefinition("test_oee_calculator__get_machine_period_sql"));
   assert.ok(piSession.getToolDefinition("test_oee_calculator__get_sql_expressions"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__validate_lot_ids"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_mt_st"));
-  assert.ok(piSession.getToolDefinition("test_oee_calculator__classify_availability_states"));
+  for (const name of ["get_machine_daily_sql", "get_default_dashboard_sql", "validate_lot_ids", "classify_mt_st", "classify_availability_states"]) {
+    assert.equal(piSession.getToolDefinition(`test_oee_calculator__${name}`), undefined);
+  }
+  for (const file of ["database.md", "dashboard.md", "import-audit.md"]) {
+    await readTool.execute("read-" + file, { path: path.join(path.dirname(skillLocation), "references", file) },
+      undefined, undefined, undefined as never);
+  }
   assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_ratio_product"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__calculate_test_oee"), undefined);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__classify_test_oee_record"), undefined);
@@ -222,12 +208,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "update_dashboard",
     "subagent",
     "test_oee_calculator__get_default_sql",
-    "test_oee_calculator__get_machine_daily_sql",
-    "test_oee_calculator__get_default_dashboard_sql",
+    "test_oee_calculator__get_machine_period_sql",
     "test_oee_calculator__get_sql_expressions",
-    "test_oee_calculator__validate_lot_ids",
-    "test_oee_calculator__classify_mt_st",
-    "test_oee_calculator__classify_availability_states",
     "test_oee_calculator__rank_machines",
   ]);
   await readTool.execute(

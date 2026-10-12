@@ -63,6 +63,22 @@ export interface MachineDailyTestOeeSql {
   readonly sql: string;
 }
 
+export type MachinePeriodGrain = "day" | "week" | "month" | "quarter";
+
+export interface MachinePeriodTestOeeSql {
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly exclusiveEndDate: string;
+  readonly grain: MachinePeriodGrain;
+  readonly periodGrain: readonly ["period_label", "machine", "kind"];
+  readonly trimPercent: 1;
+  readonly trimFraction: 0.01;
+  readonly trimPercentPerTail: 0.5;
+  readonly trimFractionPerTail: 0.005;
+  readonly testTimeUpperLimit: 1;
+  readonly sql: string;
+}
+
 export type TestOeeDashboardView = "overview" | "trends";
 
 export interface DefaultTestOeeDashboardSql {
@@ -474,6 +490,7 @@ export function getTestOeeDutCtes(
   startDate: string,
   endDate: string,
   grain: "day_kind" | "machine_day_kind" = "day_kind",
+  periodGrain: MachinePeriodGrain | "report_period" = "day",
 ): string {
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
   if (dut.yieldLotPredicate === undefined) {
@@ -482,11 +499,13 @@ export function getTestOeeDutCtes(
   const machineColumn = grain === "machine_day_kind" ? "machine,\n    " : "";
   const group = grain === "machine_day_kind" ? "day, machine, kind" : "day, kind";
   const trimDivisor = grain === "machine_day_kind" ? 200 : 1000;
+  const period = machinePeriodExpressions(dut.dayExpression, periodGrain, startDate, endDate);
   return `dut_base AS (
   SELECT
     d.id,
     ${dut.machineExpression} AS machine,
-    ${dut.dayExpression} AS day,
+    ${dut.dayExpression} AS source_day,
+    ${period.label} AS day,
     ${dut.kindExpression} AS kind,
     ${dut.yieldLotPredicate} AS yield_eligible,
     CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
@@ -504,6 +523,7 @@ dut_daily_aggregate AS (
     ${machineColumn}day,
     kind,
     COUNT(*) AS dut_rows,
+    COUNT(DISTINCT source_day) AS dut_days,
     SUM(CASE WHEN yield_eligible THEN 1 ELSE 0 END) AS yield_rows,
     SUM(CASE WHEN yield_eligible THEN input_quantity END) AS yield_input_quantity,
     SUM(CASE WHEN yield_eligible THEN output_quantity END) AS yield_output_quantity,
@@ -548,12 +568,47 @@ duration_trimmed AS (
 )`;
 }
 
-/** v3 machine-day rule: each machine/type has its own 1% trimmed mean and Test Time is capped at 1. */
-export function getMachineDailyTestOeeSql(startDate: string, endDate: string): MachineDailyTestOeeSql {
+function machinePeriodExpressions(
+  day: string, grain: MachinePeriodGrain | "report_period", startDate: string, endDate: string,
+): { label: string; start: string; end: string; partial: string } {
+  let label: string, fullStart: string, fullEnd: string;
+  switch (grain) {
+    case "day": label = fullStart = fullEnd = day; break;
+    case "week":
+      label = `strftime('%Y-W%U', ${day})`;
+      fullStart = `date(${day}, '-' || strftime('%w', ${day}) || ' days')`;
+      fullEnd = `date(${fullStart}, '+6 days')`;
+      break;
+    case "month":
+      label = `substr(${day},1,7)`;
+      fullStart = `date(${day}, 'start of month')`;
+      fullEnd = `date(${fullStart}, '+1 month', '-1 day')`;
+      break;
+    case "quarter":
+      label = `substr(${day},1,4) || '-Q' || CAST((CAST(substr(${day},6,2) AS INTEGER)+2)/3 AS INTEGER)`;
+      fullStart = `printf('%s-%02d-01', substr(${day},1,4), ((CAST(substr(${day},6,2) AS INTEGER)-1)/3)*3+1)`;
+      fullEnd = `date(${fullStart}, '+3 months', '-1 day')`;
+      break;
+    case "report_period":
+      return { label: quoteSqlLiteral(startDate + "/" + endDate), start: quoteSqlLiteral(startDate),
+        end: quoteSqlLiteral(endDate), partial: "0" };
+    default: throw new TestOeeInputError("grain 必须是 day、week、month 或 quarter");
+  }
+  const start = `MAX(${quoteSqlLiteral(startDate)}, ${fullStart}${grain === "week" ? `, substr(${day},1,4) || '-01-01'` : ""})`;
+  const end = `MIN(${quoteSqlLiteral(endDate)}, ${fullEnd}${grain === "week" ? `, substr(${day},1,4) || '-12-31'` : ""})`;
+  return { label, start, end, partial: `CASE WHEN ${start}>${fullStart} OR ${end}<${fullEnd} THEN 1 ELSE 0 END` };
+}
+
+/** Shared machine-period aggregation, including the exact selected range used for rankings. */
+export function getMachineTestOeeCtes(
+  startDate: string, endDate: string, grain: MachinePeriodGrain | "report_period" = "day",
+): string {
   const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
-  const sql = `WITH
-availability_classified AS (
-  SELECT ${availability.dayExpression} AS day, ${availability.machineExpression} AS machine,
+  const period = machinePeriodExpressions(availability.dayExpression, grain, startDate, endDate);
+  return `availability_classified AS (
+  SELECT ${availability.dayExpression} AS source_day, ${period.label} AS day,
+    ${period.start} AS period_start, ${period.end} AS period_end, ${period.partial} AS is_partial_period,
+    ${availability.machineExpression} AS machine,
     ${availability.kindExpression} AS kind,
     ${availability.availabilityStateExpression} AS state_group,
     ${availability.idlePredicate} AS is_idle, CAST(a.time_span AS REAL) AS state_seconds
@@ -563,6 +618,9 @@ availability_classified AS (
 ),
 availability_daily AS (
   SELECT day, machine, kind, COUNT(*) AS availability_rows,
+    COUNT(DISTINCT source_day) AS availability_days,
+    MIN(period_start) AS period_start, MAX(period_end) AS period_end,
+    MAX(is_partial_period) AS is_partial_period,
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END) AS machine_running_seconds,
     SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
     SUM(state_seconds) AS available_seconds,
@@ -578,7 +636,7 @@ availability_effective AS (
   SELECT *, availability + idle / NULLIF(1 + (1 - idle - availability), 0) AS effective_availability
   FROM availability_daily
 ),
-${getTestOeeDutCtes(startDate, endDate, "machine_day_kind")},
+${getTestOeeDutCtes(startDate, endDate, "machine_day_kind", grain)},
 dut_daily_raw AS (
   SELECT q.*, t.valid_duration_rows, t.trimmed_rows_each_tail, t.trimmed_mean_test_seconds,
     q.input_quantity / NULLIF(q.socket_quantity, 0) AS dut_on,
@@ -592,16 +650,28 @@ dut_daily AS (
   SELECT *, CASE WHEN raw_test_time_performance>1 THEN 1.0
     ELSE raw_test_time_performance END AS test_time_performance
   FROM dut_daily_raw
-)
-SELECT a.*, d.dut_rows, d.yield_rows, d.yield_input_quantity, d.yield_output_quantity,
+)`;
+}
+
+function machineTestOeeSql(startDate: string, endDate: string, grain: MachinePeriodGrain): string {
+  return `WITH ${getMachineTestOeeCtes(startDate, endDate, grain)}
+SELECT a.*, a.day AS period_label, d.dut_rows, COALESCE(d.dut_days, 0) AS dut_days,
+  d.yield_rows, d.yield_input_quantity, d.yield_output_quantity,
   d.input_quantity, d.output_quantity, d.socket_quantity, d.touchdown_count, d.actual_test_seconds,
   d.valid_duration_rows, d.trimmed_rows_each_tail, d.trimmed_mean_test_seconds,
   d.dut_on, d.dut_on AS performance, d.raw_test_time_performance, d.test_time_performance, d.final_yield,
-  a.availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_test_oee,
-  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_effective_oee
+  ${grain === "day" ? `a.availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_test_oee,
+  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_effective_oee,` : ""}
+  a.availability * d.dut_on * d.test_time_performance * d.final_yield AS test_oee,
+  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield AS effective_oee
 FROM availability_effective AS a
 LEFT JOIN dut_daily AS d ON d.day=a.day AND d.machine=a.machine AND d.kind=a.kind
 ORDER BY a.day, a.machine, a.kind`;
+}
+
+/** Compatibility entrypoint: each machine/day/type retains its 1% trim and Test Time cap. */
+export function getMachineDailyTestOeeSql(startDate: string, endDate: string): MachineDailyTestOeeSql {
+  const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
   return {
     startDate,
     endDate,
@@ -612,8 +682,21 @@ ORDER BY a.day, a.machine, a.kind`;
     trimPercentPerTail: 0.5,
     trimFractionPerTail: 0.005,
     testTimeUpperLimit: 1,
-    sql,
+    sql: machineTestOeeSql(startDate, endDate, "day"),
   };
+}
+
+export function getMachinePeriodTestOeeSql(
+  startDate: string, endDate: string, grain: MachinePeriodGrain,
+): MachinePeriodTestOeeSql {
+  const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
+  if (!["day", "week", "month", "quarter"].includes(grain)) {
+    throw new TestOeeInputError("grain 必须是 day、week、month 或 quarter");
+  }
+  return { startDate, endDate, exclusiveEndDate: availability.exclusiveEndDate,
+    grain, periodGrain: ["period_label", "machine", "kind"],
+    trimPercent: 1, trimFraction: 0.01, trimPercentPerTail: 0.5, trimFractionPerTail: 0.005,
+    testTimeUpperLimit: 1, sql: machineTestOeeSql(startDate, endDate, grain) };
 }
 
 export function getDefaultTestOeeSql(startDate: string, endDate: string): DefaultTestOeeSql {

@@ -4,7 +4,7 @@ import { Value } from "typebox/value";
 import type { MachineRow as DashboardRow, MachineDatePeriod as DatePeriod, RankingSnapshot as DataSnapshotDescriptor, TestOeeRuntime } from "./runtime.ts";
 import { machinePeriodSql } from "./machine-metrics.ts";
 import { machineLabel, machinePlatform, MACHINE_PLATFORM_VERSION } from "./machine-platforms.ts";
-import { getMachineDailyTestOeeSql, getTestOeeSqlExpressions } from "./test-oee-calculator.ts";
+import { getTestOeeSqlExpressions } from "./test-oee-calculator.ts";
 
 export const RANK_MACHINES_LOCAL_TOOL_NAME = "rank_machines";
 export const RANK_MACHINES_TOOL_NAME = "test_oee_calculator__rank_machines";
@@ -18,8 +18,7 @@ export const rankMachinesParameters = Type.Object({
     Type.Literal("dut_on"), Type.Literal("test_time_performance"), Type.Literal("final_yield"), Type.Literal("oee"), Type.Literal("effective_oee")]),
   states: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 40,
     description: "Canonical loss states; only valid for loss_hours. Omit for all non-running states." })),
-  basis: Type.Optional(Type.Union([Type.Literal("report_period"), Type.Literal("machine_day")], {
-    description: "Default report_period: full-period ratios and daily type-wide 0.2% Test Time standard. machine_day: one day only, machine/type 1% standard with Test Time capped at 100%. Never mix bases." })),
+
 }, { additionalProperties: false });
 
 export interface MachineRankingScope {
@@ -28,6 +27,8 @@ export interface MachineRankingScope {
   readonly states: readonly string[];
   readonly basis: "report_period" | "machine_day";
   readonly platformVersion: string;
+  /** Absent on historical report-period snapshots that used the daily type-wide standard. */
+  readonly testTimeRule?: "machine_period_1pct";
 }
 export interface MachineRankingMeasurement {
   readonly range: DatePeriod;
@@ -83,7 +84,9 @@ export function machineRankingView(record: Pick<MachineRankingMeasurement, "rows
       (top3Share === null ? "" : "；TOP3 合计占该项损失 " + top3Share.toFixed(1) + "%") :
       "机台数据不足，无法生成 TOP3；无匹配记录不代表零损失或完整覆盖") +
     (["test_time_performance", "oee", "effective_oee"].includes(record.scope.metric)
-      ? record.scope.basis === "machine_day" ? "；机台天口径（Test Time 1% 截尾、上限 100%）" : "；整期机台口径（Test Time 使用同日同类型 0.2% 截尾标准）"
+      ? record.scope.basis === "machine_day" ? "；机台天口径（Test Time 1% 截尾、上限 100%）"
+        : record.scope.testTimeRule === "machine_period_1pct" ? "；整期机台口径（Test Time 使用本机台周期同类型 1% 截尾标准、上限 100%）"
+          : "；整期机台口径（Test Time 使用同日同类型 0.2% 截尾标准）"
       : record.scope.basis === "machine_day" ? "；单业务日机台统计" : "；整期机台汇总") +
     (missingPlatforms.length ? "；平台映射待维护 " + missingPlatforms.length + " 台" : "");
   return { top3, machine_count: candidates.length, observed_machine_count: record.rows.length,
@@ -120,9 +123,8 @@ export function rankMachines(
   if (params.start_date > params.end_date) throw new Error("机台排名开始日期不能晚于结束日期");
   const range = { start: params.start_date, end: params.end_date };
   const scope: MachineRankingScope = { kind: params.kind, metric: params.metric, states: [...new Set(params.states ?? [])].sort(),
-    basis: params.basis ?? "report_period", platformVersion: MACHINE_PLATFORM_VERSION };
+    basis: "report_period", platformVersion: MACHINE_PLATFORM_VERSION, testTimeRule: "machine_period_1pct" };
   if (scope.metric !== "loss_hours" && scope.states.length) throw new Error("states 仅适用于损失小时排名");
-  if (scope.basis === "machine_day" && range.start !== range.end) throw new Error("机台天口径必须查询同一业务日");
   const loss = scope.metric === "loss_hours";
   const key = JSON.stringify([range, loss ? "loss" : scope.basis]);
   let source = cache?.get(key);
@@ -142,13 +144,6 @@ export function rankMachines(
       FROM facts f JOIN coverage c USING(machine,kind)
       WHERE f.kind IN ('MT','ST') AND f.state_group<>'Machine_Running'
       GROUP BY f.machine, f.kind, f.state_group ORDER BY f.kind, f.machine, f.state_group`;
-    } else if (scope.basis === "machine_day") {
-      const daily = getMachineDailyTestOeeSql(range.start, range.end).sql;
-      sql = `SELECT machine, kind, 1 AS availability_days, CASE WHEN dut_rows>0 THEN 1 ELSE 0 END AS dut_days,
-        availability*100 AS availability, effective_availability*100 AS effective_availability,
-        dut_on*100 AS dut_on, test_time_performance*100 AS test_time_performance,
-        final_yield*100 AS final_yield, daily_test_oee*100 AS oee, daily_effective_oee*100 AS effective_oee
-        FROM (${daily})`;
     } else sql = machinePeriodSql(range, true);
     const data = runtime.querySnapshot("rank-source-" + range.start.replaceAll("-", "") + "-" + range.end.replaceAll("-", ""), sql, signal);
     if (data.truncated) throw new Error("机台排名源数据超过快照上限，请缩小日期范围");
@@ -184,7 +179,7 @@ export function createRankMachinesTool(
 ) {
   return defineTool({
     name: RANK_MACHINES_LOCAL_TOOL_NAME, label: "查询问题指标机台 TOP3", executionMode: "sequential",
-    description: "Compute deterministic TOP3 for one business-day range and MT/ST type. loss_hours aggregates selected canonical states per distinct machine, descending; other metrics rank ascending. Shares use ALL machines in the identical loss scope, not only TOP3. Complete immutable candidate snapshots include raw machine IDs, platform labels, values and source coverage. Ratio value/metric_value are percentage points (50 means 50%), never multiply by 100 again; loss values are hours. NULL metrics are excluded, ties use unrounded values then machine ID. Missing platforms remain visible as 平台待维护. report_period preserves the fleet-standard full-period formula; machine_day requires one day and preserves 1% machine/type trim and Test Time cap. Read the Test OEE Skill first. Copy summary verbatim in business problem analyses. Evidence is derived and cannot supply loss_reference. Empty results do not prove zero loss or complete coverage.",
+    description: "查询同业务日范围、MT/ST 和问题指标的机台 TOP3，保存完整候选快照。loss_hours 按损失小时降序，其余指标按数值升序；states 仅用于 loss_hours。value/metric_value 为百分数值，损失为小时；NULL 不排名。问题分析逐字引用 summary。公式、占比分母、覆盖和历史口径见 Skill 业务规则。",
     parameters: rankMachinesParameters,
     async execute(_id, params, signal) {
       signal?.throwIfAborted();

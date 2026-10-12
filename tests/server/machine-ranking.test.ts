@@ -171,18 +171,29 @@ test("period component ratios use sums, isolate types, retain Yield-only eligibi
   assert.equal(st.top3[0]!.value, 100); assert.equal(scans, 1);
 });
 
-test("machine-day and report-period Test Time standards remain distinct and invalid/cancelled requests do not write", (t) => {
+test("single-day ranking uses the period standard, preserves history, and rejects retired basis parameters without writes", (t) => {
   const { a, d, queries, artifacts } = fixture(t);
   a("ADH001", 24, "Test(Normal)"); d("ADH001", 10, 10, 10, "MT", "2026-01-01", "P1", 10);
   a("ADH002", 24, "Test(Normal)"); d("ADH002", 10, 10, 10, "MT", "2026-01-01", "P1", 30);
   const oneDay = { start_date: range.start_date, end_date: range.start_date, kind: "MT" as const, metric: "test_time_performance" as const };
-  const period = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay));
-  assert.deepEqual(period.top3.map((r) => r.machine), ["ADH002", "ADH001"]);
-  assert.ok(Math.abs(period.top3[0]!.value - 200 / 3) < 1e-10); assert.equal(period.top3[1]!.value, 200);
-  const daily = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, basis: "machine_day" }));
-  assert.deepEqual(daily.top3.map((r) => r.value), [100, 100]);
+  const measurement = rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay);
+  const period = machineRankingView(measurement);
+  const { testTimeRule, ...legacyScope } = measurement.scope;
+  assert.equal(testTimeRule, "machine_period_1pct");
+  const legacy = machineRankingView({ ...measurement, scope: legacyScope });
+  assert.match(legacy.summary, /同日同类型 0.2% 截尾标准/u);
+  assert.deepEqual(legacy.top3, period.top3);
+  assert.deepEqual(period.top3.map((r) => r.machine), ["ADH001", "ADH002"]);
+  assert.deepEqual(period.top3.map((r) => r.value), [100, 100]);
+  assert.match(period.summary, /本机台周期同类型 1% 截尾标准、上限 100%/u);
+  assert.equal(measurement.scope.basis, "report_period");
+  const historicalDay = machineRankingView({ ...measurement, scope: { ...legacyScope, basis: "machine_day" } });
+  assert.match(historicalDay.summary, /机台天口径/u);
+  assert.deepEqual(historicalDay.top3, period.top3);
   const names = artifacts.listDataSnapshots().map((r) => r.name);
-  assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "oee", basis: "machine_day" }), /同一业务日/u);
+  for (const basis of ["report_period", "machine_day"]) {
+    assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, basis } as never), /参数无效/u);
+  }
   assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, states: ["PM"] }), /states/u);
   assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, metric: "oee; DROP TABLE" } as never), /参数无效/u);
   assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay, AbortSignal.abort()));

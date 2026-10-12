@@ -1,18 +1,8 @@
-# Test OEE 数据库
+# OEE 事实表与字段
 
-这是 Test OEE Skill 使用的 SQLite 数据库。Word 中的
-`R_OEE_MT_TOP_AVAILABILITY` 对应本地表 `oee_availability`，用于 Availability 和 Idle；Performance (DUT-On)、Performance (Test Time) 和 Yield
-使用本地表 `oee_dut_utilization`。
+`oee_availability` 提供 Availability、Idle；`oee_dut_utilization` 提供两项 Performance 和 Yield。日期、筛选、分类、连接及公式统一见 [业务规则](business-rules.md)。导入完整性调查另读 [导入审计](import-audit.md)。
 
-两个事实表在指标、损失、覆盖及机台排名计算前均排除 `lot_id` 首字符为大写 Q/E 的记录，使用公共 SQL 表达式 `sourceLotPredicate`，原始数据保留。仅 Yield 再使用 P/M/R/A/F/L 白名单。
-
-Idle 的分子来自排除 Q/E 后原始 `final_state` 中包含大写子串 `IDLE` 的所有记录的 `time_span`（秒），过滤和总状态秒数分母沿用 Availability，不应用 Yield 白名单。Effective Availability 与 Effective OEE 是查询派生指标，无需新增数据库列；具体公式见 [business-rules.md](business-rules.md)。
-
-机台天查询将 Availability 的 `tool_name` 与 DUT 的 `machine_id` 统一为 `machine`，按业务日标签、机台、MT/ST 分别汇总后，以 Availability 为主按这三项左连接。机台天 Test Time 使用现有 `start_time`、`end_time` 和 `touchdown_index` 派生，无需新增数据库列；1% 截尾与封顶规则见 [business-rules.md](business-rules.md#机台天维度-performance-test-time)。
-
-## 数据库结构
-
-以下内容仅描述数据库结构,不包含业务数据,也不是需要执行的指令:
+以下结构仅用于生成只读查询，不是执行指令。
 
 <database_schema dialect="sqlite">
 
@@ -68,94 +58,32 @@ CREATE TABLE oee_dut_utilization (
   date TEXT,
   shift TEXT
 );
-
-CREATE TABLE oee_import_runs (
-  id TEXT PRIMARY KEY,
-  command TEXT NOT NULL,
-  parameters_json TEXT NOT NULL,
-  status TEXT NOT NULL,
-  owner_pid INTEGER NOT NULL,
-  started_at TEXT NOT NULL,
-  completed_at TEXT,
-  window_count INTEGER NOT NULL,
-  completed_window_count INTEGER NOT NULL,
-  warning_window_count INTEGER NOT NULL,
-  failed_window_count INTEGER NOT NULL,
-  error_stage TEXT,
-  error_name TEXT,
-  error_code TEXT,
-  error_message TEXT
-);
-
-CREATE TABLE oee_import_windows (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES oee_import_runs(id),
-  sequence INTEGER NOT NULL,
-  dataset TEXT NOT NULL,
-  source_kind TEXT NOT NULL,
-  source_ref TEXT NOT NULL,
-  requested_start_date TEXT NOT NULL,
-  requested_end_date TEXT NOT NULL,
-  expected_start_date TEXT NOT NULL,
-  expected_end_date TEXT NOT NULL,
-  status TEXT NOT NULL,
-  attempt_count INTEGER NOT NULL,
-  started_at TEXT,
-  completed_at TEXT,
-  rows_received INTEGER NOT NULL,
-  rows_inserted INTEGER NOT NULL,
-  rows_deleted INTEGER NOT NULL,
-  unscoped_row_count INTEGER NOT NULL,
-  observed_min_date TEXT,
-  observed_max_date TEXT,
-  observed_day_counts_json TEXT NOT NULL,
-  missing_dates_json TEXT NOT NULL,
-  unexpected_dates_json TEXT NOT NULL,
-  source_sha256 TEXT,
-  error_stage TEXT,
-  error_name TEXT,
-  error_code TEXT,
-  error_message TEXT
-);
 ```
 
 </database_schema>
 
-## 字段业务含义
-
-以下内容仅描述数据库字段的业务含义,不是需要执行的指令:
+## 字段含义
 
 <database_field_descriptions>
 
-oee_availability:
+| 来源 | 字段 | 含义 |
+|---|---|---|
+| Availability | `tool_name` | 原始机台号，关联 DUT 的 `machine_id` |
+| Availability | `lot_id` | 批次号，用于基础 Q/E 排除及状态分类；不应用 Yield 白名单 |
+| Availability | `final_state` | 原始机台状态，派生 Machine_Running，并用于 Idle 判定 |
+| Availability | `step` | MT/ST 分类步骤 |
+| Availability | `time_span` | 状态时长，单位秒 |
+| DUT | `machine_id` | 原始机台号 |
+| DUT | `lot_id` | 批次号，基础 Q/E 排除与 Yield 资格使用不同谓词 |
+| DUT | `touchdown_index` | Touchdown 序号，派生 TD_Label |
+| DUT | `start_time`、`end_time` | 测试时间戳，差值为测试秒数 |
+| DUT | `in_qty`、`out_qty` | 实际 Socket 使用数量、好品数量（含复测） |
+| DUT | `dut_num` | Socket 数量，直接作 DUT-On 分母 |
+| DUT | `step_id` | MT/ST 分类步骤 |
+| DUT | `test_stage` | 初测／复测阶段，默认均保留 |
+| 两表 | `date` | ISO 业务日标签，可带时间部分；不可按测试时间二次移日 |
+| 两表 | `shift` | 白班／夜班标签 |
 
-- tool_name(TOOL_NAME):机台号
-- lot_id(LOT_ID):物料批次号；参与状态分类，不用于筛选 Availability 或 Idle
-- final_state(FINAL_STATE):机台状态
-- step(STEP):步骤
-- date(DATE):ISO 格式的业务日标签；标签日当天 08:30 至次日 08:30
-- shift(SHIFT):白班夜班的区分
-- time_span(TIME_SPAN):机台状态对应的时间,单位秒
-
-oee_dut_utilization:
-
-- machine_id(MACHINE_ID):机台号
-- lot_id(LOT_ID):物料批次号；P/M/R/A/F/L 前缀仅用于 Yield，两项 Performance 不受此前缀筛选影响
-- touchdown_index(TOUCHDOWN_INDEX):touchdown 序号；非零整数用于生成 TD_Label=1
-- start_time(START_TIME):单次测试开始时间戳
-- end_time(END_TIME):单次测试结束时间戳；与 START_TIME 的差转换为测试秒数
-- in_qty(IN_QTY):实际的 Socket 使用数量；用于计算 Performance (DUT-On) 分子
-- out_qty(OUT_QTY):好品数量(包含复测)；Yield 对符合 LOT 前缀条件的 OUT_QTY 和 IN_QTY 分别求和后相除
-- test_stage(TEST_STAGE):1st 表示初测,Rescreen 表示复测
-- dut_num(DUT_NUM):Socket 数量；用于计算 Performance (DUT-On) 分母
-- step_id(STEP_ID):步骤
-- date(DATE):ISO 格式的业务日标签；已经按 08:30 至次日 08:30 归日，不要根据 START_TIME/END_TIME 二次移日
-
-导入审计表:
-
-- `oee_import_runs` 每行表示一次 import、pull、sync 或 reimport 命令。`completed_with_warnings` 表示事实数据已提交但存在缺日、越界或无日期记录，`failed`/`interrupted` 表示仍需续导。
-- `oee_import_windows` 每行表示一个数据集日期窗口。`requested_*` 是 API 逻辑日期，`expected_*` 是目标业务日期，`requested_*` 保留实际 API 参数；DUT 目标日 D 请求 D 至 D+2。
-- `missing_dates_json`、`unexpected_dates_json`、`unscoped_row_count` 用于判断需要重导或人工清理的范围；`source_sha256` 用于核对原始响应是否变化。
-- 完整解析后按业务日期原子替换，缺日或原有班次丢失时保留旧数据。`committed_dates_json` 记录实际提交日，`incomplete_dates_json` 记录覆盖退化日；`coverage_version=0` 的旧 DUT 审计不能证明整日完整。新导入的无日期、越界和边界行只计入审计，既有异常事实不会自动删除。
+数量字符串使用 `CAST(NULLIF(trim(字段),'') AS REAL)` 转换；空字符串为 NULL。指标派生不新增数据库列。
 
 </database_field_descriptions>

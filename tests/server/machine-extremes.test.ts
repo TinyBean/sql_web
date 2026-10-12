@@ -69,7 +69,7 @@ test("rankings, primary type, shared test standard and coverage ignore Q/E-only 
   assert.match(excluded.warnings.join(" "), /可计算机台 0\/0/u);
 });
 
-test("machine test time shares each daily type standard including DUT without Availability", (t) => {
+test("machine Test Time uses its own period standard without borrowing other machines' durations", (t) => {
   const { database, a, d } = fixture(t);
   for (const day of ["2026-01-01", "2026-01-02"]) {
     for (const machine of ["A", "B"]) {
@@ -82,10 +82,12 @@ test("machine test time shares each daily type standard including DUT without Av
     WHEN machine_id='B' THEN '2026-01-01T00:00:30.000Z'
     WHEN machine_id='DUT-ONLY' THEN '2026-01-01T00:00:50.000Z'
     ELSE end_time END`);
-  // Standards: Jan 1 = 30s; Jan 2 = 20s. Each machine's standard total is 50s.
+  // A's period standard is 15s and B's is 25s; DUT-only data does not affect either.
   const table = buildMachineExtremesTable(database, [monthLow], monthRange);
-  assert.equal(table.data[0]!["top10_machines"], "1.平台待维护/B(MT 100.00%)、2.平台待维护/A(MT 166.67%)");
+  assert.equal(table.data[0]!["top10_machines"], "1.平台待维护/A(MT 100.00%)、2.平台待维护/B(MT 100.00%)");
   database.exec("UPDATE oee_dut_utilization SET end_time=NULL WHERE date='2026-01-02'");
+  assert.equal(buildMachineExtremesTable(database, [monthLow], monthRange).data[0]!["top10_machines"], table.data[0]!["top10_machines"]);
+  database.exec("UPDATE oee_dut_utilization SET end_time=NULL");
   assert.equal(buildMachineExtremesTable(database, [monthLow], monthRange).data[0]!["top10_machines"], null);
 });
 

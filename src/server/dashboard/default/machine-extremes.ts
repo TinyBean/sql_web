@@ -86,7 +86,7 @@ export function buildMachineExtremesTable(
     [...missingPlatforms].slice(0, 5).map(machineLabel).join("、") + "；请补充机台平台映射").slice(0, 300));
   return {
     ...createMachineExtremesTemplate(),
-    subtitle: "与 OEE 极值明细逐项对应的机台 TOP10 list",
+    subtitle: "与 OEE 极值明细逐项对应的机台 TOP10 · 本机台周期 Test Time 1% 截尾、上限 100%",
     data, warnings: [...warnings],
   };
 }

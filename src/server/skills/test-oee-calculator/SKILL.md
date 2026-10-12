@@ -1,47 +1,36 @@
 ---
 name: test-oee-calculator
-description: 使用 Q/E 源数据排除、Yield 专用 LOT 筛选、PCIe 平台排除、MT/ST、Machine_Running、Idle、Performance (DUT-On)、Performance (Test Time)、Yield 和业务日聚合规则，以可信 SQLite 数据链路查询、计算或解释 Test OEE 与 Effective OEE，支持机台天维度的独立 1% 截尾 Test Time、机台平台标签及问题指标 TOP3 排名。适用于默认口径及明确的临时口径调整；不适用于 Assembly OEE。
+description: 查询、计算和解释 Test OEE 与 Effective OEE，支持全类型概览、机台日/周/月/季明细、自定义口径及问题指标 TOP3。不适用于 Assembly OEE。
 ---
 
-# Test OEE 与 Effective OEE 计算
+# Test OEE 与 Effective OEE
 
-本技能统一维护 OEE 规则、机台平台映射、指标计算与排名。SQL 和分类工具不连接数据库；专属排名工具通过当前会话注入的只读查询与完整快照能力获取事实，不自行建立数据库连接。读取本入口后才会启用 `test_oee_calculator__rank_machines`。其他数据库事实来自 `execute_sql` 或公共工具 `measure_loss`。
+## 读取指引
 
-所有 OEE 指标、状态损失、覆盖统计和机台排名计算前，Availability 和 DUT 数据均先排除 LOT 首字符为大写 `Q` 或 `E` 的记录；这是只读查询筛选，原始文件和数据库记录保留。Yield 在此基础上另应用 P/M/R/A/F/L 前缀条件。
+- 首次查询或解释口径，读取 [业务规则](references/business-rules.md)；生成或执行 SQL 前读取 [事实表与字段](references/database.md)。
+- 创建或更新概览／趋势看板，另读 [字段映射](references/dashboard.md)；调查导入完整性时另读 [导入审计](references/import-audit.md)。
+- 业务公式、筛选、分类及异常处理以业务规则为准。用户明确改变规则时，仅覆盖指定部分并说明差异。
 
-## 工作流
+## 工具选择
 
-1. 查询或计算前，完整读取 [references/database.md](references/database.md) 和 [references/business-rules.md](references/business-rules.md)。
-2. 明确用户选择的业务日闭区间。事实表 `date` 已是“当天 08:30 至次日 08:30”的业务日标签，不要按 `start_time`、`end_time` 再次移日。业务周为周日至周六，周编号采用周日起始的 `%U`（年初首个周日之前为 W00），不得使用周一起始的 `%W` 或 ISO 周。周范围与“最近完整周”按[业务周与周编号](references/business-rules.md#业务周与周编号)确定。
-3. 按查询粒度选择固定工具：日类型汇总使用 `test_oee_calculator__get_default_sql`；机台天明细使用 `test_oee_calculator__get_machine_daily_sql`，按“业务日 + 机台 + MT/ST”独立计算 Test Time，使用 1% 截尾并仅将该因子超过 1 的结果取为 1。两者均传入 `start_date`、`end_date`，再将返回的 `sql` 原样交给 `execute_sql`。不要手工简化 CTE、改变左连接方向或先算机台 OEE 再平均；机台天查询的样本、空值和封顶规则见[机台天维度 Performance (Test Time)](references/business-rules.md#机台天维度-performance-test-time)。
-4. 使用默认口径更新结构化看板时，按所需图表调用 `test_oee_calculator__get_default_dashboard_sql`：概览选 `overview`，日趋势选 `trends`；仅增加概览无需查询趋势。将返回的 `sql` 原样交给 `execute_sql.save_as`，不要手写新的 CTE。更新卡片前按[概览字段映射与核对](references/business-rules.md#概览字段映射与核对)核对快照字段及覆盖：MT/ST 概览的五项指标必须使用同一类型前缀，覆盖计数也使用该前缀；共享合并快照中的 `avg_*` 仅用于合并概览。缺少分类字段时重新生成快照，不借用混合指标。所有 `_percent` 列已经是百分数值，例如 `56.65` 表示 `56.65%`，可直接映射到 `unit: "%"`；不得再次乘以 100。默认逐日 SQL 的比率列不能直接映射成带 `%` 单位的看板值。
-5. 默认 SQL 在 `业务日 + MT/ST` 粒度分别汇总 Availability、Performance (DUT-On)、Performance (Test Time) 和 Yield，以 Availability 日结果为主左连接 DUT 日结果，再将四项相乘得到日 OEE。Availability 分母为当天该类型全部有效 Availability 记录的 `SUM(time_span)`，包含全部 loss 时长；`machine_count` 仅为覆盖统计，不参与分母。所有计算先排除 Q/E 前缀 LOT；仅 Yield 再筛选 P/M/R/A/F/L 前缀，Availability、Idle 和两项 Performance 保留其余 LOT（包括 None、X 等）。Idle 在同一记录范围与分母下累计原始 `final_state` 中包含大写子串 `IDLE` 的所有状态秒数，按业务规则计算 Effective Availability，再替换 Availability 得到日 Effective OEE，两个 Performance 因子及 Yield 不变。两种多日 OEE 各自对可计算日等权平均，分别读取 `period_test_oee` 和 `period_effective_oee`，不要对每日行重复展示的多日值再次求和或平均。Test Time 按同日同类型排除 Q/E 后的 0.2% 截尾均值×TD次数÷实际秒数计算，每端截去 floor(n/1000) 条。
-6. 核对默认 SQL 返回的每个所选业务日均有 MT、ST 两行，并检查 `availability_rows`、`machine_count`、`dut_rows`、`yield_rows`、`calculable_day_count`、`effective_calculable_day_count` 和 `selected_day_count`。Effective OEE 的可计算日可能少于 Test OEE；概览使用[Effective OEE 概览字段映射](references/business-rules.md#effective-oee-概览字段映射)中的独立组成项及覆盖计数。缺数据和不可计算项必须明确警告，不能视为 0 或完整覆盖。
-7. 用户临时修改日期范围以外的计算规则时，不使用默认 SQL。分别为 Availability 和 DUT 调用 `test_oee_calculator__get_sql_expressions`，传入相同日期与对应表别名；原样复用返回的日期、平台、MT/ST 和状态表达式，并将两来源的 `sourceLotPredicate` 用于基础数据 WHERE 条件，排除 Q/E；仅在 Yield 条件聚合中使用 DUT 返回的 `yieldLotPredicate`，不能将其作为 Availability 或 DUT 基础数据的过滤条件。仅改动用户指定的部分。回答中列出与默认口径的差异。
-8. 优先让 SQLite 在同一条查询中完成过滤、聚合、窗口排序、比率、连接和乘积。所有分母用 `CASE` 或 `NULLIF` 防止除零；不舍入中间值。仅机台天 Test Time 按文档要求封顶为 1，其他比率、OEE 和源值不封顶或静默修正。
-9. 查询默认口径的状态损失时，优先使用公共工具 `measure_loss`，传入业务日闭区间 `start_date`、`end_date`，可选 `states`、`machines`、`by_machine`。它自动保存完整快照并返回 `snapshot.name`；小结果直接展示全部行，大结果返回当前筛选范围的 MT/ST 合计、状态占比和排名。覆盖分母仍是该类型全部有效 Availability 业务日，不能使用损失出现日数或累加机台天数代替。空结果不能当作零损失或完整覆盖。用户修改固定口径时改用规则 SQL 表达式和 `execute_sql`。快照可直接交给 `update_dashboard` 或 `code_interpreter`，无需为读取或求和重复调用 Python。
-10. 只有同一条 SQL 无法完成所需统计或需要 PNG 时才使用 `code_interpreter`。先由 `execute_sql.save_as` 或 `measure_loss` 保存完整、未截断的查询结果，再传规范快照名；不得复制 SQL 预览或数据库数字到 Python 字面量。优先直接遍历 `snapshot_rows`；它是 `list[dict]`，用 `row["列名"]` 取值，严禁再用 `zip(columns, row)` 重建。代码必须调用一次 `emit_result`，并在空集合、首项、`min`/`max` 和除法前处理空值。
-11. 回答时说明业务日范围、实际覆盖、连接粒度、公式、各项分子分母以及多日实际纳入的日数。分母为零或必要输入缺失表示“无法计算”，不是 0%。解释和界面展示使用 `Performance (DUT-On)` 和 `Performance (Test Time)`。
+读取本入口后启用以下工具，名称均带 `test_oee_calculator__` 前缀：
 
-## 固定规则工具
+| 需求 | 工具与参数 |
+|---|---|
+| 全类型日明细、多日结果 | `get_default_sql(start_date,end_date,view="daily")`，view 可省略 |
+| 分类／合并概览或日趋势看板 | `get_default_sql(...,view="overview"/"trends")` |
+| 机台日／周／月／季明细 | `get_machine_period_sql(start_date,end_date,grain)`，grain 为 day/week/month/quarter |
+| 自定义口径或少量记录抽查 | `get_sql_expressions(source,start_date,end_date,table_alias?)`，source 为 availability/dut |
+| 问题指标机台 TOP3 | `rank_machines(start_date,end_date,kind,metric,states?)`，states 仅用于 loss_hours |
 
-- `test_oee_calculator__rank_machines`：执行同业务日范围、MT/ST、问题指标的机台 TOP3 查询，自动保存完整排名候选快照；参数、占比及两种计算口径见下方结果口径。
-- `test_oee_calculator__get_default_sql`：生成完整的默认 SQLite 查询。PCIe 排除优先；结果包含 Availability、Idle 秒数及比率、Effective Availability、Performance (DUT-On)、Performance (Test Time)、Yield、逐日与多日 Test OEE / Effective OEE 及各自覆盖计数。
-- `test_oee_calculator__get_machine_daily_sql`：生成机台天明细 SQL；按业务日、机台、类型分别聚合并左连接，Test Time 使用该机台日类型自身的 1% 截尾均值，返回封顶前后比率、样本计数及日 Test OEE / Effective OEE。只输出有效 Availability 的机台日类型，不补缺日；不定义周/月/季聚合。
-- `test_oee_calculator__get_default_dashboard_sql`：从同一默认逐日查询生成单行概览（合并及 MT/ST 分类指标、各自覆盖计数）或 MT/ST 宽表趋势；`_percent` 列为可直接展示的百分数值。
-- `test_oee_calculator__get_sql_expressions`：为自定义查询生成时间戳安全的闭区间业务日谓词、两来源共有的 Q/E 排除 `sourceLotPredicate`，以及 PCIe 平台、MT/ST 和 Machine_Running SQL 片段；DUT 来源另返回仅用于 Yield 的 `yieldLotPredicate`；Availability 来源另返回匹配原始 `final_state` 包含 `IDLE` 的 `idlePredicate`。
-- `test_oee_calculator__validate_lot_ids`：抽查少量 `LOT_ID` 是否符合 Yield 前缀条件，不用于判定其他指标的记录资格。
-- `test_oee_calculator__classify_mt_st`：抽查少量记录的 MT/ST 判定，并指出机台是否因 PCIe 平台被排除以及能否进入 OEE。
-- `test_oee_calculator__classify_availability_states`：抽查 Availability 派生状态及其是否为 `Machine_Running`。
+SQL 与表达式工具只生成查询或片段，将 SQL 原样交给 `execute_sql`；看板查询使用 `save_as` 保存完整快照。排名工具使用当前会话的只读查询能力执行并保存完整候选快照。
 
-若用户明确修改某项固定规则，不要使用受影响的固定 SQL 或分类结果；按用户规则编写查询并说明偏差。
+标准状态损失使用公共工具 `measure_loss`，其快照可直接用于后续分析或看板。少量 LOT／分类抽查通过表达式和 SQL VALUES 完成，示例见业务规则。
 
-## 结果口径
+## 结果核对
 
-机台业务描述使用 `平台号/机台号`，如 `T5773/ADH001`。平台来自本 Skill [平台清单](assets/machine-platforms.ts)维护的 v4 文档 166 台静态映射（T5773 78 台、T5831 53 台、T5851 35 台），未映射时显示 `平台待维护/机台号`，不能用 MT/ST 猜平台。查询参数、SQL 关联键仍使用原始机台号。
-
-具体损失或指标问题分析必须使用Skill 专属工具 `test_oee_calculator__rank_machines(start_date,end_date,kind,metric,states?,basis?)`，逐字引用返回的 `summary`。它按相关状态损失小时降序或对应指标升序返回去重的 TOP3，保留数值、覆盖；损失占比以同范围全部机台的相关损失作分母。`states` 仅适用于 `loss_hours`；比率指标的 `value` 和快照 `metric_value` 已乘 100。完整候选快照含原始机台号、平台、显示标签及空指标，预览的 TOP3 不代表快照截断。
-
-`basis=report_period` 为默认整期机台口径，Test Time 使用同日同类型 0.2% 截尾标准；`basis=machine_day` 只接受单个业务日，沿用机台天 1% 截尾和 Test Time 上限 100%。不同口径不能混排。纯公式解释、单台查询只补平台，不强制 TOP3；不足三台展示实际数量，无匹配记录不代表零损失或完整覆盖。排名证据属于派生统计，不能作为实测 `loss_reference`。
-
-默认公式和异常处理以 [references/business-rules.md](references/business-rules.md) 为唯一业务规则来源。纯数值计算函数只作为回归测试基准，不作为 Agent 工具发布。
+- 说明业务日范围、计算粒度与实际覆盖；缺失和不可计算结果不作为零，部分周期不作为完整周期。
+- 明细以 1 表示 100%；看板 `_percent` 列及排名 value/metric_value 已是百分数值，损失为小时。不要重复缩放。
+- 更新看板前核对字段前缀、计算样本和覆盖计数，使用完整快照，不复制预览行。
+- 具体指标／损失问题或机台集中、分散结论需查询同范围同 MT/ST 的 TOP3，并逐字引用返回的 summary；纯公式解释和单台数值查询无需额外排名。
+- 机台展示使用平台号/机台号，以工具返回的标签为准；SQL 键使用原始机台号。排名证据属于派生统计，不能作为实测 loss_reference。

@@ -10,7 +10,7 @@ import { machineRankingView } from "../../../skills/test-oee-calculator/assets/m
 const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
 const readableDescription = "面向业务用户的中文说明，用实际日期、指标和数据来源解释结论，不含 q11 等内部证据编号、查询行号、工具名或字段名。";
-const text = Type.String({ minLength: 1, maxLength: 1800, description: readableDescription });
+const text = Type.String({ minLength: 1, description: readableDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
 export const ANALYSIS_CATEGORY_RULES = "类别固定为 availability；每项对应程序选定的一个损失状态，机台排名使用 loss_hours，并且 states 仅包含该状态。本期损失小时来自完整状态汇总，不折算 Performance/Yield。";
 export const PeriodKeySchema = Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
@@ -19,7 +19,7 @@ export const AnalysisItemSchema = Type.Object({
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
   category: Type.Literal("availability", { description: ANALYSIS_CATEGORY_RULES }),
   issue: text, measure: text,
-  suggested_owner: Type.String({ minLength: 1, maxLength: 160, description: readableDescription }),
+  suggested_owner: Type.String({ minLength: 1, description: readableDescription }),
   evidence_ids: refs,
   machine_evidence_ids: refs,
   loss_reference: Type.Object({ evidence_id: Type.String({ minLength: 1 }), row_index: Type.Integer({ minimum: 0 }) },
@@ -27,7 +27,7 @@ export const AnalysisItemSchema = Type.Object({
 }, { additionalProperties: false });
 export const AnalysisGroupSchema = Type.Object({
   kind: AnalysisKindSchema,
-  no_findings_reason: Type.String({ maxLength: 1800, description: readableDescription }),
+  no_findings_reason: Type.String({ description: readableDescription }),
   evidence_ids: refs,
   items: Type.Array(AnalysisItemSchema, { maxItems: 3 }),
 }, { additionalProperties: false });
@@ -286,7 +286,6 @@ function validateReport(
         if (issues.length !== itemIssueStart) continue;
         const machines = rankings.flatMap(({ record }) => record.rows.map((row) => String(row["machine"])));
         const issue = [formatMachineMentions(item.issue, machines), ...rankings.map(({ summary }) => summary).filter((summary) => !item.issue.includes(summary))].join("\n");
-        if (issue.length > 1800) { add(location, itemPath + "/issue", "ISSUE_TOO_LONG", "问题正文与 TOP3 合计超过 1800 字，请压缩问题描述或拆分问题", 1800, issue.length); continue; }
         renderedItems.set(item, issue);
         for (const { summary } of rankings) periodSummaries.add(summary);
         rows[key].push({ kind, priority: item.priority, issue, measure: formatMachineMentions(item.measure, machines),
@@ -300,7 +299,6 @@ function validateReport(
       if (!issues.some((issue) => issue.period === key && issue.item_index !== undefined)) {
         if (!periodSummaries.size) add(periodLocation, periodPath + "/comparison", "COMPARISON_DISTRIBUTION", "周期比较中的机台分布结论缺少排名证据", "本周期排名证据", "无排名证据");
         comparison = [comparison, ...[...periodSummaries].filter((summary) => !comparison.includes(summary))].join("\n");
-        if (comparison.length > 1800) add(periodLocation, periodPath + "/comparison", "COMPARISON_TOO_LONG", "周期比较与 TOP3 超过 1800 字，请将机台分布分析写入对应问题", 1800, comparison.length);
       }
     }
     renderedComparisons.set(report, comparison);

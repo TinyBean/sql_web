@@ -16,7 +16,7 @@ export const ANALYSIS_CLEANUP_RESERVE_MS = 10_000;
 export const RepairAnalysisGroupSchema = Type.Object({
   period: PeriodKeySchema, kind: AnalysisKindSchema, group: AnalysisGroupSchema,
   omitted_candidates: Type.Optional(Type.Array(Type.Object({
-    item: AnalysisItemSchema, reason: Type.String({ minLength: 1, maxLength: 1800 }),
+    item: AnalysisItemSchema, reason: Type.String({ minLength: 1 }),
   }, { additionalProperties: false }), { maxItems: 12 })),
 }, { additionalProperties: false });
 

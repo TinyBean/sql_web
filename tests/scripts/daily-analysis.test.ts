@@ -17,6 +17,7 @@ import { createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/
 import { SessionArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime, type CodeInterpreterInput } from "../../src/server/tool/code-interpreter.ts";
 import { generateDefaultDashboard } from "../../src/server/dashboard/default/run.ts";
+import { createDailyImprovementEmail } from "../../src/server/dashboard/default/daily-email.ts";
 import { calculatedDashboard } from "../helpers/calculated-dashboard.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
@@ -24,9 +25,9 @@ import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
 import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
-import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
+import { createAnalysisTemplate, createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
-import type { DashboardState } from "../../src/shared/dashboard.ts";
+import type { DashboardRow, DashboardState } from "../../src/shared/dashboard.ts";
 
 import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.ts";
 import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.ts";
@@ -318,6 +319,54 @@ test("stringified report structures are decoded before strict validation without
   });
 });
 
+for (const length of [1800, 2400]) test(`daily submissions preserve ${length}-character narratives and appended TOP3 in published rows and email`, (t) => {
+  const { config, connections } = fixture(t);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  connections.push(database);
+  const base = calculatedDashboard(database, "2026-01-12");
+  const evidence = new AnalysisEvidence(database, undefined, new SessionArtifactStore(path.dirname(config.databasePath), "long-narratives"));
+  const context = evidence.context(base, "2026-01-12");
+  const report = reportFor(context, evidence);
+  for (const period of report.periods) {
+    period.comparison = "本期损失集中于少数机台，根因待验证。".padEnd(length, "需结合历史基准和覆盖差异核实。");
+    for (const group of period.groups) for (const item of group.items) {
+      item.issue = item.issue.padEnd(length, "准备过程和发生原因需进一步核实。");
+      item.measure = item.measure.padEnd(length, "试行优化后按相同覆盖范围复查损失时长。");
+      item.suggested_owner = "测试工程".padEnd(240, "负责协调状态核查和验证。");
+    }
+  }
+  const original = structuredClone(report);
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  const result = repair.submit(repair.prepareReport(report));
+  assert.ok(result);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.exclusions, []);
+  assert.deepEqual(report, original);
+  for (const period of report.periods) {
+    const rendered = periodEntry(result.report, period.period);
+    assert.ok(rendered.comparison.startsWith(period.comparison + "\n"));
+    assert.ok(rendered.comparison.length > 1800);
+    assert.match(rendered.comparison, /TOP3/u);
+    for (const group of period.groups) for (const item of group.items) {
+      const row: DashboardRow = result.rows[period.period].find((entry) => entry["kind"] === group.kind && entry["priority"] === item.priority)!;
+      assert.ok(String(row["issue"]).startsWith(item.issue + "\n"));
+      assert.ok(String(row["issue"]).length > 1800);
+      assert.match(String(row["issue"]), /TOP3/u);
+      assert.equal(row["measure"], item.measure);
+      assert.equal(row["suggested_owner"], item.suggested_owner + "（职能建议，待人工确认）");
+    }
+  }
+  assert.deepEqual(validateAnalysisReport(result.report, context, evidence.records).report, result.report);
+  const published = applyAnalysisReport(base, result);
+  assert.deepEqual(published.widgets.find((widget) => widget.id === createAnalysisTemplate("day").id)!.data, result.rows.day);
+  const email = createDailyImprovementEmail(published, context.throughDate);
+  for (const row of result.rows.day) for (const field of ["issue", "measure", "suggested_owner"] as const) {
+    const text = String(row[field]);
+    assert.ok(email.text.includes(text), field);
+    assert.ok(email.html!.includes(text.replaceAll("\n", "<br>")), field);
+  }
+});
+
 test("daily model budgets respect deployment limits and reserve compaction/output space", (t) => {
   const { config, directory } = fixture(t);
   const budget = analysisBudget({ contextWindow: 1_000_000, maxTokens: 131072 }, config.analysis);
@@ -546,13 +595,21 @@ test("empty current periods and missing minima retain nulls and require explicit
   assert.equal(context.comparisons.week.minimum.range, undefined);
   assert.deepEqual(context.comparisons.week.current.range, { start: "2026-12-20", end: "2026-12-26" });
   const report = reportFor(context, evidence);
+  const reason = "本期无可计算指标，缺少可验证的改善依据。".repeat(120);
   for (const period of report.periods) for (const group of period.groups) {
     group.items = [];
-    group.no_findings_reason = "本期无可计算指标，缺少可验证的改善依据";
+    group.no_findings_reason = reason;
   }
-  const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
+  const result = validateAnalysisReport(report, context, evidence.records);
+  for (const period of result.report.periods) for (const group of period.groups) assert.equal(group.no_findings_reason, reason);
+  const analyzed = applyAnalysisReport(base, result);
   assert.equal(analyzed.widgets[1]?.data[0]?.["overall_oee_percent"], null);
   assert.ok(analyzed.widgets.slice(9).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
+  for (const widget of analyzed.widgets.slice(9)) for (const kind of ["MT", "ST"]) {
+    assert.ok(widget.warnings.includes((kind + " 未生成建议：" + reason).slice(0, 300)));
+  }
+  report.periods[0]!.groups[0]!.no_findings_reason = " ";
+  assert.throws(() => validateAnalysisReport(report, context, evidence.records), /空清单/u);
 });
 
 test("all periods select independent MT/ST state Top3 before rounding and keep complete evidence", (t) => {
@@ -1235,11 +1292,13 @@ test("group repair reuses rankings, preserves other groups and renders TOP3 once
   assert.equal(repair.needsEvidence("quarter"), false);
   const preserved = structuredClone(report.periods.filter((period) => period.period !== "quarter"));
   const next = structuredClone(group);
-  next.items[2]!.issue = "HangUp（挂起）损失偏高，核实挂起发生原因。";
+  next.items[2]!.issue = "HangUp（挂起）损失偏高，核实挂起发生原因。".repeat(120);
+  next.items[2]!.measure = next.items[2]!.measure.repeat(120);
+  next.items[2]!.suggested_owner = "测试工程负责协调核查和验证。".repeat(20);
   next.items[2]!.machine_evidence_ids = ["q133"];
   const original = structuredClone(next);
-  const result = repair.repair({ period: "quarter", kind: "MT", group: next,
-    omitted_candidates: [{ item: structuredClone(group.items[2]!), reason: "移除与挂起损失不匹配的良率排名。" }] });
+  const omitted = [{ item: structuredClone(group.items[2]!), reason: "移除与挂起损失不匹配的良率排名。".repeat(120) }];
+  const result = repair.repair(repair.prepareGroup({ period: "quarter", kind: "MT", group: next, omitted_candidates: omitted }));
   assert.ok(result); assert.equal(result.status, "completed");
   assert.deepEqual(next, original);
   // Rendered copies may gain platform labels, so compare against normal validation of the originals.
@@ -1248,7 +1307,7 @@ test("group repair reuses rankings, preserves other groups and renders TOP3 once
   assert.deepEqual(report.periods.filter((period) => period.period !== "quarter"), preserved);
   assert.equal((result.rows.quarter[2]!["issue"] as string).match(/TOP3/gu)?.length, 2, "one loss ranking summary with its aggregate share");
   assert.deepEqual(validateAnalysisReport(result.report, context, evidence.records).report, result.report);
-  assert.ok(events.some((event) => event["type"] === "analysis_group_repair" && (event["omitted_candidates"] as unknown[]).length === 1));
+  assert.deepEqual(events.find((event) => event["type"] === "analysis_group_repair")!["omitted_candidates"], omitted);
 });
 
 test("degradation discards only invalid items, keeps original loss ranks and blocks report-level failures", (t) => {

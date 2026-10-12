@@ -141,7 +141,7 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   notifyResize();
   assert.equal(card("numeric").style.gridColumn, "span 12", "fractional widths below the threshold must expand");
 
-  const longText = "连续中文改善措施".repeat(40);
+  const longText = "连续中文改善措施".repeat(300);
   const expanded: DashboardTableWidget = {
     ...simple,
     data: [{ c0: longText, c1: "https://example.com/" + "a".repeat(400) }],

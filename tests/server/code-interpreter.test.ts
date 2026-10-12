@@ -9,7 +9,6 @@ import {
   formatCodeInterpreterResult,
   type CodeInterpreterInput,
 } from "../../src/server/tool/code-interpreter.ts";
-import { generatedImageMarkdown } from "../../src/shared/image-references.ts";
 import type { JsonObject } from "../../src/shared/contracts.ts";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
@@ -93,7 +92,7 @@ test("passes sandbox self-check and consumes separate trusted database and user 
   assert.equal(result.details.provenance.rowCount, 1);
   assert.equal(result.details.provenance.truncated, false);
   assert.equal(result.details.provenance.hasUserInput, true);
-  assert.equal(result.details.images.length, 0);
+  assert.equal("images" in result.details, false);
 });
 
 test("saves a query snapshot and reuses it in Python without passing SQL", async () => {
@@ -269,114 +268,26 @@ test("adds the exact snapshot row contract to Python retry errors", async () => 
   );
 });
 
-test("requires and validates a semantic image reference name", async () => {
-  const invalidCalls = [
-    ["emit_image(image)", /required positional argument|缺少/u],
-    ["emit_image(image, '')", /reference_name/u],
-    ["emit_image(image, 123)", /reference_name 必须是字符串/u],
-    ["emit_image(image, '趋势图')", /必须包含有意义的英文字母/u],
-    ["emit_image(image, '12345')", /必须包含有意义的英文字母/u],
-    [`emit_image(image, '${"a".repeat(51)}')`, /不能超过 50 个字符/u],
-  ] as const;
-
-  for (const [call, expected] of invalidCalls) {
-    await assert.rejects(
-      () => runtime.execute([
-        "from PIL import Image",
-        "image = Image.new('RGB', (8, 8), 'white')",
-        call,
-      ].join("\n"), trustedInput(), undefined),
-      expected,
-    );
-  }
-
-  const normalized = await runtime.execute([
-    "from PIL import Image",
-    "image = Image.new('RGB', (8, 8), 'white')",
-    "emit_image(image, '2026 OEE / Top 10')",
-    "emit_result({'summary':'rendered'})",
-  ].join("\n"), trustedInput(), undefined);
-  assert.equal(normalized.details.images[0]?.referenceName, "2026-oee-top-10");
-  assert.equal(normalized.details.images[0]?.alt, "2026-oee-top-10");
-});
-
-test("does not automatically capture Matplotlib figures", async () => {
+test("has no image emitter or font helpers and ignores temporary image files", async () => {
+  await assert.rejects(
+    () => runtime.execute("emit_image(None, 'chart')", noSnapshotInput(), undefined),
+    /name 'emit_image' is not defined/u,
+  );
   const result = await runtime.execute([
-    "import matplotlib.pyplot as plt",
-    "figure, axis = plt.subplots()",
-    "axis.plot([1, 2, 3])",
-    "emit_result({'summary':'not emitted'})",
-  ].join("\n"), trustedInput(), undefined);
-  assert.equal(result.details.images.length, 0);
-});
-
-test("captures normalized PNG output with structured provenance", async () => {
-  const result = await runtime.execute(
-    [
-      "import matplotlib.pyplot as plt",
-      "values = [row['value'] for row in input_data['database']['rows']]",
-      "total = sum(values)",
-      "figure, axis = plt.subplots()",
-      "axis.plot(values)",
-      "emit_image(figure, 'value-trend')",
-      "emit_result({'summary':'summed values','metrics':{'total':total},'data':values})",
-      "print(total)",
-    ].join("\n"),
-    trustedInput([{ value: 2 }, { value: 3 }]),
-    undefined,
-  );
-  assert.equal(result.details.stdout, "5\n");
+    "assert 'emit_image' not in globals()",
+    "assert 'chinese_font' not in globals()",
+    "assert 'matplotlib_chinese_font' not in globals()",
+    "with open('/work/image-1.png', 'wb') as image_file:",
+    "    image_file.write(bytes.fromhex('89504e470d0a1a0a'))",
+    "import numpy as np",
+    "emit_result(summary='sum', metrics={'total': np.sum([2, 3])})",
+  ].join("\n"), noSnapshotInput(), undefined);
   assert.equal(result.details.result.metrics?.["total"], 5);
-  assert.equal(result.details.images.length, 1);
-  assert.equal(result.details.images[0]?.mimeType, "image/png");
-  assert.equal(result.details.images[0]?.referenceName, "value-trend");
-  assert.match(result.details.images[0]?.data ?? "", /^[A-Za-z0-9+/]+=*$/u);
-  assert.equal(JSON.parse(result.text).imageDelivery, "attached_to_answer");
-  const id = "ci-value-trend";
-  const modelText = formatCodeInterpreterResult(result.details, [{
-    id,
-    markdown: generatedImageMarkdown(id, result.details.images[0]?.alt ?? "value-trend"),
-  }]);
-  const modelResult = JSON.parse(modelText) as Record<string, unknown>;
-  assert.deepEqual(modelResult["result"], result.details.result);
-  assert.deepEqual(modelResult["provenance"], result.details.provenance);
-  assert.deepEqual(modelResult["imageReferences"], [{
-    id: "ci-value-trend",
-    markdown: "![value-trend](/__datalens_generated_image__/ci-value-trend)",
-  }]);
-  assert.equal(modelText.includes(result.details.images[0]?.data ?? "never"), false);
-});
-
-test("renders Chinese text with the sandbox-provided Matplotlib and Pillow fonts", async () => {
-  const result = await runtime.execute(
-    [
-      "import matplotlib.pyplot as plt",
-      "from matplotlib.font_manager import FontProperties",
-      "from PIL import Image, ImageDraw",
-      "figure, axis = plt.subplots(figsize=(4, 3))",
-      "axis.bar(['运行', '停机'], [8, 2])",
-      "axis.set_title('设备时间分布', fontproperties=FontProperties(family='SimHei', weight='bold'))",
-      "axis.set_ylabel('小时')",
-      "axis.set_xlabel('生产日期', fontproperties=matplotlib_chinese_font(12, bold=True))",
-      "plt.tight_layout()",
-      "emit_image(figure, 'equipment-time')",
-      "canvas = Image.new('RGB', (320, 100), 'white')",
-      "ImageDraw.Draw(canvas).text((12, 28), '中文设备状态', font=chinese_font(28, bold=True), fill='black')",
-      "emit_image(canvas, 'device-status')",
-      "emit_result({'summary':'中文图片已生成'})",
-      "print(CJK_FONT_FAMILY)",
-    ].join("\n"),
-    trustedInput(),
-    undefined,
-  );
-  assert.match(result.details.stdout, /Noto Sans CJK SC|Droid Sans Fallback|WenQuanYi/u);
-  assert.doesNotMatch(result.details.stdout, /Noto Sans CJK JP/u);
-  assert.doesNotMatch(result.details.stderr, /Font family 'SimHei' not found/u);
-  assert.doesNotMatch(result.details.stderr, /Glyph .* missing from current font/u);
-  assert.deepEqual(
-    result.details.images.map((image) => image.referenceName),
-    ["equipment-time", "device-status"],
-  );
+  assert.equal("images" in result.details, false);
+  const payload = JSON.parse(formatCodeInterpreterResult(result.details));
+  for (const field of ["images", "imageReferences", "imageCount", "imageDelivery"]) {
+    assert.equal(field in payload, false);
+  }
 });
 
 test("rejects invalid database input metadata and aborts a running process", async () => {

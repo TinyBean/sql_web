@@ -4,6 +4,12 @@ import type { AppLogger } from "../logger.ts";
 
 export const DASHBOARD_CONTEXT_MESSAGE_TYPE = "sql_web.dashboard.context";
 
+// Retain persisted diagnostics, but do not replay retired output-review instructions.
+const RETIRED_REVIEW_MESSAGE_TYPES = new Set([
+  "sql_web.machine_text_review",
+  "sql_web.image_reference_review",
+]);
+
 export function createDashboardContextExtension(
   dashboard: Pick<SessionDashboardStore, "loadOrPreview">,
   logger: Pick<AppLogger, "error">,
@@ -42,7 +48,10 @@ export function createDashboardContextExtension(
               timestamp: Date.now(),
             },
             ...event.messages.filter((message) => (
-              message.role !== "custom" || message.customType !== DASHBOARD_CONTEXT_MESSAGE_TYPE
+              message.role !== "custom" || (
+                message.customType !== DASHBOARD_CONTEXT_MESSAGE_TYPE &&
+                !RETIRED_REVIEW_MESSAGE_TYPES.has(message.customType)
+              )
             )),
           ],
         };

@@ -134,7 +134,6 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
   assert.equal(manyPayload.preview.rowCount, 20);
   assert.equal(manyPayload.preview.truncated, true);
 
-  const generatedImageData = "PRIVATE_GENERATED_IMAGE_DATA";
   const mountedInputs: CodeInterpreterInput[] = [];
   const availableRuntime = {
     status: { available: true, reason: null },
@@ -169,14 +168,6 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
           stdoutTruncated: false,
           stderrTruncated: false,
           durationMs: 10,
-          images: input.snapshot === null
-            ? []
-            : [{
-              mimeType: "image/png" as const,
-              data: generatedImageData,
-              alt: "oee-ranking",
-              referenceName: "oee-ranking",
-            }],
         },
       };
     },
@@ -196,15 +187,6 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
   assert.equal(schemaText.includes("input_json"), false);
   assert.match(codeInterpreter.description, /logical snapshot name/u);
   assert.match(codeInterpreter.description, /emit_result exactly once/u);
-
-  const childTools = createAgentTools(database, artifacts, availableRuntime, new Set(), undefined, true) as readonly CallableTool[];
-  const childPython = childTools.find((tool) => tool.name === "code_interpreter")!;
-  assert.match(childPython.description, /emit_image is forbidden/u);
-  await assert.rejects(childPython.execute("child-image", { code: "render", snapshot: "oee-总计" }, undefined, undefined, undefined as never), /禁止 emit_image/u);
-  const pureCalculation = await childPython.execute("child-calculation", { code: "emit_result(summary='ok')" }, undefined, undefined, undefined as never);
-  assert.equal(JSON.parse(pureCalculation.content[0]!.text!).result.summary, "pure python");
-  // The following assertions describe only the parent tool executions.
-  mountedInputs.length = 0;
 
   await assert.rejects(
     () => codeInterpreter.execute(
@@ -237,16 +219,11 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
   );
   const firstPayload = JSON.parse(first.content[0]?.text ?? "{}") as Record<string, unknown>;
   assert.deepEqual((firstPayload["result"] as { metrics: unknown }).metrics, { total: 0 });
-  assert.deepEqual(firstPayload["imageReferences"], [{
-    id: "ci-oee-ranking",
-    markdown: "![oee-ranking](/__datalens_generated_image__/ci-oee-ranking)",
-  }]);
-  assert.equal(
-    (first.details as { images: Array<{ referenceId: string }> }).images[0]?.referenceId,
-    "ci-oee-ranking",
-  );
+  for (const field of ["images", "imageReferences", "imageCount", "imageDelivery"]) {
+    assert.equal(field in firstPayload, false);
+  }
+  assert.equal("images" in (first.details as object), false);
   assert.equal(firstPayload["stdout"], "rendered\n");
-  assert.equal(JSON.stringify(firstPayload).includes(generatedImageData), false);
   assert.deepEqual(mountedInputs[0]?.userInput, { weight: 0.75 });
   assert.equal(mountedInputs[0]?.snapshot?.name, "oee-总计");
   const firstInputPath = mountedInputs[0]?.snapshot?.databasePath;
@@ -357,7 +334,6 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
     database,
     artifacts,
     availableRuntime,
-    new Set(["ci-oee-ranking", "ci-oee-ranking-2", "ci-oee-ranking-3"]),
   ) as readonly CallableTool[];
   const restoredCodeInterpreter = restoredTools.find((tool) => tool.name === "code_interpreter");
   assert.ok(restoredCodeInterpreter);
@@ -369,8 +345,6 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
     undefined as never,
   );
   const restoredPayload = JSON.parse(restored.content[0]?.text ?? "{}") as Record<string, unknown>;
-  assert.deepEqual(restoredPayload["imageReferences"], [{
-    id: "ci-oee-ranking-4",
-    markdown: "![oee-ranking](/__datalens_generated_image__/ci-oee-ranking-4)",
-  }]);
+  assert.deepEqual((restoredPayload["result"] as { metrics: unknown }).metrics, { total: 42 });
+  assert.equal("images" in restoredPayload, false);
 });

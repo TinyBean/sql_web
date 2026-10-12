@@ -15,13 +15,6 @@ export function isAgentToolName(value: unknown): value is AgentToolName {
   return typeof value === "string" && AGENT_TOOL_NAME_PATTERN.test(value);
 }
 
-export interface ChatImage {
-  readonly id: string;
-  readonly mimeType: "image/png";
-  readonly data: string;
-  readonly alt: string;
-}
-
 export interface ChatTraceText {
   readonly type: "text";
   readonly text: string;
@@ -43,7 +36,6 @@ export interface ChatMessage {
   readonly text: string;
   readonly timestamp?: number;
   readonly trace?: readonly ChatTraceItem[];
-  readonly images?: readonly ChatImage[];
 }
 
 export interface ModelDescriptor {
@@ -156,7 +148,6 @@ export interface SseEventMap {
   tool_call: { turn: number; id: string; name: string; arguments: JsonObject };
   tool_start: { turn: number; id: string; name: string };
   tool_end: { turn: number; id: string; name: string; isError: boolean };
-  generated_image: { turn: number; toolCallId: string; image: ChatImage };
   dashboard_update: { turn: number; toolCallId: string; dashboard: DashboardState };
   turn_end: { turn: number; final: boolean };
   compaction_start: { reason: AutomaticCompactionReason };

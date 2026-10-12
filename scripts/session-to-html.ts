@@ -408,8 +408,6 @@ h1 { margin: 0; font-size: clamp(22px, 4vw, 32px); line-height: 1.25; overflow-w
 .tool-status.success { color: var(--success); }
 .tool-status.error { color: var(--danger); }
 .tool-arguments { margin: 0 10px 10px; }
-.generated-image { display: block; width: auto; max-width: 100%; max-height: 70vh; margin: 14px auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-soft); cursor: zoom-in; }
-.external-image { display: inline-flex; padding: 2px 7px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; }
 .diagnostic { display: flex; flex-direction: column; gap: 12px; }
 .timeline-entry { padding: 15px 17px; border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 12px; background: var(--surface); box-shadow: 0 4px 14px rgba(30, 42, 66, .045); }
 .timeline-entry[data-entry-type="message"] { border-left-color: var(--accent); }
@@ -429,17 +427,10 @@ h1 { margin: 0; font-size: clamp(22px, 4vw, 32px); line-height: 1.25; overflow-w
 .content-part { margin-top: 9px; }
 .content-part:first-child { margin-top: 0; }
 .tool-result-error { color: var(--danger); font-weight: 700; }
-.image-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
-.image-strip figure { margin: 0; min-width: 0; }
-.image-strip img { display: block; max-width: 100%; max-height: 420px; margin: 0 auto; border: 1px solid var(--border); border-radius: 9px; cursor: zoom-in; }
-.image-strip figcaption { margin-top: 5px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .parse-warning { padding: 13px 15px; border: 1px solid #d28a16; border-radius: 10px; background: color-mix(in srgb, #d28a16 10%, var(--surface)); }
 .parse-warning strong { display: block; color: #b36c00; }
 .bootstrap-error { margin: 0; padding: 18px; border: 1px solid #efb4b8; border-radius: 12px; background: #fff1f2; color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty { padding: 48px 20px; border: 1px dashed var(--border); border-radius: 16px; color: var(--muted); text-align: center; }
-.image-dialog { max-width: min(96vw, 1400px); max-height: 94vh; padding: 10px; border: 0; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
-.image-dialog::backdrop { background: rgba(4, 9, 20, .78); }
-.image-dialog img { display: block; max-width: calc(96vw - 20px); max-height: calc(94vh - 20px); }
 @media (prefers-color-scheme: dark) {
   :root { --page: #11151d; --surface: #191f2a; --surface-soft: #141a23; --text: #e8edf6; --muted: #9da9bc; --border: #2d3747; --accent: #83a2ff; --accent-soft: #202d52; --user: #4168dc; --user-text: #fff; --shadow: 0 14px 36px rgba(0, 0, 0, .28); }
 }
@@ -473,8 +464,6 @@ const VIEWER_JS = String.raw`
   const expandButton = document.getElementById("toggle-process");
   const transcript = document.getElementById("transcript");
   const summary = document.getElementById("branch-summary");
-  const dialog = document.getElementById("image-dialog");
-  const dialogImage = document.getElementById("dialog-image");
   let expandProcesses = false;
 
   function element(tag, className, text) {
@@ -493,38 +482,19 @@ const VIEWER_JS = String.raw`
       .replaceAll("'", "&#39;");
   }
 
-  function canonicalGeneratedImageId(source) {
-    const prefix = "/__datalens_generated_image__/";
-    const normalized = String(source || "").trim();
-    if (!normalized.startsWith(prefix)) return null;
-    const encodedId = normalized.slice(prefix.length);
-    if (!encodedId || encodedId.includes("/")) return null;
-    try {
-      const id = decodeURIComponent(encodedId);
-      const canonical = encodeURIComponent(id).replace(/[!'()*]/g, function (character) {
-        return "%" + character.charCodeAt(0).toString(16).toUpperCase();
-      });
-      return id && canonical === encodedId ? id : null;
-    } catch {
-      return null;
-    }
-  }
-
   function safeLink(value) {
     const normalized = String(value || "").trim();
     return /^(?:https?:|mailto:)/i.test(normalized) ? normalized : null;
   }
 
-  function renderMarkdown(container, source, images, claimedImageIds) {
+  function renderMarkdown(container, source) {
     if (!source) return;
-    const references = [];
     const parser = new marked.Marked({
       breaks: true,
       gfm: true,
       renderer: {
         image: function (token) {
-          const index = references.push({ source: token.href, alt: token.text, title: token.title }) - 1;
-          return '<span class="markdown-image-reference" id="markdown-image-reference-' + index + '"></span>';
+          return escapeHtml(token.text);
         },
         html: function (token) {
           return escapeHtml(token.text);
@@ -540,48 +510,6 @@ const VIEWER_JS = String.raw`
     });
     const template = document.createElement("template");
     template.innerHTML = String(clean);
-
-    const imagesById = new Map(images.map(function (image) { return [image.id, image]; }));
-    template.content.querySelectorAll("span.markdown-image-reference").forEach(function (placeholder) {
-      const match = /^markdown-image-reference-(?:0|[1-9]\d*)$/.exec(placeholder.id);
-      const index = match ? Number(placeholder.id.slice("markdown-image-reference-".length)) : -1;
-      const reference = references[index];
-      if (!reference) {
-        placeholder.remove();
-        return;
-      }
-      const generatedId = canonicalGeneratedImageId(reference.source);
-      if (generatedId) {
-        const image = imagesById.get(generatedId);
-        if (!image || claimedImageIds.has(generatedId) || image.mimeType !== "image/png") {
-          placeholder.remove();
-          return;
-        }
-        claimedImageIds.add(generatedId);
-        const rendered = element("img", "generated-image");
-        rendered.src = "data:image/png;base64," + image.data;
-        rendered.alt = reference.alt || image.alt || "生成图片";
-        rendered.loading = "lazy";
-        rendered.decoding = "async";
-        rendered.addEventListener("click", function () {
-          dialogImage.src = rendered.src;
-          dialogImage.alt = rendered.alt;
-          if (typeof dialog.showModal === "function") dialog.showModal();
-        });
-        placeholder.replaceWith(rendered);
-        return;
-      }
-      const external = element("span", "external-image", "图片未自动加载：" + (reference.alt || reference.source));
-      const href = safeLink(reference.source);
-      if (href) {
-        const link = element("a", "", external.textContent);
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        external.replaceChildren(link);
-      }
-      placeholder.replaceWith(external);
-    });
 
     template.content.querySelectorAll("a").forEach(function (link) {
       const href = safeLink(link.getAttribute("href"));
@@ -614,43 +542,6 @@ const VIEWER_JS = String.raw`
     pre.textContent = typeof value === "string" ? value : prettyJson(value);
     block.append(pre);
     return block;
-  }
-
-  function showImage(source, alt) {
-    dialogImage.src = source;
-    dialogImage.alt = alt;
-    if (typeof dialog.showModal === "function") dialog.showModal();
-  }
-
-  function diagnosticImage(candidate, caption) {
-    if (!candidate || !/^(?:image\/(?:png|jpeg|gif|webp))$/i.test(String(candidate.mimeType || "")) ||
-        typeof candidate.data !== "string") return null;
-    try {
-      if (btoa(atob(candidate.data)) !== candidate.data) return null;
-    } catch {
-      return null;
-    }
-    const figure = element("figure");
-    const image = element("img");
-    image.src = "data:" + candidate.mimeType.toLowerCase() + ";base64," + candidate.data;
-    image.alt = typeof candidate.alt === "string" ? candidate.alt : (caption || "持久化图片");
-    image.loading = "lazy";
-    image.decoding = "async";
-    image.addEventListener("click", function () { showImage(image.src, image.alt); });
-    figure.append(image);
-    const description = typeof candidate.alt === "string" && candidate.alt ? candidate.alt : caption;
-    if (description) figure.append(element("figcaption", "", description));
-    return figure;
-  }
-
-  function appendDiagnosticImages(container, candidates, label) {
-    if (!Array.isArray(candidates)) return;
-    const strip = element("div", "image-strip");
-    candidates.forEach(function (candidate, index) {
-      const figure = diagnosticImage(candidate, label + " #" + (index + 1));
-      if (figure) strip.append(figure);
-    });
-    if (strip.childElementCount) container.append(strip);
   }
 
   function renderTool(item) {
@@ -718,7 +609,6 @@ const VIEWER_JS = String.raw`
       } else if (partType === "image") {
         const strip = element("div", "diagnostic-block content-part");
         strip.append(element("div", "diagnostic-label", "content[" + index + "] · image"));
-        appendDiagnosticImages(strip, [part], "消息图片");
         strip.append(diagnosticBlock("image metadata", Object.assign({}, part, { data: "[base64: " + String(part.data || "").length + " chars]" })));
         container.append(strip);
       } else {
@@ -732,12 +622,6 @@ const VIEWER_JS = String.raw`
     const status = role === "toolResult" && message.isError ? " · ERROR" : "";
     container.append(element("div", role === "toolResult" && message.isError ? "tool-result-error" : "", "role: " + role + status));
     appendDiagnosticContent(container, message ? message.content : undefined, role);
-    if (role === "toolResult" && message && message.details && message.details.kind === "code_interpreter") {
-      const images = element("div", "diagnostic-block");
-      images.append(element("div", "diagnostic-label", "details.images"));
-      appendDiagnosticImages(images, message.details.images, "代码解释器图片");
-      if (images.querySelector("img")) container.append(images);
-    }
     container.append(diagnosticBlock("message metadata", messageMetadata(message || {})));
   }
 
@@ -837,7 +721,6 @@ const VIEWER_JS = String.raw`
     const article = element("article", "message " + message.role);
     article.dataset.messageId = message.id;
     article.append(element("div", "role", message.role === "user" ? "你" : "助手"));
-    const traceImageIds = new Set();
 
     if (message.role === "assistant" && Array.isArray(message.trace) && message.trace.length) {
       const process = element("details", "process");
@@ -848,7 +731,7 @@ const VIEWER_JS = String.raw`
         if (item.type === "tool") items.append(renderTool(item));
         else {
           const text = element("div", "process-text markdown");
-          renderMarkdown(text, item.text, message.images || [], traceImageIds);
+          renderMarkdown(text, item.text);
           items.append(text);
         }
       });
@@ -857,7 +740,7 @@ const VIEWER_JS = String.raw`
     }
 
     const body = element("div", "markdown");
-    renderMarkdown(body, message.text, message.images || [], new Set());
+    renderMarkdown(body, message.text);
     article.append(body);
     const time = formattedTime(message.timestamp);
     if (time) article.append(element("div", "timestamp", time));
@@ -937,7 +820,6 @@ const VIEWER_JS = String.raw`
       ? (expandProcesses ? "收起过程" : "展开过程")
       : (expandProcesses ? "收起完整 JSON" : "展开完整 JSON");
   });
-  dialog.addEventListener("click", function (event) { if (event.target === dialog) dialog.close(); });
   renderSelectedBranch();
   document.documentElement.dataset.sessionViewerReady = "true";
 })();
@@ -1051,7 +933,6 @@ export function renderSessionHtml(data: SessionHtmlData): string {
     <div id="branch-summary" class="summary"></div>
     <section id="transcript" class="transcript" aria-live="polite"></section>
   </main>
-  <dialog id="image-dialog" class="image-dialog"><img id="dialog-image" alt=""></dialog>
   <script id="session-data" type="application/json">${encodedData}</script>
   <script id="viewer-runtime" type="application/octet-stream">${encodedRuntime}</script>
   <script nonce="${nonce}" id="viewer-bootstrap">${bootstrap}</script>

@@ -160,7 +160,7 @@ test("rejects invalid automatic compaction events and ignores unknown SSE events
   assert.equal(decodeSseEvent("future_event", {}), null);
 });
 
-test("decodes code interpreter tools and inline PNG images", () => {
+test("decodes code interpreter tools while ignoring legacy image fields", () => {
   const session = {
     ...validSession,
     tools: [
@@ -177,23 +177,12 @@ test("decodes code interpreter tools and inline PNG images", () => {
       images: [{ id: "ci-trend", mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
     }],
   };
-  assert.deepEqual(decodeSerializedSession(session), session);
+  assert.deepEqual(decodeSerializedSession(session), { ...session, messages: session.messages.map(({ images: _images, ...message }) => message) });
 });
 
-test("decodes generated image stream events", () => {
-  const image = {
-    id: "ci-trend",
-    mimeType: "image/png",
-    data: "iVBORw0KGgo=",
-    alt: "趋势图",
-  };
-  assert.deepEqual(
-    decodeSseEvent("generated_image", { turn: 2, toolCallId: "call-1", image }),
-    {
-      event: "generated_image",
-      data: { turn: 2, toolCallId: "call-1", image },
-    },
-  );
+test("ignores retired generated image events including malformed legacy payloads", () => {
+  assert.equal(decodeSseEvent("generated_image", { turn: 2, image: { data: "AAAA" } }), null);
+  assert.equal(decodeSseEvent("generated_image", {}), null);
 });
 
 test("decodes a complete dashboard update event", () => {
@@ -222,59 +211,6 @@ test("decodes a complete dashboard update event", () => {
   );
 });
 
-test("rejects malformed generated image stream events", () => {
-  const image = {
-    id: "ci-trend",
-    mimeType: "image/png",
-    data: "iVBORw0KGgo=",
-    alt: "趋势图",
-  };
-  assert.throws(
-    () => decodeSseEvent("generated_image", { turn: -1, toolCallId: "call-1", image }),
-    /turn/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", { toolCallId: "call-1", image }),
-    /turn/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", { turn: 0, image }),
-    /toolCallId/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", { turn: 0, toolCallId: "   ", image }),
-    /toolCallId/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", { turn: 0, toolCallId: "call-1" }),
-    /image/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", {
-      turn: 0,
-      toolCallId: "call-1",
-      image: { ...image, id: "" },
-    }),
-    /image\.id/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", {
-      turn: 0,
-      toolCallId: "call-1",
-      image: { ...image, mimeType: "image/jpeg" },
-    }),
-    /image\.mimeType/u,
-  );
-  assert.throws(
-    () => decodeSseEvent("generated_image", {
-      turn: 0,
-      toolCallId: "call-1",
-      image: { ...image, alt: null },
-    }),
-    /image\.alt/u,
-  );
-});
-
 test("rejects malformed nested API and SSE payloads", () => {
   assert.throws(
     () => decodeSerializedSession({ ...validSession, tools: ["Invalid-Tool"] }),
@@ -292,50 +228,6 @@ test("rejects malformed nested API and SSE payloads", () => {
       isError: "false",
     }),
     /isError/u,
-  );
-  assert.throws(
-    () => decodeSerializedSession({
-      ...validSession,
-      messages: [{
-        id: "assistant-1",
-        role: "assistant",
-        text: "图表",
-        images: [{ id: "", mimeType: "image/png", data: "iVBORw0KGgo=", alt: "趋势图" }],
-      }],
-    }),
-    /images\[0\]\.id/u,
-  );
-  assert.throws(
-    () => decodeSerializedSession({
-      ...validSession,
-      messages: [{
-        id: "assistant-1",
-        role: "assistant",
-        text: "图表",
-        images: [{
-          id: "ci:call-1:1",
-          mimeType: "image/png",
-          data: "iVBORw0KGgo=",
-          alt: "旧图片",
-        }],
-      }],
-    }),
-    /合法的语义图片 ID/u,
-  );
-  assert.throws(
-    () => decodeSerializedSession({
-      ...validSession,
-      messages: [{
-        id: "assistant-1",
-        role: "assistant",
-        text: "图表",
-        images: [
-          { id: "ci-duplicate", mimeType: "image/png", data: "AAAA", alt: "第一张" },
-          { id: "ci-duplicate", mimeType: "image/png", data: "BBBB", alt: "第二张" },
-        ],
-      }],
-    }),
-    /images\[1\]\.id/u,
   );
   assert.throws(
     () => decodeSseEvent("tool_call", {

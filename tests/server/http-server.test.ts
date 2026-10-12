@@ -24,10 +24,9 @@ import {
   type WebServerOptions,
   type WebSessionPort,
 } from "../../src/server/http-server.ts";
-import type { ChatImage, ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
+import type { ParsedSseEvent, SerializedSession } from "../../src/shared/contracts.ts";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
 import { DashboardConflictError } from "../../src/server/agent/session-dashboard.ts";
-import { generatedImageMarkdown } from "../../src/shared/image-references.ts";
 
 const projectRoot = process.cwd();
 const EMPTY_DASHBOARD: DashboardState = {
@@ -198,10 +197,7 @@ test("serves the app with restrictive security headers", async (t) => {
   assert.equal(sharedContractsModule.status, 200);
   assert.match(sharedContractsModule.headers.get("content-type") ?? "", /javascript/u);
   assert.match(await sharedContractsModule.text(), /isAgentToolName/u);
-  const sharedImageReferencesModule = await fetch(`${baseUrl}/shared/image-references.js`);
-  assert.equal(sharedImageReferencesModule.status, 200);
-  assert.match(sharedImageReferencesModule.headers.get("content-type") ?? "", /javascript/u);
-  assert.match(await sharedImageReferencesModule.text(), /generatedImageReferenceSource/u);
+  assert.equal((await fetch(`${baseUrl}/shared/image-references.js`)).status, 404);
   const streamStateModule = await fetch(`${baseUrl}/stream-state.js`);
   assert.equal(streamStateModule.status, 200);
   assert.match(streamStateModule.headers.get("content-type") ?? "", /javascript/u);
@@ -211,9 +207,7 @@ test("serves the app with restrictive security headers", async (t) => {
   const markdownParserModule = await fetch(`${baseUrl}/markdown-parser.js`);
   assert.equal(markdownParserModule.status, 200);
   assert.match(markdownParserModule.headers.get("content-type") ?? "", /javascript/u);
-  const imagePlaceholdersModule = await fetch(`${baseUrl}/image-placeholders.js`);
-  assert.equal(imagePlaceholdersModule.status, 200);
-  assert.match(imagePlaceholdersModule.headers.get("content-type") ?? "", /javascript/u);
+  assert.equal((await fetch(`${baseUrl}/image-placeholders.js`)).status, 404);
   const markedVendor = await fetch(`${baseUrl}/vendor/marked.js`);
   assert.equal(markedVendor.status, 200);
   assert.match(await markedVendor.text(), /marked/u);
@@ -575,153 +569,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
   }
 });
 
-test("streams validated generated images after tool completion and reconciles with done", async (t) => {
-  const imageData = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
-  const expectedImages = [
-    { id: "ci-oee-trend", mimeType: "image/png" as const, data: imageData, alt: "oee-trend" },
-    { id: "ci-yield-distribution", mimeType: "image/png" as const, data: imageData, alt: "yield-distribution" },
-  ];
-  const completedSession: SerializedSession = {
-    id: "fake-session",
-    title: "图片事件测试",
-    model: null,
-    tools: ["code_interpreter"],
-    streaming: false,
-    dashboard: EMPTY_DASHBOARD,
-    messages: [{
-      id: "assistant-1",
-      role: "assistant",
-      text: expectedImages.map((image) => generatedImageMarkdown(image.id, image.alt)).join("\n"),
-      images: expectedImages,
-    }],
-  };
-  const listeners = new Set<(event: AgentSessionEvent) => void>();
-  const streamable: StreamableAgentSession = {
-    isStreaming: false,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-  };
-  const emit = (event: unknown): void => {
-    for (const listener of listeners) listener(event as AgentSessionEvent);
-  };
-  const sessions: WebSessionPort = {
-    status: () => ({
-      tools: ["code_interpreter"],
-      codeInterpreter: { available: true, reason: null },
-      model: { provider: "test-provider", model: "test-model" },
-      availableModelCount: 1,
-      activeSessionCount: 1,
-    }),
-    list: async () => [],
-    create: async () => completedSession,
-    get: async () => streamable,
-    getSerialized: async () => completedSession,
-    delete: async () => {},
-    prompt: async () => {
-      emit({ type: "turn_start" });
-      emit({
-        type: "tool_execution_start",
-        toolCallId: "code-1",
-        toolName: "code_interpreter",
-        args: {},
-      });
-      emit({
-        type: "tool_execution_end",
-        toolCallId: "code-1",
-        toolName: "code_interpreter",
-        result: {
-          content: [{ type: "text", text: "PRIVATE_TOOL_TEXT" }],
-          details: {
-            kind: "code_interpreter",
-            stdout: "PRIVATE_STDOUT",
-            images: [
-              {
-                mimeType: "image/png",
-                data: imageData,
-                alt: "oee-trend",
-                referenceName: "oee-trend",
-                referenceId: "ci-oee-trend",
-              },
-              {
-                mimeType: "image/png",
-                data: imageData,
-                alt: "yield-distribution",
-                referenceName: "yield-distribution",
-                referenceId: "ci-yield-distribution",
-              },
-            ],
-          },
-        },
-        isError: false,
-      });
-      emit({
-        type: "tool_execution_end",
-        toolCallId: "code-1",
-        toolName: "code_interpreter",
-        result: {
-          details: {
-            kind: "code_interpreter",
-            images: [{
-              mimeType: "image/png",
-              data: imageData,
-              alt: "oee-trend",
-              referenceName: "oee-trend",
-              referenceId: "ci-oee-trend",
-            }],
-          },
-        },
-        isError: false,
-      });
-      emit({
-        type: "turn_end",
-        message: {
-          role: "assistant",
-          content: [{ type: "toolCall", id: "code-1", name: "code_interpreter", arguments: {} }],
-          stopReason: "toolUse",
-        },
-        toolResults: [],
-      });
-    },
-    abort: async () => {},
-    editDashboard: async () => EMPTY_DASHBOARD,
-  };
-  const baseUrl = await createFixture(t, sessions);
-  const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: "画图" }),
-  });
-  assert.equal(response.status, 200);
-  const events = parseRawSseBody(await response.text());
-  const doneIndex = events.findIndex(({ event }) => event === "done");
-  const generatedImages = events.filter(({ event }) => event === "generated_image");
-  const firstToolEndIndex = events.findIndex(({ event }) => event === "tool_end");
-  const turnEndIndex = events.findIndex(({ event }) => event === "turn_end");
-
-  assert.equal(doneIndex, events.length - 1);
-  assert.deepEqual(
-    events.find(({ event }) => event === "tool_end")?.data,
-    { turn: 0, id: "code-1", name: "code_interpreter", isError: false },
-  );
-  assert.deepEqual(generatedImages.map(({ data }) => data), expectedImages.map((image) => ({
-    turn: 0,
-    toolCallId: "code-1",
-    image,
-  })));
-  assert.ok(firstToolEndIndex < events.findIndex(({ event }) => event === "generated_image"));
-  assert.ok(events.findLastIndex(({ event }) => event === "generated_image") < turnEndIndex);
-  assert.deepEqual(
-    (events[doneIndex]?.data as SerializedSession).messages[0]?.images,
-    generatedImages.map(({ data }) => (
-      data as { image: ChatImage }
-    ).image),
-  );
-  assert.doesNotMatch(JSON.stringify(events.slice(0, doneIndex)), /PRIVATE_TOOL_TEXT|PRIVATE_STDOUT/u);
-});
-
-test("does not stream images from failed, unrelated, or malformed tool results", async (t) => {
+test("does not stream legacy images from any tool result", async (t) => {
   const imageData = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
   const completedSession: SerializedSession = {
     id: "fake-session",
@@ -762,6 +610,13 @@ test("does not stream images from failed, unrelated, or malformed tool results",
     delete: async () => {},
     prompt: async () => {
       emit({ type: "turn_start" });
+      emit({
+        type: "tool_execution_end",
+        toolCallId: "legacy-success",
+        toolName: "code_interpreter",
+        result: { details: validDetails },
+        isError: false,
+      });
       emit({
         type: "tool_execution_end",
         toolCallId: "failed",
@@ -813,7 +668,7 @@ test("does not stream images from failed, unrelated, or malformed tool results",
     JSON.stringify(events),
     /不得发送|PRIVATE_INVALID_BASE64|PRIVATE_BASE64_SUFFIX|坏图|尾随数据/u,
   );
-  assert.equal(events.filter(({ event }) => event === "tool_end").length, 3);
+  assert.equal(events.filter(({ event }) => event === "tool_end").length, 4);
 });
 
 test("streams sanitized automatic compaction lifecycle events", async (t) => {

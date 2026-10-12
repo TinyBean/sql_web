@@ -1,6 +1,5 @@
 import type {
   AutomaticCompactionReason,
-  ChatImage,
   ChatMessage,
   JsonObject,
   ParsedSseEvent,
@@ -97,7 +96,6 @@ export interface StreamPresentation {
   readonly finalText: string;
   readonly activeTurn: number | null;
   readonly currentTurnText: string;
-  readonly images: readonly ChatImage[];
   readonly compactingReason: AutomaticCompactionReason | null;
   readonly waiting: boolean;
   readonly finalized: boolean;
@@ -113,7 +111,6 @@ export function createStreamPresentation(): StreamPresentation {
     finalText: "",
     activeTurn: null,
     currentTurnText: "",
-    images: [],
     compactingReason: null,
     waiting: false,
     finalized: false,
@@ -208,11 +205,6 @@ export function reduceStreamPresentation(
     return state.activeTurn === parsed.data.turn
       ? updateTool(state, parsed.data, parsed.data.isError ? "error" : "done")
       : state;
-  }
-  if (parsed.event === "generated_image") {
-    if (state.activeTurn !== parsed.data.turn) return state;
-    if (state.images.some((image) => image.id === parsed.data.image.id)) return state;
-    return { ...state, images: [...state.images, parsed.data.image] };
   }
   if (parsed.event === "turn_end") {
     if (state.activeTurn !== parsed.data.turn) return state;

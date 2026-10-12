@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   closeSync,
   lstatSync,
   mkdirSync,
@@ -13,10 +12,9 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { JsonObject, JsonValue } from "../../shared/contracts.ts";
-import { isGeneratedImageReferenceName } from "../../shared/image-references.ts";
 import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
 
 const MAX_CODE_BYTES = 20_000;
@@ -24,79 +22,10 @@ const MAX_USER_INPUT_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_RESULT_BYTES = 64 * 1024;
 const MAX_DATABASE_INPUT_BYTES = MAX_QUERY_ARTIFACT_BYTES;
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const MAX_TOTAL_IMAGE_BYTES = 4 * 1024 * 1024;
-const MAX_IMAGES = 3;
-const MAX_IMAGE_WIDTH = 1_600;
-const MAX_IMAGE_HEIGHT = 1_200;
-const MAX_IMAGE_METADATA_BYTES = 128;
 const WALL_TIMEOUT_MS = 15_000;
-
-const PREPARE_CHINESE_FONTS = String.raw`
-import os
-import shutil
-import sys
-
-regular_target, bold_target = sys.argv[1:3]
-
-def extract_face(source, family, target):
-    from fontTools.ttLib import TTCollection
-    collection = TTCollection(source)
-    for font in collection.fonts:
-        families = {
-            record.toUnicode()
-            for record in font["name"].names
-            if record.nameID == 1
-        }
-        if family in families:
-            font.save(target)
-            return True
-    return False
-
-prepared = False
-try:
-    regular_sources = (
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    )
-    bold_sources = (
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-    )
-    regular_source = next(path for path in regular_sources if os.path.isfile(path))
-    bold_source = next(path for path in bold_sources if os.path.isfile(path))
-    prepared = (
-        extract_face(regular_source, "Noto Sans CJK SC", regular_target)
-        and extract_face(bold_source, "Noto Sans CJK SC", bold_target)
-    )
-except Exception:
-    prepared = False
-
-if not prepared:
-    for target in (regular_target, bold_target):
-        try:
-            os.unlink(target)
-        except FileNotFoundError:
-            pass
-    fallback_sources = (
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    )
-    fallback = next((path for path in fallback_sources if os.path.isfile(path)), None)
-    if fallback:
-        shutil.copyfile(fallback, regular_target)
-        shutil.copyfile(fallback, bold_target)
-        prepared = True
-
-if not prepared:
-    raise RuntimeError("未找到 Noto Sans CJK SC 或可用的中文回退字体")
-`;
 
 const PYTHON_RUNNER = String.raw`
 import json
-import os
-import re
 
 with open("/input/database.json", "r", encoding="utf-8") as database_file:
     raw_database_data = json.load(database_file)
@@ -124,80 +53,6 @@ user_data = _attribute_json(raw_user_data)
 input_data = _AttributeDict(database=database_data, user=user_data)
 snapshot_rows = [] if database_data is None else database_data["rows"]
 
-_CJK_REGULAR_FONT_PATH = "/fonts/chinese-regular.otf"
-_CJK_BOLD_FONT_PATH = "/fonts/chinese-bold.otf"
-
-def _configure_chinese_font():
-    import copy
-    import matplotlib
-    from matplotlib import font_manager
-    from matplotlib.ft2font import FT2Font
-
-    required_characters = "中文设备运行停机"
-    registered_fonts = []
-    for font_path in (_CJK_REGULAR_FONT_PATH, _CJK_BOLD_FONT_PATH):
-        if not os.path.isfile(font_path):
-            raise RuntimeError("code_interpreter 中文字体文件不存在")
-        character_map = FT2Font(font_path).get_charmap()
-        if not all(ord(character) in character_map for character in required_characters):
-            raise RuntimeError("code_interpreter 中文字体覆盖不完整")
-        font_manager.fontManager.addfont(font_path)
-        registered_fonts.append(next(
-            entry for entry in reversed(font_manager.fontManager.ttflist)
-            if entry.fname == font_path
-        ))
-    family = font_manager.FontProperties(fname=_CJK_REGULAR_FONT_PATH).get_name()
-    for alias_name in ("SimHei",):
-        for registered_font in registered_fonts:
-            alias = copy.copy(registered_font)
-            alias.name = alias_name
-            font_manager.fontManager.ttflist.append(alias)
-    font_manager.fontManager._findfont_cached.cache_clear()
-    matplotlib.rcParams["font.family"] = "sans-serif"
-    matplotlib.rcParams["font.sans-serif"] = [family, "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
-    font_manager.fontManager.defaultFamily["ttf"] = family
-    return family
-
-CJK_FONT_FAMILY = _configure_chinese_font()
-CJK_FONT_PATH = _CJK_REGULAR_FONT_PATH
-CJK_BOLD_FONT_PATH = _CJK_BOLD_FONT_PATH
-
-def chinese_font(size=20, bold=False):
-    """Return a Pillow font that supports Chinese text."""
-    from PIL import ImageFont
-    font_path = CJK_BOLD_FONT_PATH if bold else CJK_FONT_PATH
-    return ImageFont.truetype(font_path, size=int(size))
-
-def matplotlib_chinese_font(size=None, bold=False):
-    """Return Matplotlib font properties backed by the bundled system CJK font."""
-    from matplotlib.font_manager import FontProperties
-    font_path = CJK_BOLD_FONT_PATH if bold else CJK_FONT_PATH
-    return FontProperties(fname=font_path, size=size)
-
-def _contains_cjk_text(value):
-    return any(
-        "\u3400" <= character <= "\u4dbf"
-        or "\u4e00" <= character <= "\u9fff"
-        or "\uf900" <= character <= "\ufaff"
-        for character in value
-    )
-
-def _apply_chinese_font_to_figure(figure):
-    from matplotlib.text import Text
-
-    bold_names = {"bold", "heavy", "semibold", "demibold", "demi", "black", "extra bold"}
-    for artist in figure.findobj(match=Text):
-        if not _contains_cjk_text(artist.get_text()):
-            continue
-        weight = artist.get_fontweight()
-        bold = (
-            isinstance(weight, (int, float)) and weight >= 600
-            or str(weight).lower() in bold_names
-        )
-        artist.set_fontproperties(matplotlib_chinese_font(artist.get_fontsize(), bold=bold))
-
-_image_count = 0
 _result_count = 0
 _RESULT_MISSING = object()
 _RESULT_KEYS = {"summary", "metrics", "intermediates", "data", "notes"}
@@ -254,66 +109,12 @@ def emit_result(value=_RESULT_MISSING, **fields):
         )
     _result_count = 1
 
-def _normalize_reference_name(value):
-    if not isinstance(value, str):
-        raise TypeError("reference_name 必须是字符串")
-    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    if not normalized or not re.search(r"[a-z]", normalized):
-        raise ValueError("reference_name 归一化后必须包含有意义的英文字母")
-    if len(normalized) > 50:
-        raise ValueError("reference_name 归一化后长度不能超过 50 个字符")
-    return normalized
-
-def _normalize_png(filename):
-    from PIL import Image
-    with Image.open(filename) as source:
-        source.load()
-        source.thumbnail((1600, 1200))
-        if source.mode not in ("RGB", "RGBA", "L", "LA", "P"):
-            source = source.convert("RGBA")
-        temporary = filename + ".normalized"
-        source.save(temporary, format="PNG", optimize=True)
-    os.replace(temporary, filename)
-
-def emit_image(value, reference_name):
-    global _image_count
-    if _image_count >= 3:
-        raise RuntimeError("每次代码执行最多生成 3 张图片")
-    normalized_reference_name = _normalize_reference_name(reference_name)
-    image_number = _image_count + 1
-    filename = f"/work/image-{image_number}.png"
-    try:
-        from matplotlib.figure import Figure
-    except ImportError:
-        Figure = None
-    try:
-        from PIL import Image
-    except ImportError:
-        Image = None
-    if Figure is not None and isinstance(value, Figure):
-        _apply_chinese_font_to_figure(value)
-        value.savefig(filename, format="png", bbox_inches="tight", dpi=120)
-    elif Image is not None and isinstance(value, Image.Image):
-        value.save(filename, format="PNG")
-    else:
-        raise TypeError("emit_image 只接受 Matplotlib Figure 或 Pillow Image")
-    _normalize_png(filename)
-    with open(f"/work/image-{image_number}.json", "w", encoding="utf-8") as metadata_file:
-        json.dump({"referenceName": normalized_reference_name}, metadata_file, separators=(",", ":"))
-    _image_count += 1
-
 namespace = {
     "__builtins__": __builtins__,
     "__name__": "__main__",
     "input_data": input_data,
     "snapshot_rows": snapshot_rows,
     "emit_result": emit_result,
-    "emit_image": emit_image,
-    "CJK_FONT_PATH": CJK_FONT_PATH,
-    "CJK_BOLD_FONT_PATH": CJK_BOLD_FONT_PATH,
-    "CJK_FONT_FAMILY": CJK_FONT_FAMILY,
-    "chinese_font": chinese_font,
-    "matplotlib_chinese_font": matplotlib_chinese_font,
 }
 with open("/input/code.py", "r", encoding="utf-8") as code_file:
     source = code_file.read()
@@ -339,13 +140,6 @@ export interface CodeInterpreterOptions {
 export interface CodeInterpreterStatus {
   readonly available: boolean;
   readonly reason: string | null;
-}
-
-export interface CodeInterpreterImage {
-  readonly mimeType: "image/png";
-  readonly data: string;
-  readonly alt: string;
-  readonly referenceName: string;
 }
 
 export interface CodeInterpreterStructuredResult {
@@ -390,17 +184,11 @@ export interface CodeInterpreterDetails {
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
   readonly durationMs: number;
-  readonly images: readonly CodeInterpreterImage[];
 }
 
 export interface CodeInterpreterExecution {
   readonly text: string;
   readonly details: CodeInterpreterDetails;
-}
-
-export interface CodeInterpreterImageReference {
-  readonly id: string;
-  readonly markdown: string;
 }
 
 interface CapturedOutput {
@@ -529,80 +317,6 @@ function runChild(
   });
 }
 
-function pngDimensions(buffer: Buffer): { width: number; height: number } | null {
-  const signature = "89504e470d0a1a0a";
-  if (buffer.length < 24 || buffer.subarray(0, 8).toString("hex") !== signature) return null;
-  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
-}
-
-function imageReferenceName(workDir: string, index: number): string {
-  const filename = path.join(workDir, `image-${index}.json`);
-  let metadata;
-  try {
-    metadata = lstatSync(filename);
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-      throw new CodeInterpreterError(`第 ${index} 张图片缺少 reference_name 元数据`);
-    }
-    throw error;
-  }
-  if (
-    !metadata.isFile() || metadata.isSymbolicLink() ||
-    metadata.size < 1 || metadata.size > MAX_IMAGE_METADATA_BYTES
-  ) {
-    throw new CodeInterpreterError(`第 ${index} 张图片的 reference_name 元数据无效`);
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(readFileSync(filename, "utf8")) as unknown;
-  } catch {
-    throw new CodeInterpreterError(`第 ${index} 张图片的 reference_name 元数据无效`);
-  }
-  if (
-    typeof decoded !== "object" || decoded === null ||
-    !("referenceName" in decoded) ||
-    !isGeneratedImageReferenceName(decoded.referenceName)
-  ) {
-    throw new CodeInterpreterError(`第 ${index} 张图片的 reference_name 元数据无效`);
-  }
-  return decoded.referenceName;
-}
-
-function collectImages(workDir: string): CodeInterpreterImage[] {
-  const images: CodeInterpreterImage[] = [];
-  let totalBytes = 0;
-  for (let index = 1; index <= MAX_IMAGES; index += 1) {
-    const filename = path.join(workDir, `image-${index}.png`);
-    let metadata;
-    try {
-      metadata = lstatSync(filename);
-    } catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") continue;
-      throw error;
-    }
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new CodeInterpreterError(`第 ${index} 张图片不是普通 PNG 文件`);
-    }
-    if (metadata.size > MAX_IMAGE_BYTES || totalBytes + metadata.size > MAX_TOTAL_IMAGE_BYTES) {
-      throw new CodeInterpreterError("代码生成的图片超过大小限制");
-    }
-    const bytes = readFileSync(filename);
-    const dimensions = pngDimensions(bytes);
-    if (!dimensions || dimensions.width > MAX_IMAGE_WIDTH || dimensions.height > MAX_IMAGE_HEIGHT) {
-      throw new CodeInterpreterError("代码生成了无效或尺寸过大的 PNG 图片");
-    }
-    totalBytes += bytes.length;
-    const referenceName = imageReferenceName(workDir, index);
-    images.push({
-      mimeType: "image/png",
-      data: bytes.toString("base64"),
-      alt: referenceName,
-      referenceName,
-    });
-  }
-  return images;
-}
-
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value) &&
     Object.values(value).every(isJsonValue);
@@ -673,7 +387,6 @@ function collectStructuredResult(workDir: string): CodeInterpreterStructuredResu
 
 export function formatCodeInterpreterResult(
   details: CodeInterpreterDetails,
-  imageReferences: readonly CodeInterpreterImageReference[] = [],
 ): string {
   return JSON.stringify({
     result: details.result,
@@ -682,9 +395,6 @@ export function formatCodeInterpreterResult(
     ...(details.stderr ? { stderr: details.stderr } : {}),
     stdoutTruncated: details.stdoutTruncated,
     stderrTruncated: details.stderrTruncated,
-    imageCount: details.images.length,
-    imageDelivery: details.images.length ? "attached_to_answer" : "none",
-    ...(imageReferences.length ? { imageReferences } : {}),
   });
 }
 
@@ -728,8 +438,6 @@ export class CodeInterpreterRuntime {
   readonly #runtimeDir: string | null;
   readonly #runnerPath: string | null;
   readonly #seccompPath: string | null;
-  readonly #regularFontPath: string | null;
-  readonly #boldFontPath: string | null;
 
   private constructor(
     options: CodeInterpreterOptions,
@@ -741,8 +449,6 @@ export class CodeInterpreterRuntime {
     this.#runtimeDir = runtimeDir;
     this.#runnerPath = runtimeDir === null ? null : path.join(runtimeDir, "runner.py");
     this.#seccompPath = runtimeDir === null ? null : path.join(runtimeDir, "network.bpf");
-    this.#regularFontPath = runtimeDir === null ? null : path.join(runtimeDir, "chinese-regular.otf");
-    this.#boldFontPath = runtimeDir === null ? null : path.join(runtimeDir, "chinese-bold.otf");
   }
 
   static async create(options: CodeInterpreterOptions): Promise<CodeInterpreterRuntime> {
@@ -763,20 +469,6 @@ export class CodeInterpreterRuntime {
       runtimeDir = mkdtempSync(path.join(tmpdir(), "sql-web-code-runtime-"));
       writeFileSync(path.join(runtimeDir, "runner.py"), PYTHON_RUNNER, { mode: 0o600 });
       writeFileSync(path.join(runtimeDir, "network.bpf"), createNetworkSeccompFilter(), { mode: 0o600 });
-      const regularFontPath = path.join(runtimeDir, "chinese-regular.otf");
-      const boldFontPath = path.join(runtimeDir, "chinese-bold.otf");
-      const fontPreparation = spawnSync(
-        resolvedOptions.pythonPath,
-        ["-I", "-c", PREPARE_CHINESE_FONTS, regularFontPath, boldFontPath],
-        { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 },
-      );
-      if (fontPreparation.error || fontPreparation.status !== 0) {
-        const diagnostic = fontPreparation.stderr.trim() || fontPreparation.error?.message ||
-          `退出码 ${fontPreparation.status}`;
-        throw new CodeInterpreterError(`中文字体准备失败：${diagnostic}`);
-      }
-      chmodSync(regularFontPath, 0o600);
-      chmodSync(boldFontPath, 0o600);
       const runtime = new CodeInterpreterRuntime(
         resolvedOptions,
         { available: true, reason: null },
@@ -785,10 +477,7 @@ export class CodeInterpreterRuntime {
       const probe = await runtime.execute(
         [
           "import json, socket",
-          "import numpy, scipy, matplotlib",
-          "from PIL import Image",
-          "if not CJK_FONT_PATH or not CJK_FONT_FAMILY:",
-          "    raise RuntimeError('Chinese font probe failed')",
+          "import numpy, scipy",
           "blocked = False",
           "try:",
           "    socket.socket()",
@@ -797,8 +486,6 @@ export class CodeInterpreterRuntime {
           `project_visible = __import__('os').path.exists(${JSON.stringify(resolvedOptions.projectRoot)})`,
           "if not blocked or project_visible:",
           "    raise RuntimeError('sandbox isolation probe failed')",
-          "image = Image.new('RGB', (8, 8), 'white')",
-          "emit_image(image, 'sandbox-probe')",
           "emit_result({'summary': 'sandbox ok', 'metrics': {'sandbox': 'ok'}})",
           "print(json.dumps({'sandbox': 'ok'}))",
         ].join("\n"),
@@ -809,7 +496,7 @@ export class CodeInterpreterRuntime {
         undefined,
       );
       if (
-        !probe.details.stdout.includes('"sandbox": "ok"') || probe.details.images.length !== 1 ||
+        !probe.details.stdout.includes('"sandbox": "ok"') ||
         probe.details.result.summary !== "sandbox ok"
       ) {
         throw new CodeInterpreterError("沙箱自检未返回预期结果");
@@ -828,8 +515,7 @@ export class CodeInterpreterRuntime {
     signal: AbortSignal | undefined,
   ): Promise<CodeInterpreterExecution> {
     if (
-      !this.status.available || !this.#runnerPath || !this.#seccompPath ||
-      !this.#regularFontPath || !this.#boldFontPath
+      !this.status.available || !this.#runnerPath || !this.#seccompPath
     ) {
       throw new CodeInterpreterError(this.status.reason ?? "code_interpreter 当前不可用");
     }
@@ -885,12 +571,6 @@ export class CodeInterpreterRuntime {
         "--ro-bind",
         "/etc/ld.so.cache",
         "/etc/ld.so.cache",
-        "--ro-bind",
-        "/etc/matplotlibrc",
-        "/etc/matplotlibrc",
-        "--ro-bind-try",
-        "/etc/fonts",
-        "/etc/fonts",
         "--proc",
         "/proc",
         "--dev",
@@ -900,17 +580,7 @@ export class CodeInterpreterRuntime {
         "--dir",
         "/tmp/home",
         "--dir",
-        "/tmp/mpl",
-        "--dir",
         "/input",
-        "--dir",
-        "/fonts",
-        "--ro-bind",
-        this.#regularFontPath,
-        "/fonts/chinese-regular.otf",
-        "--ro-bind",
-        this.#boldFontPath,
-        "/fonts/chinese-bold.otf",
         "--ro-bind",
         this.#runnerPath,
         "/runner.py",
@@ -935,12 +605,6 @@ export class CodeInterpreterRuntime {
         "--setenv",
         "HOME",
         "/tmp/home",
-        "--setenv",
-        "MPLCONFIGDIR",
-        "/tmp/mpl",
-        "--setenv",
-        "MPLBACKEND",
-        "Agg",
         "--setenv",
         "OPENBLAS_NUM_THREADS",
         "1",
@@ -995,7 +659,6 @@ export class CodeInterpreterRuntime {
         stdoutTruncated: processResult.stdout.truncated,
         stderrTruncated: processResult.stderr.truncated,
         durationMs: Date.now() - startedAt,
-        images: collectImages(workDir),
       };
       return { text: formatCodeInterpreterResult(details), details };
     } finally {

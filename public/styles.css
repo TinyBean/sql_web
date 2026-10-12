@@ -320,7 +320,6 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .markdown-content pre code { padding: 0; border: 0; background: transparent; }
 .markdown-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .markdown-content th, .markdown-content td { padding: 6px 8px; border: 1px solid var(--line); }
-.markdown-content img { display: block; max-width: 100%; height: auto; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
 
 .composer { position: relative; z-index: 8; display: grid; flex: 0 0 auto; grid-template-columns: 1fr 44px; align-items: center; height: 64px; padding: 8px 8px 8px 14px; background: #0d1915; }
 .composer-status { display: none; }

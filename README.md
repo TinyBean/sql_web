@@ -36,7 +36,7 @@ scripts/
 
 网站对话提供 `subagent` 工具：`{ tasks: [{ name, task }], context? }`，主 Agent 自行决定是否委派 1–3 项独立任务。每日分析则由程序固定并行启动 `day`、`week`、`month`、`quarter` 四项任务，全部结束后主 Agent 才开始汇总；每日主 Agent 不提供再次委派工具。结果始终按任务输入顺序返回。
 
-每个子 Agent 使用独立的内存会话，沿用主 Agent 的模型、上下文和输出限制；只接收任务、显式背景与应用提供的看板或每日证据目录，不复制聊天历史。它可独立读取 Skill、查询只读 SQLite、查询标准损失及使用可用的 Python 沙箱计算；不提供继续委派、修改看板、发送邮件或提交每日报告的工具，Python 图片输出也会被拒绝。最终业务动作与 PNG 由主 Agent 完成。
+每个子 Agent 使用独立的内存会话，沿用主 Agent 的模型、上下文和输出限制；只接收任务、显式背景与应用提供的看板或每日证据目录，不复制聊天历史。它可独立读取 Skill、查询只读 SQLite、查询标准损失及使用可用的 Python 沙箱计算；不提供继续委派、修改看板、发送邮件或提交每日报告的工具。Python 仅返回结构化计算结果，最终业务动作由主 Agent 完成。
 
 子任务默认最多运行 180 秒、调用 12 次工具，父任务期限更短时服从父任务期限。每日主子 Agent 合计最多调用 60 次工具，自动分派计一次编排调用，参数错误和未知工具也计数，最后 8 次只允许主 Agent 使用。网站点击停止、每日分析超时与服务关闭都会取消关联子任务并等待清理。
 
@@ -139,7 +139,7 @@ npm run daily:update -- --through-date 2026-09-14
 
 平台清单、机台指标 SQL、汇总及排名实现统一位于 `src/server/skills/test-oee-calculator/assets`。读取 OEE Skill 后启用专属工具 `test_oee_calculator__rank_machines`，改善问题通过该工具 按同周期、同 MT/ST、相关状态或指标计算 TOP3，损失小时降序、比率指标升序；按未舍入值排序，并列按机台号。损失先跨相关状态按机台汇总，单台与 TOP3 合计占比均以同范围全部机台相关损失作分母。比率输出已乘 100，NULL 不入榜，不足三台显示实际数量，空结果不能视为零损失或完整覆盖。固定报告使用 `report_period` 整期口径，明确机台天查询使用 `machine_day` 单日口径，两种 Test Time 规则保持独立。
 
-每项改善问题按类别分别提交：`performance` 只使用 `dut_on`/`test_time_performance` 排名，`yield` 只使用 `final_yield` 排名；跨 Performance/Yield 必须拆分，不能用 `other` 合并。拆分后仍按影响、证据充分程度和改善价值选每周期每类型前三条，落选候选与原因保留在运行记录。每项改善问题的 `machine_evidence_ids` 必须引用 `test_oee_calculator__rank_machines` 的完整排名证据，并同时列入 `evidence_ids`。服务端检查周期、类型、问题指标、损失状态与计算口径，生成带平台、数值、占比和覆盖的 TOP3 文案，写入原有问题列；日报邮件复用该文本，TOP10 机台看板只更新显示标签。聊天创建的机台表格与图表新增显示标签列，保留原始机台号。聊天也使用同一工具与格式化模块，缺少排名证据或出现自行编写的 TOP3 时最多修正一轮，仍不能核实时明确说明机台分布证据不足。纯公式解释和单台数值查询只补平台。
+每项改善问题按类别分别提交：`performance` 只使用 `dut_on`/`test_time_performance` 排名，`yield` 只使用 `final_yield` 排名；跨 Performance/Yield 必须拆分，不能用 `other` 合并。拆分后仍按影响、证据充分程度和改善价值选每周期每类型前三条，落选候选与原因保留在运行记录。每项改善问题的 `machine_evidence_ids` 必须引用 `test_oee_calculator__rank_machines` 的完整排名证据，并同时列入 `evidence_ids`。服务端检查周期、类型、问题指标、损失状态与计算口径，生成带平台、数值、占比和覆盖的 TOP3 文案，写入原有问题列；日报邮件复用该文本，TOP10 机台看板只更新显示标签。聊天创建的机台表格与图表新增显示标签列，保留原始机台号。聊天使用同一排名工具，回答正文不再经过自动审核、修正或兜底替换；历史隐藏的机台及图片审核消息仅作为诊断记录保留，不发送到模型上下文。纯公式解释和单台数值查询只补平台。
 
 指标生成与 Agent 查询在独立子进程的同一个只读 SQLite 事务内运行。子进程先交回基础指标，再使用内存会话和设置、项目 `.data/agent` 的模型凭据启动分析；模型沿用 `SQL_WEB_PROVIDER` / `SQL_WEB_MODEL`（当前为 `local-vllm / zai-org/GLM-5.3-Flash`）。不产生网站会话。
 
@@ -292,7 +292,7 @@ npm run session:html -- latest
 
 未指定输出路径时，文件写入 `.data/session-exports/<session-file>.html`。脚本默认从 `SQL_WEB_SESSION_DIR` 查找 ID；也可以使用 `--session-dir <directory>` 指定其他目录。导出过程只读取原 JSONL 快照，不会迁移或改写 session。
 
-HTML 默认为完整诊断视图，可切换分支、搜索条目，并展示持久化 header、消息、thinking、工具参数及原始结果、usage、错误、模型切换、压缩/分支记录、自定义条目和代码解释器图片；也可以切换为简化的对话视图。页面的 CSS、JavaScript、Markdown 渲染器、清理器和图片都内嵌在文件中，不依赖正在运行的网站或网络资源。
+HTML 默认为完整诊断视图，可切换分支、搜索条目，并展示持久化 header、消息、thinking、工具参数及原始结果、usage、错误、模型切换、压缩/分支记录、自定义条目；也可以切换为简化的对话视图。页面的 CSS、JavaScript、Markdown 渲染器和清理器都内嵌在文件中，不依赖正在运行的网站或网络资源。
 
 该导出是排障资料，不是脱敏的分享页面。文件可能包含用户问题、内部 thinking、SQL、查询结果、Python 代码、本机路径和生成图片；默认以仅当前用户可读写的权限创建，仍应按敏感数据保管。
 
@@ -307,7 +307,7 @@ HTML 默认为完整诊断视图，可切换分支、搜索条目，并展示持
 
 ## 启动
 
-环境要求：Node.js 22.19 或更高版本，以及 Linux x86_64 上的 Python 3.12、bubblewrap、prlimit、NumPy、SciPy、Matplotlib 和 Pillow。代码解释器依赖自检失败时网站仍可启动，Skill catalog、SQL 和当前时间工具仍然可用。
+环境要求：Node.js 22.19 或更高版本，以及 Linux x86_64 上的 Python 3.12、bubblewrap、prlimit、NumPy 和 SciPy。代码解释器依赖自检失败时网站仍可启动，Skill catalog、SQL 和当前时间工具仍然可用。
 
 ```bash
 npm install
@@ -417,7 +417,7 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 ## 安全边界
 
 - `execute_sql` 会先审查传入 SQL，只接受一条返回结果集的查询，并使用只读 SQLite 连接；写入、DDL 和修改状态的 `PRAGMA` 会被拒绝。
-- `execute_sql` 默认直接返回最多 200 行；需要 Python 计算、统计或绘图时，使用可选 `save_as` 将最多 100,000 行、32 MiB 的完整结果保存为会话级冻结快照，同时只返回元数据和最多 20 行预览。后续通过逻辑名称引用快照，不经过模型搬运完整结果。
+- `execute_sql` 默认直接返回最多 200 行；需要 Python 计算或统计时，使用可选 `save_as` 将最多 100,000 行、32 MiB 的完整结果保存为会话级冻结快照，同时只返回元数据和最多 20 行预览。后续通过逻辑名称引用快照，不经过模型搬运完整结果。
 - `measure_loss` 在新建和恢复的会话中默认可用，与每日分析共用实现。必填 `start_date`、`end_date` 为业务日闭区间，可选 `states`、`machines`、`by_machine`；标准 PCIe、MT/ST 和状态规则与每日分析一致，损失和类型覆盖均先排除大写 Q/E 前缀 LOT，保留其余 LOT（P/M/R/A/F/L 白名单仅用于 Yield）。每次成功查询自动保存完整快照，名称为 `loss-YYYYMMDD-YYYYMMDD`，重名追加序号，恢复后继续避免覆盖。返回明细或有展示预算的摘要，快照可直接供 Python 和看板使用；空结果不代表零损失，覆盖天数按类型统计，不随损失筛选缩小。Python 不可用时仍可查询。
 - `get_current_time` 返回服务器当前的 UTC 时间、本地时间和时区。
 - `test-oee-calculator` 被加载后才注册其 4 个工具，SQL 工具不连接数据库，排名使用会话注入的只读能力。公式与数据筛选由 Skill 统一维护。已有看板、报告及快照保留原结果和口径；纯数值与分类函数只用于内部兼容及回归测试。
@@ -425,12 +425,9 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 - Skill 专有工具使用 `<skill_namespace>__<local_tool_name>` 命名。Catalog 启动时只扫描元数据并调用无参工具工厂进行校验，不查询数据库，不持有会话运行依赖，也不会把专有工具注册到全局或暴露给新会话。会话扩展可向指定 Skill 的 `createTools(context?)` 注入只读查询与完整快照能力，并使用工具包装器补充证据政策。OEE 排名依赖按会话和任务绑定，固定分析复用原冻结事务；缺少运行依赖时执行明确报错。
 - `code_interpreter` 接收 `code`、可选的 `snapshot` 逻辑名称和可选 `user_input`，不接收或执行 SQL。传入快照时，服务端把该会话的完整冻结数据只读挂载为 `input_data.database`，并提供 `snapshot_rows` 作为 `list[dict]` 行对象列表；每行可用 `row["列名"]` 访问，无需也不应再与 `columns` 做 `zip`。`input_data` 同时支持属性和方括号访问。未传快照时 `input_data.database` 为 `None`、`snapshot_rows` 为空，可执行不依赖数据库的纯 Python。`user_input` 单独出现在 `input_data.user`，只用于用户明确提供的参数。快照查询达到 100,000 行或 32 MiB 上限时不会保存，不允许基于截断数据生成结论。
   Python 必须且只能调用一次 `emit_result(...)`；可提交 JSON 值或结构化关键字字段，运行时会补充缺失的 `summary`，并把字符串 `notes` 规范化为数组。结构化结果上限为 64 KiB。`print()` 仅作为调试日志，不能替代 `emit_result`；工具结果同时包含查询行数、字节数、截断状态和用户输入标记。
-  每张 Matplotlib/Pillow 图片必须通过 `emit_image(value, reference_name)` 显式提交；名称应具体表达图片含义，归一化后不超过 50 个字符。空格和标点会统一转成小写连字符格式，例如 `2026 OEE / Top 10` 变为 `2026-oee-top-10`；纯数字、纯符号或空名称会被拒绝。未显式提交的 Matplotlib 图不会输出。
-  图片使用不含工具调用 UUID 的短引用，例如 `![oee-ranking](/__datalens_generated_image__/ci-oee-ranking)`；同一会话重名时才追加 `-2`、`-3`。图片解析、流式展示和会话恢复只接受这种语义 ID。
-  最终正文落库前会复核所有 Markdown 图片；无效地址优先按 Markdown 图片说明与当前回合 `ChatImage.alt` 的精确唯一对应关系修复。重复说明不猜测，也不参与数量兜底；其他唯一候选继续自动纠正，仍有歧义时触发至多一次不可见的模型重写。服务端保留无法确认或重复的原始引用，前端只渲染当前消息缓存中精确匹配且首次出现的图片 ID。
-  Matplotlib 已预配置简体中文字体，普通中文标题和坐标文字无需手动指定字体。`matplotlib_chinese_font(...)` 与 `chinese_font(...)` 是沙箱预注入的全局函数而非 Python 模块，不得导入；需要显式字体对象时直接调用，例如 Matplotlib 使用 `fontproperties=matplotlib_chinese_font(12, bold=True)`，Pillow 使用 `font=chinese_font(20, bold=True)`。
+  代码解释器仅返回结构化计算结果，不提供图片生成、输出或字体辅助函数。聊天及 HTML 导出不展示图片，历史图片字段在会话读取时忽略；Markdown 图片只显示说明文字，代码块保留原文。历史会话文件与诊断原始记录保留。
 - Python 使用 bubblewrap、seccomp 和 prlimit 隔离：无法访问数据库、项目目录、其他会话产物或网络，并限制执行时间、内存、进程和输出大小。
-- 数据快照使用简短的规范逻辑名称，并在服务端映射到不可见的内部 UUID 文件；同名快照只在新查询完整成功后原子替换。快照可在同一会话的后续计算、绘图和恢复后继续使用，并随会话删除。
+- 数据快照使用简短的规范逻辑名称，并在服务端映射到不可见的内部 UUID 文件；同名快照只在新查询完整成功后原子替换。快照可在同一会话的后续计算和恢复后继续使用，并随会话删除。
 - 基础 system prompt 不包含业务数据库结构或字段含义；这些上下文由 `test-oee-calculator` 的 `references/database.md` 按需提供，数据内容仍必须通过查询工具获取。
 - Agent 递归扫描 `src/server/skills` 并按 Pi 标准格式注入 Skill 名称、描述和入口路径；完整 `SKILL.md` 只在 Agent 根据任务按需读取时进入当前会话上下文。`/skill:<name>` 不会被解析为显式 Skill 调用。
 - 通用 `read` 默认只读取扫描到的 Skill 目录；网站会话及其子 Agent 额外开启项目 `.data` 的普通 UTF-8 文本读取，每日分析主／子 Agent 仍保持冻结证据隔离。数据读取每页最多 50 KiB，通过 `byte_offset` 续读；`json_pointer` 可定位 JSON 字段或 `offset` 指定的一条 JSONL／结构化日志记录，解析上限 32 MiB。目录、二进制、其他项目文件和符号链接逃逸被拒绝。成功读取准确的 Skill 入口才激活专有工具，读取 `.data` 文件不会激活。每日运行流程、产物位置和归档查询步骤见 OEE Skill 的 `references/daily-dashboard.md`；归档排名只有本轮完整读取成功的排名事件才能用于历史解释，新分析继续实时查证。

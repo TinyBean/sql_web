@@ -19,7 +19,6 @@ import {
   isAgentToolName,
   type AgentToolName,
   type AgentStatus,
-  type ChatImage,
   type ChatMessage,
   type ChatTraceItem,
   type DashboardEditRequest,
@@ -32,14 +31,11 @@ import type { DashboardState } from "../../shared/dashboard.ts";
 import type { AppDatabase } from "../database/database.ts";
 import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
-import { extractCodeInterpreterImages } from "../tool/code-interpreter-images.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
 import { createEmailTool, EMAIL_TOOL_NAME } from "../tool/email-tools.ts";
 import type { EmailConfig } from "../email.ts";
 import { SessionDashboardStore, type InitialDashboardProvider } from "./session-dashboard.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
-import { createGeneratedTextReviewExtension } from "./generated-text-review.ts";
-import { createMachineTextReviewExtension } from "./machine-text-review.ts";
 import { oeeSkillSessionOptions } from "./oee-skill-runtime.ts";
 import { createDashboardContextExtension } from "./dashboard-context.ts";
 import type { AppLogger } from "../logger.ts";
@@ -128,8 +124,6 @@ async function createLockedResourceLoader(
     systemPrompt,
     extensionFactories: [
       skillCatalog.createSessionExtension(cwd, skillOptions),
-      createGeneratedTextReviewExtension(logger),
-      createMachineTextReviewExtension(logger),
       createDashboardContextExtension(dashboard, logger),
     ],
     skillsOverride: () => skillCatalog.resources,
@@ -166,7 +160,6 @@ interface ToolCallSummary {
 interface ResponseAccumulator {
   readonly trace: ChatTraceItem[];
   readonly pendingToolTraceIndices: Map<string, number[]>;
-  readonly toolImagesByTraceIndex: Map<number, readonly ChatImage[]>;
   hasFinal: boolean;
   finalText: string;
   finalTimestamp: number | undefined;
@@ -219,28 +212,12 @@ function newResponseAccumulator(): ResponseAccumulator {
   return {
     trace: [],
     pendingToolTraceIndices: new Map(),
-    toolImagesByTraceIndex: new Map(),
     hasFinal: false,
     finalText: "",
     finalTimestamp: undefined,
     fallbackText: "",
     fallbackTimestamp: undefined,
   };
-}
-
-function responseImages(response: ResponseAccumulator): ChatImage[] {
-  const images: ChatImage[] = [];
-  const imageIds = new Set<string>();
-  const groups = [...response.toolImagesByTraceIndex.entries()]
-    .sort(([left], [right]) => left - right);
-  for (const [, group] of groups) {
-    for (const image of group) {
-      if (imageIds.has(image.id)) continue;
-      imageIds.add(image.id);
-      images.push(image);
-    }
-  }
-  return images;
 }
 
 function applyToolResult(
@@ -263,10 +240,6 @@ function applyToolResult(
   const item = response.trace[traceIndex];
   if (!item || item.type !== "tool") return;
   response.trace[traceIndex] = { ...item, isError: message.isError === true };
-  const images = message.toolName === "code_interpreter" && message.isError !== true
-    ? extractCodeInterpreterImages(message.toolCallId, message.details)
-    : [];
-  if (images.length) response.toolImagesByTraceIndex.set(traceIndex, images);
 }
 
 export function serializeMessages(messages: readonly TranscriptSourceMessage[]): ChatMessage[] {
@@ -279,14 +252,12 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
       const timestamp = response.hasFinal
         ? response.finalTimestamp
         : response.fallbackTimestamp;
-      const images = responseImages(response);
       transcript.push({
         id: `assistant-${transcript.length + 1}`,
         role: "assistant",
         text,
         ...(timestamp === undefined ? {} : { timestamp }),
         ...(response.trace.length ? { trace: response.trace } : {}),
-        ...(images.length ? { images } : {}),
       });
     }
     response = null;
@@ -443,7 +414,6 @@ function codeInterpreterLogFields(
   const stderrBytes = "stderr" in details && typeof details.stderr === "string"
     ? Buffer.byteLength(details.stderr)
     : 0;
-  const imageCount = "images" in details && Array.isArray(details.images) ? details.images.length : 0;
   const provenance = "provenance" in details && typeof details.provenance === "object" &&
       details.provenance !== null
     ? details.provenance
@@ -465,7 +435,6 @@ function codeInterpreterLogFields(
   return {
     stdoutBytes,
     stderrBytes,
-    imageCount,
     ...(rowCount === undefined ? {} : { rowCount }),
     ...(inputBytes === undefined ? {} : { inputBytes }),
     ...(hasUserInput === undefined ? {} : { hasUserInput }),
@@ -799,30 +768,16 @@ export class AgentSessionStore {
         }
         return (agentId) => ({
           systemPrompt: websiteInvestigationPrompt(),
-          tools: createAgentTools(this.#database, artifacts.scoped(agentId), this.#codeInterpreter, new Set(), undefined, true),
+          tools: createAgentTools(this.#database, artifacts.scoped(agentId), this.#codeInterpreter),
           skillOptions: { ...oeeSkillSessionOptions(this.#database, artifacts.scoped(agentId)), readDataDirectory: true },
           context: () => ({ dashboard, snapshots: artifacts.listDataSnapshots() }),
         });
       },
     });
-    const usedGeneratedImageIds = new Set<string>();
-    for (const entry of sessionManager.getEntries()) {
-      if (
-        entry.type !== "message" || entry.message.role !== "toolResult" ||
-        entry.message.toolName !== "code_interpreter" || entry.message.isError === true
-      ) continue;
-      for (const image of extractCodeInterpreterImages(
-        entry.message.toolCallId,
-        entry.message.details,
-      )) {
-        usedGeneratedImageIds.add(image.id);
-      }
-    }
     const tools = [...createAgentTools(
       this.#database,
       artifacts,
       this.#codeInterpreter,
-      usedGeneratedImageIds,
       { dashboard: this.#dashboard, sessionId: sessionManager.getSessionId() },
     ), ...(this.#email ? [createEmailTool(this.#email, this.#logger, sessionManager.getSessionId())] : []), subagents.createTool()];
     const resourceLoader = await createLockedResourceLoader(

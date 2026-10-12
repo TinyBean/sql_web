@@ -47,7 +47,7 @@ function assertSafeRuntimeEnvelope(html: string): string {
   const { document } = parseHTML(html);
   assert.deepEqual(
     [...document.body.children].map((child) => child.localName),
-    ["main", "dialog", "script", "script", "script"],
+    ["main", "script", "script", "script"],
   );
   assert.deepEqual(
     [...document.body.childNodes]
@@ -63,6 +63,8 @@ function assertSafeRuntimeEnvelope(html: string): string {
   const runtime = embeddedRuntimeSource(html);
   assert.match(runtime, /@license DOMPurify/u);
   assert.match(runtime, /details\.images/u);
+  assert.doesNotMatch(runtime, /appendDiagnosticImages|canonicalGeneratedImageId|element\("img"/u);
+  assert.equal(document.querySelectorAll("img, dialog").length, 0);
   return runtime;
 }
 
@@ -395,10 +397,7 @@ test("embeds every diagnostic branch with thinking, tool results, custom data, a
       referenceId: "ci-diagnostic-chart",
     }],
   });
-  assert.deepEqual(
-    diagnosticBranch.messages.find((message) => message.role === "assistant")?.images,
-    [{ id: "ci-diagnostic-chart", mimeType: "image/png", data: PNG_BASE64, alt: "diagnostic-chart" }],
-  );
+  assert.equal("images" in diagnosticBranch.messages.find((message) => message.role === "assistant")!, false);
 
   const customEntry = entriesById.get("custom01");
   assert.equal(customEntry?.type, "custom");
@@ -426,7 +425,7 @@ test("embeds every diagnostic branch with thinking, tool results, custom data, a
   assert.equal(document.querySelectorAll(".timeline-entry").length, embedded.entries.length + 1);
   assert.match(document.querySelector(".diagnostic")?.textContent ?? "", /完整的内部 thinking/u);
   assert.match(document.querySelector(".diagnostic")?.textContent ?? "", /原始工具结果/u);
-  assert.equal(document.querySelectorAll(".image-strip img").length, 1);
+  assert.equal(document.querySelectorAll("img").length, 0);
   assert.equal(document.querySelector("#x"), null);
 });
 

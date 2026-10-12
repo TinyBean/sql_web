@@ -27,7 +27,6 @@ import type {
 } from "../shared/contracts.ts";
 import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.ts";
 import { DatabaseInputError } from "./database/database.ts";
-import { extractCodeInterpreterImages } from "./tool/code-interpreter-images.ts";
 import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
 import { DashboardConflictError, DashboardInputError } from "./agent/session-dashboard.ts";
 import {
@@ -53,8 +52,6 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/dashboard-drag.js", { root: "public", filename: "generated/client/dashboard-drag.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/contracts.js", { root: "public", filename: "generated/shared/contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/dashboard.js", { root: "public", filename: "generated/shared/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
-  ["/shared/image-references.js", { root: "public", filename: "generated/shared/image-references.js", contentType: "text/javascript; charset=utf-8" }],
-  ["/image-placeholders.js", { root: "public", filename: "generated/client/image-placeholders.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown-parser.js", { root: "public", filename: "generated/client/markdown-parser.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown.js", { root: "public", filename: "generated/client/markdown.js", contentType: "text/javascript; charset=utf-8" }],
   ["/stream-state.js", { root: "public", filename: "generated/client/stream-state.js", contentType: "text/javascript; charset=utf-8" }],
@@ -279,7 +276,6 @@ function compactionOutcome(
 function createAgentEventStreamer(response: ServerResponse): (event: AgentSessionEvent) => void {
   let turn = -1;
   let announcedToolCalls = new Set<string>();
-  const announcedImageIds = new Set<string>();
   const announceToolCall = (call: ToolCallEventData): void => {
     if (announcedToolCalls.has(call.id)) return;
     announcedToolCalls.add(call.id);
@@ -328,21 +324,6 @@ function createAgentEventStreamer(response: ServerResponse): (event: AgentSessio
         name: event.toolName,
         isError: event.isError,
       });
-      if (event.toolName === "code_interpreter" && !event.isError) {
-        const details = typeof event.result === "object" && event.result !== null &&
-            "details" in event.result
-          ? event.result.details
-          : undefined;
-        for (const image of extractCodeInterpreterImages(event.toolCallId, details)) {
-          if (announcedImageIds.has(image.id)) continue;
-          announcedImageIds.add(image.id);
-          writeSse(response, "generated_image", {
-            turn,
-            toolCallId: event.toolCallId,
-            image,
-          });
-        }
-      }
     } else if (event.type === "turn_end") {
       writeSse(response, "turn_end", {
         turn,

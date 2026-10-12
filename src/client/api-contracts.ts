@@ -1,7 +1,6 @@
 import type {
   AbortResponse,
   AutomaticCompactionReason,
-  ChatImage,
   ChatMessage,
   ChatRole,
   ChatTraceItem,
@@ -24,7 +23,6 @@ import type {
   SessionsResponse,
 } from "../shared/contracts.ts";
 import { isAgentToolName } from "../shared/contracts.ts";
-import { isSemanticGeneratedImageId } from "../shared/image-references.ts";
 import {
   DashboardValidationError,
   parseDashboardState,
@@ -141,30 +139,6 @@ function agentToolName(value: unknown, path: string): AgentToolName {
   return isAgentToolName(value) ? value : invalid(path, "合法的 Agent 工具名");
 }
 
-function chatImage(value: unknown, path: string): ChatImage {
-  const item = record(value, path);
-  if (item["mimeType"] !== "image/png") invalid(`${path}.mimeType`, "image/png");
-  if (!isSemanticGeneratedImageId(item["id"])) {
-    invalid(`${path}.id`, "合法的语义图片 ID");
-  }
-  return {
-    id: item["id"],
-    mimeType: "image/png",
-    data: string(item["data"], `${path}.data`),
-    alt: string(item["alt"], `${path}.alt`),
-  };
-}
-
-function chatImages(value: unknown, path: string): ChatImage[] {
-  const decoded = array(value, path, chatImage);
-  const ids = new Set<string>();
-  for (const [index, image] of decoded.entries()) {
-    if (ids.has(image.id)) invalid(`${path}[${index}].id`, "同一消息内唯一的图片 ID");
-    ids.add(image.id);
-  }
-  return decoded;
-}
-
 function schemaObjectType(value: unknown, path: string): "table" | "view" {
   return value === "table" || value === "view" ? value : invalid(path, "table 或 view");
 }
@@ -188,7 +162,6 @@ function chatMessage(value: unknown, path: string): ChatMessage {
   const item = record(value, path);
   const timestamp = item["timestamp"];
   const trace = item["trace"];
-  const images = item["images"];
   return {
     id: string(item["id"], `${path}.id`),
     role: chatRole(item["role"], `${path}.role`),
@@ -199,9 +172,6 @@ function chatMessage(value: unknown, path: string): ChatMessage {
     ...(trace === undefined
       ? {}
       : { trace: array(trace, `${path}.trace`, chatTraceItem) }),
-    ...(images === undefined
-      ? {}
-      : { images: chatImages(images, `${path}.images`) }),
   };
 }
 
@@ -401,16 +371,6 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
         id: string(data["id"], `${path}.id`),
         name: string(data["name"], `${path}.name`),
         isError: boolean(data["isError"], `${path}.isError`),
-      },
-    };
-  }
-  if (event === "generated_image") {
-    return {
-      event,
-      data: {
-        turn: nonNegativeInteger(data["turn"], `${path}.turn`),
-        toolCallId: nonEmptyString(data["toolCallId"], `${path}.toolCallId`),
-        image: chatImage(data["image"], `${path}.image`),
       },
     };
   }

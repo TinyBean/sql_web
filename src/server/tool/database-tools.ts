@@ -2,11 +2,6 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentToolName, JsonObject } from "../../shared/contracts.ts";
-import {
-  generatedImageMarkdown,
-  isGeneratedImageReferenceName,
-  reserveSemanticGeneratedImageId,
-} from "../../shared/image-references.ts";
 import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
 import type { SessionArtifactStore } from "./artifact-store.ts";
 import {
@@ -213,9 +208,7 @@ export function createAgentTools(
   database: Pick<AppDatabase, "query" | "exportQueryJson">,
   artifacts: SessionArtifactStore,
   codeInterpreter: CodeInterpreterRuntime,
-  usedGeneratedImageIds: Set<string> = new Set<string>(),
   dashboardContext?: DashboardToolContext,
-  calculationOnly = false,
 ) {
   const executeSqlTool = createExecuteSqlTool(database, artifacts);
   const currentTimeTool = defineTool({
@@ -244,12 +237,8 @@ export function createAgentTools(
   const codeInterpreterTool = defineTool({
     name: "code_interpreter",
     label: "执行可信数据分析",
-    description: calculationOnly
-      ? "Calculate in the strict Python sandbox using a saved snapshot and snapshot_rows (list[dict]). Call emit_result exactly once. user_input is only for explicit user values. No SQL, network, host files or images; emit_image is forbidden. Return structured calculations; the parent agent renders final PNGs."
-      :
-      "Execute Python in a strict, network-disabled sandbox for calculations, statistics, or PNG rendering. Optionally pass one session-scoped logical snapshot name from execute_sql.save_as or measure_loss. With a snapshot, use the pre-injected snapshot_rows directly: it is list[dict], so read values with row['column_name']; rows are already objects and must never be rebuilt with zip(columns, row). input_data supports both input_data.database and input_data['database']; without a snapshot, input_data.database is None and snapshot_rows is empty. input_data.user contains optional user_input. The tool never accepts or executes SQL. Call emit_result exactly once; it accepts a JSON value or summary/metrics/intermediates/data/notes keyword fields, supplies a default summary, and normalizes a string note into a list. print() is only for debug logs and does not replace emit_result. Guard empty collections before min/max or indexing. Every image must be emitted explicitly with emit_image(value, reference_name), where reference_name is a meaningful, specific English ASCII name whose normalized length does not exceed 50 characters, such as oee-ranking or availability-trend. Spaces and punctuation are normalized to lowercase hyphens; purely numeric, random, or generic names are not allowed. Matplotlib is configured for Simplified Chinese. matplotlib_chinese_font and chinese_font are pre-injected globals, not Python modules; never import them. The sandbox cannot access SQLite, project files, arbitrary host paths, or install packages.",
-    promptSnippet: calculationOnly ? "在严格 Python 沙箱中返回结构化计算结果，禁止图片输出"
-      : "在严格 Python 沙箱中计算或绘图,可按逻辑名称读取一个会话级数据快照",
+    description: "Execute Python in a strict, network-disabled sandbox for calculations and statistics. Optionally pass one logical snapshot name returned by execute_sql.save_as or measure_loss. snapshot_rows is list[dict]; use row['column_name'] directly. input_data supports both attribute and dictionary access; input_data.database is None and snapshot_rows is empty without a snapshot. input_data.user contains only explicit user values. Call emit_result exactly once; it accepts a JSON value or summary/metrics/intermediates/data/notes fields, supplies a default summary, and normalizes a string note into a list. print() is for debug logs. Handle empty collections and zero denominators. The sandbox cannot access SQLite, project files, arbitrary host paths or install packages. Return structured results only.",
+    promptSnippet: "在严格 Python 沙箱中返回结构化计算结果，可按逻辑名称读取一个会话级数据快照",
     executionMode: "sequential",
     parameters: Type.Object({
       code: Type.String({ description: "Python source code to execute.", maxLength: 20_000 }),
@@ -292,30 +281,12 @@ export function createAgentTools(
           },
         userInput,
       }, signal);
-      if (calculationOnly && execution.details.images.length) {
-        throw new CodeInterpreterError("子 Agent 仅允许结构化计算结果，禁止 emit_image；请使用 emit_result，最终 PNG 由主 Agent 生成");
-      }
-      const images = execution.details.images.map((image, index) => {
-        if (!isGeneratedImageReferenceName(image.referenceName)) {
-          throw new CodeInterpreterError(`第 ${index + 1} 张图片缺少有效的 reference_name`);
-        }
-        const referenceId = reserveSemanticGeneratedImageId(
-          image.referenceName,
-          usedGeneratedImageIds,
-        );
-        return { ...image, alt: image.referenceName, referenceId };
-      });
-      const details = { ...execution.details, images };
-      const imageReferences = images.map((image) => {
-        const id = image.referenceId;
-        return { id, markdown: generatedImageMarkdown(id, image.alt) };
-      });
       return {
         content: [{
           type: "text" as const,
-          text: formatCodeInterpreterResult(details, imageReferences),
+          text: formatCodeInterpreterResult(execution.details),
         }],
-        details,
+        details: execution.details,
       };
     },
   });

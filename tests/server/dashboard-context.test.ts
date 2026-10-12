@@ -301,3 +301,33 @@ test("replaces a previous snapshot with an unavailable status on read failure an
   await store.prompt(created.id, "重试读取看板");
   assert.deepEqual(requestDashboard(requests[2]), created.dashboard);
 });
+
+test("preserves unreviewed chat answers and omits retired review instructions after restoring a session", async (t) => {
+  const { store, openStore } = await fixture(t);
+  const created = await store.create();
+  const session = await store.get(created.id);
+  const answer = 'OEE 最高 TOP10：ADH177 86.89%。组件保留“首要损失(小时)”与“改善措施建议”。最低 OEE TOP3 与最高 TOP10 的排序方向不同。![旧图](sandbox:/work/chart.png)';
+  const requests = captureRequests(session, [[{ type: "text", text: answer }]]);
+  await store.prompt(created.id, "更新上一周 OEE 最高 TOP10 及改善措施");
+  assert.equal(requests.length, 1);
+  assert.equal((await store.getSerialized(created.id)).messages.at(-1)?.text, answer);
+  assert.equal(session.sessionManager.getEntries().some((entry) => entry.type === "custom_message"), false);
+
+  session.sessionManager.appendCustomMessageEntry("sql_web.machine_text_review", "RETIRED_MACHINE_REPAIR", false);
+  session.sessionManager.appendCustomMessageEntry("sql_web.image_reference_review", "RETIRED_IMAGE_REPAIR", false);
+  session.sessionManager.appendCustomMessageEntry("test.context", "KEPT_CUSTOM_CONTEXT", false);
+  const sessionFile = session.sessionFile!;
+  const persisted = readFileSync(sessionFile, "utf8");
+  await store.dispose();
+  const restoredStore = await openStore();
+  const restored = await restoredStore.get(created.id);
+  assert.equal(readFileSync(sessionFile, "utf8"), persisted);
+  const restoredRequests = captureRequests(restored, [[{ type: "text", text: answer }]]);
+  await restoredStore.prompt(created.id, "恢复后再次更新 TOP10");
+  assert.equal(restoredRequests.length, 1);
+  const modelContext = restoredRequests[0]!.messages.map(messageText).join("\n");
+  assert.doesNotMatch(modelContext, /RETIRED_MACHINE_REPAIR|RETIRED_IMAGE_REPAIR/u);
+  assert.match(modelContext, /KEPT_CUSTOM_CONTEXT/u);
+  assert.equal((await restoredStore.getSerialized(created.id)).messages.at(-1)?.text, answer);
+  assert.ok(readFileSync(sessionFile, "utf8").startsWith(persisted));
+});

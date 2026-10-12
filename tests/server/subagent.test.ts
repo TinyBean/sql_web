@@ -86,7 +86,7 @@ async function fixture(t: TestContext, respond: (body: RequestBody) => unknown |
       onEvent: (event) => events.push(event),
       prepareBatch: () => (id) => ({ systemPrompt: "只读调查", context: () => ({ marker: "provided-context" }),
         skillOptions: oeeSkillSessionOptions(database, artifacts.forSession(created.id).scoped(id)),
-        tools: createAgentTools(database, artifacts.forSession(created.id).scoped(id), interpreter, new Set(), undefined, true) }),
+        tools: createAgentTools(database, artifacts.forSession(created.id).scoped(id), interpreter) }),
       ...overrides });
     runners.push(runner);
     return runner;

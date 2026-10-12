@@ -53,7 +53,7 @@ export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: Cod
     : Type.Object({ ...measureLossParameters.properties, period: PeriodKeySchema }, { additionalProperties: false });
   const tool = createExecuteSqlTool(evidence.queries, sharedArtifacts);
   const loss = createMeasureLossTool(evidence.queries, sharedArtifacts);
-  const auxiliary = createAgentTools(evidence.queries, sharedArtifacts, interpreter, new Set(), undefined, !!scope)
+  const auxiliary = createAgentTools(evidence.queries, sharedArtifacts, interpreter)
     .filter((entry) => entry.name !== "execute_sql" && entry.name !== MEASURE_LOSS_TOOL_NAME)
     .map((entry) => !scope || entry.name !== "code_interpreter" ? entry : defineTool({
       ...entry,

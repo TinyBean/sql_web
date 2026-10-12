@@ -1,5 +1,4 @@
 import type {
-  ChatImage,
   ChatMessage,
   ChatRole,
   ChatTraceItem,
@@ -34,11 +33,7 @@ import {
   type StreamPresentation,
   type StreamToolStatus,
 } from "./stream-state.ts";
-import { hideTrailingIncompleteGeneratedImageMarkdown } from "./image-placeholders.ts";
-import {
-  renderMarkdownInto,
-  type MarkdownRenderOptions,
-} from "./markdown.ts";
+import { renderMarkdownInto } from "./markdown.ts";
 import { DashboardRenderer } from "./dashboard.ts";
 import {
   dashboardDropTarget,
@@ -649,14 +644,12 @@ function keyedTraceText(
   existing: HTMLElement | undefined,
   key: string,
   text: string,
-  images: readonly ChatImage[] = [],
-  options: MarkdownRenderOptions = {},
 ): HTMLDivElement {
   const item = existing instanceof HTMLDivElement && existing.classList.contains("thought-text")
     ? existing
     : createTraceText();
   item.setAttribute(STREAM_THOUGHT_KEY_ATTRIBUTE, key);
-  renderMarkdownInto(item, text, images, options);
+  renderMarkdownInto(item, text);
   return item;
 }
 
@@ -735,19 +728,13 @@ function keyedStatus(
 function renderHistoricalTrace(
   node: StreamNode,
   trace: readonly ChatTraceItem[],
-  images: readonly ChatImage[],
 ): void {
-  const claimedGeneratedImageIds = new Set<string>();
   const children = trace.map((item, index) => (
     item.type === "text"
       ? keyedTraceText(
           undefined,
           `trace:${index}`,
           item.text,
-          images,
-          {
-            claimedGeneratedImageIds,
-          },
         )
       : keyedToolEntry(
           node,
@@ -776,22 +763,16 @@ function renderStreamPresentation(
     renderMarkdownInto(
       node.text,
       presentation.finalText,
-      presentation.images,
     );
   }
 
   const existing = thoughtChildrenByKey(node.thoughtItems);
-  const claimedGeneratedImageIds = new Set<string>();
   const children: HTMLElement[] = presentation.items.map((item, index) => (
     item.type === "text"
       ? keyedTraceText(
           existing.get(`trace:${index}`),
           `trace:${index}`,
           item.text,
-          presentation.images,
-          {
-            claimedGeneratedImageIds,
-          },
         )
       : keyedToolEntry(
           node,
@@ -805,18 +786,11 @@ function renderStreamPresentation(
   ));
   const trailingText = presentation.currentTurnText;
   if (trailingText) {
-    const source = presentation.activeTurn !== null && !presentation.settled
-      ? hideTrailingIncompleteGeneratedImageMarkdown(trailingText)
-      : trailingText;
     const key = `trace:${presentation.items.length}`;
     children.push(keyedTraceText(
       existing.get(key),
       key,
-      source,
-      presentation.images,
-      {
-        claimedGeneratedImageIds,
-      },
+      trailingText,
     ));
   }
   if (presentation.compactingReason !== null) {
@@ -857,7 +831,6 @@ function appendMessage(
   text = "",
   streaming = false,
   trace: readonly ChatTraceItem[] = [],
-  images: readonly ChatImage[] = [],
   scrollToBottom = true,
 ): StreamNode {
   const article = document.createElement("article");
@@ -887,7 +860,7 @@ function appendMessage(
   thoughts.append(thoughtSummary, thoughtItems);
   const messageText = document.createElement("div");
   messageText.className = role === "assistant" ? "message-text markdown-content" : "message-text";
-  if (role === "assistant") renderMarkdownInto(messageText, text, images);
+  if (role === "assistant") renderMarkdownInto(messageText, text);
   else messageText.textContent = text;
   body.append(label);
   if (role === "assistant") body.append(thoughts);
@@ -905,7 +878,7 @@ function appendMessage(
     expandedToolIds: new Set<string>(),
     presentation: streaming ? createStreamPresentation() : null,
   };
-  if (trace.length) renderHistoricalTrace(node, trace, images);
+  if (trace.length) renderHistoricalTrace(node, trace);
   if (node.presentation) renderStreamPresentation(node, null);
   return node;
 }
@@ -925,7 +898,6 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
       message.text,
       false,
       message.trace ?? [],
-      message.images ?? [],
       false,
     );
   }
@@ -1320,7 +1292,6 @@ async function submitQuestion(question: string): Promise<void> {
       renderMarkdownInto(
         streamNode.text,
         finalMessage?.text ?? "",
-        finalMessage?.images ?? [],
       );
       streamNode.thoughtSummary.textContent = "思考过程";
       streamNode.thoughts.open = false;

@@ -186,7 +186,7 @@ test("retains the last error when a run never produces a final answer", () => {
   ]);
 });
 
-test("associates persisted code interpreter PNG details with the final answer", () => {
+test("ignores legacy code interpreter images while preserving the final answer and tool trace", () => {
   const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
   assert.deepEqual(serializeMessages([
     { role: "user", content: "画图" },
@@ -225,7 +225,6 @@ test("associates persisted code interpreter PNG details with the final answer", 
         arguments: {},
         isError: false,
       }],
-      images: [{ id: "ci-oee-trend", mimeType: "image/png", data: png, alt: "oee-trend" }],
     },
   ]);
 });
@@ -268,7 +267,7 @@ test("ignores persisted images without consistent semantic metadata", () => {
     { role: "assistant", content: "完成。", stopReason: "stop" },
   ]);
 
-  assert.equal(transcript.at(-1)?.images, undefined);
+  assert.equal("images" in transcript.at(-1)!, false);
 });
 
 test("does not persist images from a failed code interpreter result", () => {
@@ -294,157 +293,9 @@ test("does not persist images from a failed code interpreter result", () => {
   ]);
 
   const tool = transcript.at(-1)?.trace?.at(-1);
-  assert.equal(transcript.at(-1)?.images, undefined);
+  assert.equal("images" in transcript.at(-1)!, false);
   assert.equal(tool?.type, "tool");
   assert.equal(tool?.type === "tool" && tool.isError, true);
-});
-
-test("keeps generated image IDs in tool-call source order", () => {
-  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
-  const transcript = serializeMessages([
-    { role: "user", content: "画两组图" },
-    {
-      role: "assistant",
-      content: [
-        { type: "toolCall", id: "code-first", name: "code_interpreter", arguments: {} },
-        { type: "toolCall", id: "code-second", name: "code_interpreter", arguments: {} },
-      ],
-      stopReason: "toolUse",
-    },
-    {
-      role: "toolResult",
-      toolCallId: "code-second",
-      toolName: "code_interpreter",
-      isError: false,
-      details: {
-        kind: "code_interpreter",
-        images: [{
-          mimeType: "image/png",
-          data: png,
-          alt: "second-group",
-          referenceName: "second-group",
-          referenceId: "ci-second-group",
-        }],
-      },
-    },
-    {
-      role: "toolResult",
-      toolCallId: "code-first",
-      toolName: "code_interpreter",
-      isError: false,
-      details: {
-        kind: "code_interpreter",
-        images: [
-          {
-            mimeType: "image/png",
-            data: png,
-            alt: "first-group-one",
-            referenceName: "first-group-one",
-            referenceId: "ci-first-group-one",
-          },
-          {
-            mimeType: "image/png",
-            data: png,
-            alt: "first-group-two",
-            referenceName: "first-group-two",
-            referenceId: "ci-first-group-two",
-          },
-        ],
-      },
-    },
-    { role: "assistant", content: "图表如下。", stopReason: "stop" },
-  ]);
-
-  const images = transcript.find((message) => message.role === "assistant")?.images;
-  assert.deepEqual(images?.map((image) => image.id), [
-    "ci-first-group-one",
-    "ci-first-group-two",
-    "ci-second-group",
-  ]);
-  assert.deepEqual(serializeMessages([
-    { role: "user", content: "画图" },
-    {
-      role: "assistant",
-      content: [{ type: "toolCall", id: "stable", name: "code_interpreter", arguments: {} }],
-      stopReason: "toolUse",
-    },
-    {
-      role: "toolResult",
-      toolCallId: "stable",
-      toolName: "code_interpreter",
-      isError: false,
-      details: {
-        kind: "code_interpreter",
-        images: [{
-          mimeType: "image/png",
-          data: png,
-          alt: "stable-chart",
-          referenceName: "stable-chart",
-          referenceId: "ci-stable-chart",
-        }],
-      },
-    },
-    { role: "assistant", content: "完成。", stopReason: "stop" },
-  ]).at(-1)?.images?.[0]?.id, "ci-stable-chart");
-});
-
-test("does not cross-wire images when historical tool-call IDs repeat across turns", () => {
-  const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
-  const transcript = serializeMessages([
-    { role: "user", content: "第一轮" },
-    {
-      role: "assistant",
-      content: [{ type: "toolCall", id: "reused", name: "code_interpreter", arguments: {} }],
-      stopReason: "toolUse",
-    },
-    {
-      role: "toolResult",
-      toolCallId: "reused",
-      toolName: "code_interpreter",
-      isError: false,
-      details: {
-        kind: "code_interpreter",
-        images: [{
-          mimeType: "image/png",
-          data: png,
-          alt: "first-turn",
-          referenceName: "first-turn",
-          referenceId: "ci-first-turn",
-        }],
-      },
-    },
-    { role: "assistant", content: "第一轮完成。", stopReason: "stop" },
-    { role: "user", content: "第二轮" },
-    {
-      role: "assistant",
-      content: [{ type: "toolCall", id: "reused", name: "code_interpreter", arguments: {} }],
-      stopReason: "toolUse",
-    },
-    {
-      role: "toolResult",
-      toolCallId: "reused",
-      toolName: "code_interpreter",
-      isError: false,
-      details: {
-        kind: "code_interpreter",
-        images: [{
-          mimeType: "image/png",
-          data: png,
-          alt: "second-turn",
-          referenceName: "second-turn",
-          referenceId: "ci-second-turn",
-        }],
-      },
-    },
-    { role: "assistant", content: "第二轮完成。", stopReason: "stop" },
-  ]);
-
-  assert.deepEqual(
-    transcript.filter((message) => message.role === "assistant").map((message) => (
-      message.images?.map((image) => image.alt)
-    )),
-    [["first-turn"], ["second-turn"]],
-  );
 });
 
 test("does not let a later reused tool-call ID satisfy an earlier missing result", () => {
@@ -483,8 +334,8 @@ test("does not let a later reused tool-call ID satisfy an earlier missing result
   ]);
   const assistantMessages = transcript.filter((message) => message.role === "assistant");
 
-  assert.equal(assistantMessages[0]?.images, undefined);
+  assert.equal("images" in assistantMessages[0]!, false);
   assert.equal(assistantMessages[0]?.trace?.find((item) => item.type === "tool")?.isError, true);
-  assert.deepEqual(assistantMessages[1]?.images?.map((image) => image.alt), ["second-turn-only"]);
+  assert.equal("images" in assistantMessages[1]!, false);
   assert.equal(assistantMessages[1]?.trace?.find((item) => item.type === "tool")?.isError, false);
 });

@@ -16,6 +16,8 @@ import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { createAgentTools } from "../../src/server/tool/database-tools.ts";
 import { oeeSkillSessionOptions } from "../../src/server/agent/oee-skill-runtime.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
+import { latestClosedBusinessDate } from "../../src/server/database/business-dates.ts";
+import { machineRankingView } from "../../src/server/skills/test-oee-calculator/assets/machine-ranking.ts";
 
 interface RequestBody {
   messages: { role: string; content: string | { type: string; text?: string }[]; tool_calls?: unknown[] }[];
@@ -32,7 +34,7 @@ const taskFor = (body: RequestBody): string => {
   try { return (JSON.parse(messageText(user?.content ?? "{}")) as { task: string }).task; } catch { return "parent"; }
 };
 
-async function fixture(t: TestContext, respond: (body: RequestBody) => unknown | Promise<unknown>) {
+async function fixture(t: TestContext, respond: (body: RequestBody) => unknown | Promise<unknown>, initialDashboard = createDefaultDashboard()) {
   const directory = mkdtempSync(path.join(tmpdir(), "sql-web-subagents-"));
   const requests: RequestBody[] = [];
   const serverErrors: unknown[] = [];
@@ -74,7 +76,7 @@ async function fixture(t: TestContext, respond: (body: RequestBody) => unknown |
   const store = await AgentSessionStore.open({ database, artifacts, codeInterpreter: interpreter, cwd: directory,
     sessionDir: path.join(directory, "sessions"), agentDir, model: { provider: "test", model: "test-model" },
     logger: { info: (event, fields) => { if (event === "agent.subagent.event") events.push({ ...fields }); }, warn() {}, error() {} },
-    loadInitialDashboard: () => createDefaultDashboard() });
+    loadInitialDashboard: () => initialDashboard });
   const created = await store.create();
   const parent = await store.get(created.id);
   const catalog = await loadAgentSkillCatalog();
@@ -248,3 +250,150 @@ for (const reason of ["abort", "dispose"] as const) {
     release();
   });
 }
+
+test("website child reads daily data with the parent permission while leaving Skill tools inactive", async (t) => {
+  let returned: SubagentResult[] = [];
+  const env = await fixture(t, (body) => {
+    const results = toolResults(body);
+    if (taskFor(body) === "parent") {
+      if (!results.length) return call("subagent", { tasks: [{ name: "daily", task: "读取每日运行状态" }] });
+      returned = (JSON.parse(results.at(-1)!.content) as { results: SubagentResult[] }).results;
+      return "每日运行状态为 completed";
+    }
+    if (!results.length) {
+      assert.ok(!body.tools.some((tool) => tool.function.name.startsWith("test_oee_calculator__")));
+      return call("read", { path: ".data/run.json", json_pointer: "/status" });
+    }
+    assert.equal(JSON.parse(results.at(-1)!.content), "completed");
+    return "运行记录：completed";
+  });
+  mkdirSync(path.join(env.directory, ".data"));
+  writeFileSync(path.join(env.directory, ".data", "run.json"), JSON.stringify({ status: "completed" }));
+  await env.store.prompt(env.created.id, "委派查询每日运行记录");
+  assert.equal(returned[0]?.status, "completed");
+  assert.equal(returned[0]?.text, "运行记录：completed");
+  assert.equal(env.parent.getToolDefinition("test_oee_calculator__rank_machines"), undefined);
+});
+
+for (const scenario of ["completed", "missing", "running", "sync-failed", "timed-out", "rerun", "stale-session"] as const) {
+  test(`daily dashboard chat follows real read results for ${scenario}`, { timeout: 15000 }, async (t) => {
+    const now = new Date();
+    const day = new Date(now.getTime() + 8 * 3600_000).toISOString().slice(0, 10);
+    const throughDate = latestClosedBusinessDate(now);
+    const published = scenario !== "missing" && scenario !== "running" && scenario !== "sync-failed";
+    const baseline = { ...createDefaultDashboard(new Date("2026-01-03T01:00:00Z")),
+      dateRange: { start: "2026-01-01", end: "2026-01-02" } };
+    const steps: { name: string; args: unknown; verify?: (result: string) => void }[] = [];
+    let step = 0;
+    let answer = "";
+    const env = await fixture(t, (body) => {
+      const results = toolResults(body);
+      assert.ok(step <= steps.length, "unexpected review or extra model call");
+      if (step === 0) {
+        const system = body.messages.map((message) => messageText(message.content)).join("\n");
+        assert.match(system, /每日看板.*历史结果/u);
+        const skillPath = /<location>([^<]+)<\/location>/u.exec(system)?.[1];
+        assert.ok(skillPath);
+        steps.push({ name: "get_current_time", args: {}, verify: (text) => {
+          const clock = JSON.parse(text) as { utc: string };
+          assert.equal(new Date(new Date(clock.utc).getTime() + 8 * 3600_000).toISOString().slice(0, 10), day);
+        } }, { name: "read", args: { path: skillPath } }, {
+          name: "read", args: { path: path.join(path.dirname(skillPath), "references", "daily-dashboard.md") },
+          verify: (text) => { assert.match(text, /最近成功发布/u); assert.match(text, /不能.*断言.*仍存活/u); },
+        }, { name: "read", args: { path: `.data/logs/oee-daily-${day}.log` }, verify: (text) => {
+          if (scenario === "missing") assert.match(text, /文件不存在/u);
+          else {
+            const entries = text.trim().split("\n").map((line) => JSON.parse(line));
+            assert.ok(entries.some((entry) => entry.context.commandRunId === "attempt-1"));
+            if (scenario === "rerun") assert.ok(entries.some((entry) => entry.context.commandRunId === "attempt-2" && entry.event === "daily.completed" && entry.fields.status === "failed"));
+          }
+        } });
+        if (!["missing", "sync-failed"].includes(scenario)) steps.push({ name: "read", args: {
+          path: ".data/daily-analysis/attempt-1/run.json", json_pointer: "",
+        }, verify: (text) => {
+          const run = JSON.parse(text);
+          assert.equal(run.throughDate, throughDate);
+          assert.equal(run.status, scenario === "running" ? "running" : scenario === "timed-out" ? "timed_out" : "completed");
+        } });
+        steps.push({ name: "read", args: { path: ".data/default-dashboard.json", json_pointer: "/dateRange" },
+          verify: (text) => assert.equal(JSON.parse(text).end, published ? throughDate : "2026-01-02") });
+        if (scenario === "completed" || scenario === "stale-session") steps.push({ name: "read", args: {
+          path: ".data/daily-analysis/attempt-1/report.json", json_pointer: "/periods/0/comparison",
+        }, verify: (text) => assert.equal(JSON.parse(text), "冻结日报结论，来自本轮已有证据") });
+        if (scenario === "stale-session") steps.push({ name: "get_dashboard", args: {},
+          verify: (text) => assert.equal(JSON.parse(text).dateRange.end, "2026-01-02") });
+      } else steps[step - 1]!.verify?.(results.at(-1)!.content);
+      if (step < steps.length) {
+        const request = steps[step++]!;
+        return call(request.name, request.args, "daily-" + step);
+      }
+      answer = scenario === "completed" ? `当天任务已发布，截止业务日 ${throughDate}；报告来自冻结证据。` :
+        scenario === "missing" ? "未找到当天执行记录；现有发布快照截至 2026-01-02。" :
+        scenario === "running" ? `日志未记录完成，run.json 标记 running；截止业务日 ${throughDate}，现有发布快照较旧。` :
+        scenario === "sync-failed" ? "数据同步失败，跳过看板更新；保留此前发布快照。" :
+        scenario === "timed-out" ? `基础看板已发布，分析超时，改善建议不可用；截止业务日 ${throughDate}。` :
+        scenario === "rerun" ? `最新尝试 attempt-2 同步失败；最近成功发布是 attempt-1，截止业务日 ${throughDate}。` :
+        `每日默认看板已发布至 ${throughDate}，当前会话仍显示截至 2026-01-02 的看板。`;
+      return answer;
+    }, baseline);
+    const data = path.join(env.directory, ".data");
+    const runDir = path.join(data, "daily-analysis", "attempt-1");
+    mkdirSync(path.join(data, "logs"), { recursive: true });
+    const record = (event: string, fields: unknown, run = "attempt-1") => JSON.stringify({
+      timestamp: now.toISOString(), event, context: { commandRunId: run }, fields,
+    });
+    if (scenario !== "missing") {
+      const entries = [record("daily.started", { throughDate })];
+      if (scenario === "sync-failed") entries.push(record("daily.completed", { status: "failed", dashboards: [{ published: false, status: "skipped" }] }));
+      else {
+        mkdirSync(runDir, { recursive: true });
+        entries.push(record("daily.analysis.started", { runId: "attempt-1", throughDate, runDir }));
+        writeFileSync(path.join(runDir, "run.json"), JSON.stringify({ runId: "attempt-1", throughDate,
+          status: scenario === "running" ? "running" : scenario === "timed-out" ? "timed_out" : "completed" }));
+        if (published) {
+          entries.push(record("daily.dashboard.published", { throughDate, filePath: path.join(data, "default-dashboard.json"), dataAsOf: now.toISOString() }),
+            record("daily.completed", { status: scenario === "timed-out" ? "completed_with_warnings" : "completed",
+              dashboards: [{ published: true, details: { analysisStatus: scenario === "timed-out" ? "timed_out" : "completed" } }] }));
+          writeFileSync(path.join(runDir, "report.json"), JSON.stringify({ periods: [{ comparison: "冻结日报结论，来自本轮已有证据" }] }));
+        }
+      }
+      if (scenario === "rerun") entries.push(record("daily.started", { throughDate }, "attempt-2"),
+        record("daily.completed", { status: "failed", dashboards: [{ published: false }] }, "attempt-2"));
+      writeFileSync(path.join(data, "logs", `oee-daily-${day}.log`), entries.join("\n") + "\n");
+    }
+    writeFileSync(path.join(data, "default-dashboard.json"), JSON.stringify({ ...baseline,
+      ...(published ? { dataAsOf: now.toISOString(), dateRange: { start: "2026-01-01", end: throughDate } } : {}) }));
+    await env.store.prompt(env.created.id, "今天每日看板是否生成，运行过程和报告依据是什么？");
+    const serialized = await env.store.getSerialized(env.created.id);
+    assert.equal(serialized.messages.at(-1)?.text, answer);
+    assert.equal(step, steps.length);
+    const actions = env.requests.flatMap((request) => request.messages.filter((message) => message.role === "assistant")
+      .flatMap((message) => message.tool_calls ?? []));
+    assert.doesNotMatch(JSON.stringify(actions), /execute_sql|update_dashboard|send_email|rank_machines/u);
+    assert.equal(serialized.dashboard.dateRange.end, "2026-01-02");
+  });
+}
+
+test("website cites a complete archived ranking without a live ranking repair", async (t) => {
+  const range = { start: "2026-01-01", end: "2026-01-03" };
+  const scope = { kind: "MT" as const, metric: "loss_hours" as const, states: ["Conversion"],
+    basis: "report_period" as const, platformVersion: "oee-v4" };
+  const details = { range, scope, truncated: false, ...machineRankingView({ range, scope, rows: [{
+    machine: "ADH001", machine_label: "T5773/ADH001", platform: "T5773", metric_value: 10,
+    availability_days: 3, selected_days: 3,
+  }] }) };
+  let turns = 0;
+  const env = await fixture(t, (body) => {
+    turns++;
+    if (!toolResults(body).length) return call("read", { path: ".data/daily-analysis/archive/events.jsonl", offset: 2, json_pointer: "" });
+    assert.equal(JSON.parse(toolResults(body).at(-1)!.content).result.details.summary, details.summary);
+    return "归档日报原文：\n" + details.summary;
+  });
+  const runDir = path.join(env.directory, ".data", "daily-analysis", "archive");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(path.join(runDir, "events.jsonl"), JSON.stringify({ type: "session" }) + "\n" +
+    JSON.stringify({ type: "tool_result", name: "test_oee_calculator__rank_machines", isError: false, result: { details } }) + "\n");
+  await env.store.prompt(env.created.id, "解释归档日报中的机台损失排名");
+  assert.equal(turns, 2);
+  assert.equal((await env.store.getSerialized(env.created.id)).messages.at(-1)?.text, "归档日报原文：\n" + details.summary);
+});

@@ -800,7 +800,7 @@ export class AgentSessionStore {
         return (agentId) => ({
           systemPrompt: websiteInvestigationPrompt(),
           tools: createAgentTools(this.#database, artifacts.scoped(agentId), this.#codeInterpreter, new Set(), undefined, true),
-          skillOptions: oeeSkillSessionOptions(this.#database, artifacts.scoped(agentId)),
+          skillOptions: { ...oeeSkillSessionOptions(this.#database, artifacts.scoped(agentId)), readDataDirectory: true },
           context: () => ({ dashboard, snapshots: artifacts.listDataSnapshots() }),
         });
       },
@@ -833,7 +833,7 @@ export class AgentSessionStore {
       settingsManager,
       this.#logger,
       this.#dashboard,
-      oeeSkillSessionOptions(this.#database, artifacts),
+      { ...oeeSkillSessionOptions(this.#database, artifacts), readDataDirectory: true },
     );
     const { session } = await createAgentSession({
       cwd: this.#cwd,

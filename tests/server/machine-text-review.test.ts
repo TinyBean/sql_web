@@ -39,6 +39,60 @@ test("unsupported distribution, unverified TOP3, wrong metric/type/state and ext
   assert.equal(reviewMachineText("机台数据不足，无法生成 TOP3。", []).requiresReview, false);
   assert.equal(reviewMachineText("机台数据不足，但损失集中在少数机台。", []).requiresReview, true);
   assert.equal(reviewMachineText("问题集中于 ADH001。", [], "查询 ADH001 的 OEE").requiresReview, true);
+  assert.equal(reviewMachineText("MT 2026-02-01 至 2026-02-03 Conversion 损失集中。", [ranking()]).requiresReview, true);
+  assert.equal(reviewMachineText("MT Conversion 损失按机台天口径集中。", [ranking()]).requiresReview, true);
+});
+
+function archivedMessage(overrides: Record<string, unknown> = {}, eventOverrides: Record<string, unknown> = {}) {
+  return { role: "toolResult", toolName: "read", isError: false,
+    details: { source: "data", dataRoot: "/project/.data", path: "/project/.data/daily-analysis/run-1/events.jsonl",
+      byteOffset: 0, jsonPointer: "", recordLine: 4, truncated: false, ...overrides },
+    content: [{ type: "text", text: JSON.stringify({ type: "tool_result", name: "test_oee_calculator__rank_machines",
+      isError: false, result: { details: { ...ranking(), truncated: false } }, ...eventOverrides }) }] };
+}
+
+test("complete archived successful rankings authorize only historical explanations in this question", async () => {
+  const { emit, user, assistant, sent } = await extensionFixture();
+  user("解释今天看板的改善建议来源");
+  emit("message_end", { message: archivedMessage() });
+  const result = assistant("MT 2026-01-01 至 2026-01-03 Conversion 损失集中。")!;
+  assert.ok(result.message.content.some((part) => part.text?.includes(ranking().summary)));
+  emit("turn_end");
+  assert.equal(sent.length, 0);
+  user("解释明天看板的改善建议来源");
+  assistant("MT Conversion 损失集中。");
+  emit("turn_end");
+  assert.equal(sent.length, 1);
+});
+
+test("failed, truncated, partial, outside and malformed archived records do not authorize rankings", async () => {
+  const cases = [
+    archivedMessage({ truncated: true }), archivedMessage({ byteOffset: 10 }),
+    archivedMessage({ jsonPointer: "/result/details" }), archivedMessage({ source: "skill" }),
+    archivedMessage({ path: "/project/.data/sessions/events.jsonl" }),
+    archivedMessage({ path: "/project/outside/daily-analysis/run-1/events.jsonl" }),
+    archivedMessage({}, { isError: true }), archivedMessage({}, { name: "execute_sql" }),
+    archivedMessage({}, { type: "assistant" }),
+    archivedMessage({}, { result: { details: { ...ranking(), truncated: true } } }),
+    archivedMessage({}, { result: { details: { ...ranking(), scope: { kind: "MT" }, truncated: false } } }),
+    archivedMessage({}, { result: { details: { ...ranking(), range: { start: "2026-02-01", end: "2026-02-03" }, truncated: false } } }),
+  ];
+  for (const message of cases) {
+    const { emit, user, assistant, sent } = await extensionFixture();
+    user("解释今天看板的损失来源");
+    emit("message_end", { message });
+    assistant("MT Conversion 损失集中。"); emit("turn_end");
+    assert.equal(sent.length, 1, JSON.stringify(message.details));
+  }
+});
+
+test("requests for new analysis cannot use archived read results to authorize claims", async () => {
+  for (const request of ["重新分析今天看板", "使用最新数据解释今天看板", "分析 Conversion 损失"]) {
+    const { emit, user, assistant, sent } = await extensionFixture();
+    user(request); emit("message_end", { message: archivedMessage() });
+    assistant("MT Conversion 损失集中。"); emit("turn_end");
+    assert.equal(sent.length, 1);
+  }
 });
 
 async function extensionFixture() {

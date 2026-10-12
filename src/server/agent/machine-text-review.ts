@@ -1,6 +1,7 @@
 import type { InlineExtension, MessageEndEvent } from "@earendil-works/pi-coding-agent";
+import path from "node:path";
 import { formatMachineMentions, hasMachineDistributionClaim } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
-import { RANK_MACHINES_TOOL_NAME, type MachineRankingScope } from "../skills/test-oee-calculator/assets/machine-ranking.ts";
+import { MACHINE_METRICS, RANK_MACHINES_TOOL_NAME, type MachineRankingScope } from "../skills/test-oee-calculator/assets/machine-ranking.ts";
 import type { DatePeriod } from "../database/business-dates.ts";
 
 export const MACHINE_TEXT_REVIEW_MESSAGE_TYPE = "sql_web.machine_text_review";
@@ -31,20 +32,28 @@ export function reviewMachineText(text: string, rankings: readonly RankingNarrat
     const unauthorizedTop3 = numericalTop3 && /TOP\s*3/iu.test(residual);
     if (unauthorizedTop3) return { text: normalized, requiresReview: true };
     const claims = residual.split(/[。！？\n]/u).filter((sentence) => hasMachineDistributionClaim(sentence) ||
-      /偏低|下降|异常|主要损失|最大损失/iu.test(sentence));
+      /偏低|下降|异常|主要损失|最大损失|集中|分散/iu.test(sentence));
     for (const claim of claims) {
       const kinds: readonly string[] = claim.match(/\b(?:MT|ST)\b/gu) ?? [];
       const states: readonly string[] = claim.match(/\b(?:Assistance|Conversion|HangUp|PM|IDLE(?:_[A-Za-z]+)?)\b/gu) ?? [];
       const metric = /Socket|DUT[- ]?On/iu.test(claim) ? "dut_on" : /Test\s*Time|测试时间/iu.test(claim) ? "test_time_performance" :
         /Yield|良率/iu.test(claim) ? "final_yield" : /损失|集中|分散/iu.test(claim) ? "loss_hours" : null;
+      const dates = claim.match(/\d{4}-\d{2}-\d{2}/gu) ?? [];
+      const matches = (ranking: RankingNarrative): boolean => (!kinds.length || kinds.includes(ranking.scope.kind)) &&
+        (!metric || ranking.scope.metric === metric) && states.every((state) => ranking.scope.states.includes(state)) &&
+        (!/机台天|单业务日机台/u.test(claim) || ranking.scope.basis === "machine_day") &&
+        (!/整期机台/u.test(claim) || ranking.scope.basis === "report_period") &&
+        (!/同日同类型.*0\.2%/u.test(claim) || ranking.scope.testTimeRule === undefined) &&
+        (!/本机台.*1%/u.test(claim) || ranking.scope.testTimeRule === "machine_period_1pct") &&
+        (!dates.length || (dates.length === 1 ? ranking.range.start === dates[0] && ranking.range.end === dates[0] :
+          ranking.range.start === dates[0] && ranking.range.end === dates.at(-1)));
       if (hasMachineDistributionClaim(claim) && rankings.every((ranking) => !ranking.top3.length)) {
         return { text: normalized, requiresReview: true };
       }
-      if (!rankings.some((ranking) => (!kinds.length || kinds.includes(ranking.scope.kind)) &&
-          (!metric || ranking.scope.metric === metric) && states.every((state) => ranking.scope.states.includes(state)))) {
+      if (!rankings.some(matches)) {
         return { text: normalized, requiresReview: true };
       }
-      if (kinds.some((kind) => !rankings.some((ranking) => ranking.scope.kind === kind && (!metric || ranking.scope.metric === metric)))) {
+      if (kinds.some((kind) => !rankings.some((ranking) => ranking.scope.kind === kind && matches(ranking)))) {
         return { text: normalized, requiresReview: true };
       }
     }
@@ -60,8 +69,34 @@ function narrative(value: unknown): RankingNarrative | null {
   const row = value as Partial<RankingNarrative> & { truncated?: boolean };
   if (typeof row.summary !== "string" || !row.range || !row.scope || !Array.isArray(row.top3) ||
       row.truncated !== false || typeof row.range.start !== "string" || typeof row.range.end !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(row.range.start) || !/^\d{4}-\d{2}-\d{2}$/u.test(row.range.end) || row.range.start > row.range.end ||
+      !["MT", "ST"].includes(row.scope.kind) || !MACHINE_METRICS.includes(row.scope.metric) ||
+      !["report_period", "machine_day"].includes(row.scope.basis) || typeof row.scope.platformVersion !== "string" ||
+      !Array.isArray(row.scope.states) || !row.scope.states.every((state) => typeof state === "string") ||
+      !row.summary.startsWith(`${row.scope.kind} ${row.range.start} 至 ${row.range.end} `) || row.top3.length > 3 ||
       !row.top3.every((entry) => entry && typeof entry.machine === "string")) return null;
   return row as RankingNarrative;
+}
+
+function object(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** Only complete event records read in this question may authorize historical summaries. */
+function archivedRanking(message: MessageEndEvent["message"], userText: string): RankingNarrative | null {
+  if (message.role !== "toolResult" || message.toolName !== "read" || message.isError ||
+      !/看板|日报|每日|报告|归档|生成/u.test(userText) || /重算|重新(?:计算|分析|查询)|最新数据|扩展分析/u.test(userText)) return null;
+  const details = object(message.details);
+  if (details["source"] !== "data" || details["truncated"] !== false || details["byteOffset"] !== 0 ||
+      details["jsonPointer"] !== "" || typeof details["recordLine"] !== "number" ||
+      typeof details["path"] !== "string" || typeof details["dataRoot"] !== "string") return null;
+  const relative = path.relative(details["dataRoot"], details["path"]);
+  if (!/^daily-analysis\/[A-Za-z0-9_-]+\/events\.jsonl$/u.test(relative.split(path.sep).join("/"))) return null;
+  try {
+    const event = object(JSON.parse(message.content.filter((part) => part.type === "text").map((part) => part.text).join("")));
+    if (event["type"] !== "tool_result" || event["name"] !== RANK_MACHINES_TOOL_NAME || event["isError"] !== false) return null;
+    return narrative(object(event["result"])["details"]);
+  } catch { return null; }
 }
 
 export function createMachineTextReviewExtension(logger: {
@@ -88,6 +123,8 @@ export function createMachineTextReviewExtension(logger: {
           const result = narrative(message.details);
           if (result) rankings.set(JSON.stringify([result.range, result.scope]), result);
         }
+        const archived = archivedRanking(message, userText);
+        if (archived) rankings.set(JSON.stringify([archived.range, archived.scope]), archived);
         return;
       }
       if (message.role !== "assistant" || !["stop", "length"].includes(message.stopReason) ||
@@ -116,7 +153,7 @@ export function createMachineTextReviewExtension(logger: {
       if (!pending) return;
       pending = false; attempted = true; active = true;
       pi.sendMessage({ customType: MACHINE_TEXT_REVIEW_MESSAGE_TYPE, display: false,
-        content: "请修正上一条候选回答并输出完整回答。具体问题与机台分布必须用同范围同 MT/ST 的 test_oee_calculator__rank_machines 查证（尚未加载时先读取 OEE Skill），最多补查六次。TOP3 只逐字引用工具 summary，不能手写或猜测数值；纯公式解释、单台查询无需 TOP3。无法查证时明确说明机台分布数据不足并删除未核实的分布结论。不要执行发邮件、修改看板或委派任务等业务动作。" });
+        content: "请修正上一条候选回答并输出完整回答。解释每日归档结果时，先按 Skill 每日看板指引，用 read 的 json_pointer 空字符串完整读取同运行 events.jsonl 中成功的排名 tool_result 记录，逐字引用原 summary 并注明原业务日期和口径，不用当前数据库重算替代历史证据。新分析必须用同范围同 MT/ST 的 test_oee_calculator__rank_machines 查证（尚未加载时先读取 OEE Skill），最多补查六次。TOP3 不能手写或猜测数值；纯公式解释、单台查询无需 TOP3。无法查证时明确说明机台分布数据不足并删除未核实的分布结论。不要执行发邮件、修改看板或委派任务等业务动作。" });
     });
     pi.on("tool_call", (event) => {
       if (!active) return;

@@ -433,7 +433,7 @@ SQL_WEB_MAIL_FROM_NAME=JV OEE Agent
 - 数据快照使用简短的规范逻辑名称，并在服务端映射到不可见的内部 UUID 文件；同名快照只在新查询完整成功后原子替换。快照可在同一会话的后续计算、绘图和恢复后继续使用，并随会话删除。
 - 基础 system prompt 不包含业务数据库结构或字段含义；这些上下文由 `test-oee-calculator` 的 `references/database.md` 按需提供，数据内容仍必须通过查询工具获取。
 - Agent 递归扫描 `src/server/skills` 并按 Pi 标准格式注入 Skill 名称、描述和入口路径；完整 `SKILL.md` 只在 Agent 根据任务按需读取时进入当前会话上下文。`/skill:<name>` 不会被解析为显式 Skill 调用。
-- 通用 `read` 只能读取扫描到的 Skill 目录，拒绝目录穿越、Skill 外文件和符号链接逃逸。成功读取准确的 `SKILL.md` 后，专有工具才在该会话及当前分支内激活；其他会话不受影响。
+- 通用 `read` 默认只读取扫描到的 Skill 目录；网站会话及其子 Agent 额外开启项目 `.data` 的普通 UTF-8 文本读取，每日分析主／子 Agent 仍保持冻结证据隔离。数据读取每页最多 50 KiB，通过 `byte_offset` 续读；`json_pointer` 可定位 JSON 字段或 `offset` 指定的一条 JSONL／结构化日志记录，解析上限 32 MiB。目录、二进制、其他项目文件和符号链接逃逸被拒绝。成功读取准确的 Skill 入口才激活专有工具，读取 `.data` 文件不会激活。每日运行流程、产物位置和归档查询步骤见 OEE Skill 的 `references/daily-dashboard.md`；归档排名只有本轮完整读取成功的排名事件才能用于历史解释，新分析继续实时查证。
 - 代码沙箱只会只读挂载服务端按当前会话和逻辑名称解析的数据快照，以及独立的用户输入 JSON；不接受模型指定的 SQL、宿主路径、artifact URI 或数据正文。
 - 日志不记录用户问题正文、工具参数、查询结果或模型回答正文。
 

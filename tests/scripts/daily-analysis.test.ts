@@ -837,12 +837,18 @@ test("ephemeral model repairs evidence and unreadable prose then immediately acc
   let turn = 0;
   await mockModel(t, directory, (body) => {
     const { root } = modelContext(body);
-    if (!root) return childLossResponse(body, runDir);
+    if (!root) {
+      const messages = JSON.stringify(body["messages"]);
+      if (!messages.includes("read 仅允许")) return [toolCall(0, "read", { path: path.join(directory, ".data", "private-run.log") })];
+      assert.doesNotMatch(messages, /private daily data must stay isolated/u);
+      return childLossResponse(body, runDir);
+    }
     turn += 1;
     assert.equal(existsSync(path.join(runDir, "report.json")), false);
     assert.doesNotMatch(JSON.stringify(body["messages"]), /Received arguments:/u);
     if (turn === 1) return [
       toolCall(0, "read", { path: path.join(directory, "outside.txt") }),
+      toolCall(2, "read", { path: path.join(directory, ".data", "private-run.log") }),
       toolCall(1, "execute_sql", { period: "week", sql: "DELETE FROM oee_availability" }),
     ];
     const report = lossReport(runDir);
@@ -851,6 +857,8 @@ test("ephemeral model repairs evidence and unreadable prose then immediately acc
     return [toolCall(0, "submit_analysis", { ...report, periods: JSON.stringify(report.periods) })];
   });
   writeFileSync(path.join(directory, "outside.txt"), "must not be readable");
+  mkdirSync(path.join(directory, ".data"), { recursive: true });
+  writeFileSync(path.join(directory, ".data", "private-run.log"), "private daily data must stay isolated");
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
@@ -866,6 +874,7 @@ test("ephemeral model repairs evidence and unreadable prose then immediately acc
   assert.match(events, /最低点/u);
   assert.match(events, /业务用户可理解/u);
   assert.doesNotMatch(events, /must not be readable|"type":"analysis_draft"|"type":"analysis_review"/u);
+  assert.doesNotMatch(events, /private daily data must stay isolated/u);
   assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(9)), /\bq\d+\b|第\s*0\s*行/u);
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
 });

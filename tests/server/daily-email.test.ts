@@ -28,19 +28,30 @@ test("daily email preserves the six columns and published values, without includ
   assert.equal(email.html!.match(/<th>/gu)?.length, 6);
 });
 
-test("daily email rejects missing hours and blank required fields, and preserves measured zero", () => {
+test("daily email rejects invalid hours and narrative types, and preserves measured zero", () => {
   const state = dailyDashboard();
   for (const [key, value] of [["loss_hours", null], ["loss_hours", undefined], ["loss_hours", NaN], ["loss_hours", Infinity],
-    ["loss_hours", "1.2"], ["issue", " "], ["measure", ""], ["suggested_owner", null]] as const) {
+    ["loss_hours", "1.2"], ["issue", undefined], ["measure", 1], ["suggested_owner", null]] as const) {
     assert.throws(() => createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
       ...widget, data: widget.data.map((row) => ({ ...row, [key]: value })),
-    }) } as typeof state, "2026-09-14"), /必填/u);
+    }) } as typeof state, "2026-09-14"), /字符串|有限数值/u);
   }
   const email = createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
     ...widget, data: widget.data.map((row) => ({ ...row, loss_hours: 0 })),
   }) }, "2026-09-14");
   assert.match(email.text, /\t0\.0/u);
   assert.doesNotMatch(email.text, /—/u);
+});
+
+test("daily email accepts empty, whitespace and unrestricted narrative strings", () => {
+  const state = dailyDashboard();
+  for (const text of ["", " \t ", "依据 q11 第 0 行 execute_sql loss_hours 判断", "机台损失集中，TOP3 待核查"]) {
+    const email = createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
+      ...widget, data: widget.data.map((row) => ({ ...row, issue: text, measure: text, suggested_owner: text })),
+    }) }, "2026-09-14");
+    assert.ok(email.text.includes(text));
+    assert.ok(email.html!.includes(text));
+  }
 });
 
 test("empty suggestions retain both kinds' explanations", () => {

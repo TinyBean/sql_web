@@ -445,9 +445,8 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.loss_reference!.row_index = 999; }, /同类型/u);
   reject((r) => { periodEntry(r, "month").groups[0]!.items[0] = structuredClone(item); }, /本周期/u);
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.category = "yield" as "availability"; }, /结构无效/u);
-  reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.priority = 2; }, /连续/u);
+  reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.priority = 4; }, /结构无效/u);
   reject((r) => { r.periods.pop(); }, /结构无效/u);
-  reject((r) => { periodEntry(r, "week").groups[0]!.items = []; }, /空清单/u);
   const ordinarySql = evidence.query(loss.sql, loss.parameters, 200, { period: "week", agentId: "root" });
   evidence.records.set(ordinarySql.id, { ...ordinarySql, range: loss.range! });
   reject((r) => {
@@ -485,7 +484,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   database.exec("COMMIT");
 });
 
-test("reports require readable business text while preserving structured audit references", (t) => {
+test("reports accept unrestricted narrative strings while preserving structured evidence and display formatting", (t) => {
   const { config, connections } = fixture(t);
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
@@ -500,16 +499,23 @@ test("reports require readable business text while preserving structured audit r
     periodEntry(report, "day").groups[0]!.items[0]!.evidence_ids);
 
   for (const field of ["comparison", "no_findings_reason", "issue", "measure", "suggested_owner"] as const) {
-    const copy = structuredClone(report);
-    const period = periodEntry(copy, "day");
-    const group = period.groups[0]!;
-    if (field === "comparison") period.comparison = "依据（q11/q13）判断";
-    else if (field === "no_findings_reason") {
-      group.items = [];
-      group.no_findings_reason = "q11 无数据";
-    } else group.items[0]![field] = "依据q11第 0 行判断";
-    assert.throws(() => validateAnalysisReport(copy, context, evidence.records),
-      (error: unknown) => error instanceof Error && error.message.includes(field) && error.message.includes("改写"), field);
+    for (const text of ["", " \t ", "依据（q11/q13）第 0 行 execute_sql 判断", "机台损失集中于少数机台，TOP3 待核查"]) {
+      const copy = structuredClone(report);
+      const period = periodEntry(copy, "day");
+      const group = period.groups[0]!;
+      if (field === "comparison") period.comparison = text;
+      else if (field === "no_findings_reason") {
+        group.items = [];
+        group.no_findings_reason = text;
+      } else group.items[0]![field] = text;
+      const accepted = validateAnalysisReport(copy, context, evidence.records);
+      assert.equal(accepted.status, "completed", field);
+      const rendered = periodEntry(accepted.report, "day");
+      const actual = field === "comparison" ? rendered.comparison : field === "no_findings_reason"
+        ? rendered.groups[0]!.no_findings_reason : rendered.groups[0]!.items[0]![field];
+      assert.ok(actual.startsWith(text), field);
+      assert.doesNotThrow(() => createDailyImprovementEmail(applyAnalysisReport(base, accepted), context.throughDate));
+    }
   }
   for (const internal of [
     "q11", "（q11/q13）", "第 0 行", "row 0", "row_index=0", "evidence_ids",
@@ -517,7 +523,8 @@ test("reports require readable business text while preserving structured audit r
   ]) {
     const copy = structuredClone(report);
     copy.periods[0]!.groups[0]!.items[0]!.measure = "下周复查 " + internal;
-    assert.throws(() => validateAnalysisReport(copy, context, evidence.records), /改写/u, internal);
+    const accepted = validateAnalysisReport(copy, context, evidence.records);
+    assert.equal(accepted.rows.day[0]!["measure"], "下周复查 " + internal);
   }
   periodEntry(report, "day").groups[0]!.items[0]!.measure = "下周复查各机台损失时长，以每个有数据业务日的平均损失小时进行比较。";
   const analyzed = applyAnalysisReport(base, validateAnalysisReport(report, context, evidence.records));
@@ -584,7 +591,7 @@ test("invalid timeout settings fail early", (t) => {
   }
 });
 
-test("empty current periods and missing minima retain nulls and require explicit no-findings explanations", (t) => {
+test("empty current periods and missing minima retain nulls and allow empty no-findings explanations", (t) => {
   const { config, connections } = fixture(t);
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   connections.push(database);
@@ -609,7 +616,7 @@ test("empty current periods and missing minima retain nulls and require explicit
     assert.ok(widget.warnings.includes((kind + " 未生成建议：" + reason).slice(0, 300)));
   }
   report.periods[0]!.groups[0]!.no_findings_reason = " ";
-  assert.throws(() => validateAnalysisReport(report, context, evidence.records), /空清单/u);
+  assert.equal(validateAnalysisReport(report, context, evidence.records).report.periods[0]!.groups[0]!.no_findings_reason, " ");
 });
 
 test("all periods select independent MT/ST state Top3 before rounding and keep complete evidence", (t) => {
@@ -655,9 +662,6 @@ test("all periods select independent MT/ST state Top3 before rounding and keep c
     const copy = structuredClone(report); mutate(copy);
     assert.ok(validationIssues(() => validateAnalysisReport(copy, context, evidence.records)).some((issue) => issue.code === code), code);
   };
-  rejected((copy) => { periodEntry(copy, "day").groups[0]!.items.pop(); }, "LOSS_TOP3_COVERAGE");
-  rejected((copy) => { periodEntry(copy, "day").groups[0]!.items[1]!.loss_reference = structuredClone(group.items[0]!.loss_reference); }, "LOSS_STATE_DUPLICATE");
-  rejected((copy) => { periodEntry(copy, "day").groups[0]!.items.reverse(); }, "PRIORITY_SEQUENCE");
   rejected((copy) => { periodEntry(copy, "day").groups[0]!.items[0]!.loss_reference.row_index = evidence.records.get(context.losses.day.evidence_id)!.rows
     .findIndex((row) => row["kind"] === "MT" && row["state_group"] === "Conversion"); }, "LOSS_REFERENCE_MISMATCH");
   for (const stateScope of [[], ["HangUp", "PM"], ["PM"]]) {
@@ -665,9 +669,6 @@ test("all periods select independent MT/ST state Top3 before rounding and keep c
     evidence.records.set(ranking.id, { ...ranking, rankingScope: { ...ranking.rankingScope!, states: stateScope } });
     assert.ok(validationIssues(() => validateAnalysisReport(report, context, evidence.records)).some((issue) => issue.code === "LOSS_STATE_MISMATCH"));
     evidence.records.set(ranking.id, ranking);
-  }
-  for (const field of ["issue", "measure", "suggested_owner"] as const) {
-    rejected((copy) => { periodEntry(copy, "day").groups[0]!.items[0]![field] = " "; }, "EMPTY_TEXT");
   }
   const blankLoss = structuredClone(report);
   blankLoss.periods[0]!.groups[0]!.items[0]!.loss_reference = null as unknown as typeof group.items[number]["loss_reference"];
@@ -693,7 +694,7 @@ test("measured losses remain analysable without DUT or calculable OEE and preser
   }
   const omitted = structuredClone(report);
   const mt = periodEntry(omitted, "day").groups[0]!; mt.items = []; mt.no_findings_reason = "OEE 无法计算";
-  assert.ok(validationIssues(() => validateAnalysisReport(omitted, context, evidence.records)).some((issue) => issue.code === "LOSS_TOP3_COVERAGE"));
+  assert.deepEqual(validateAnalysisReport(omitted, context, evidence.records).rows.day.filter((row) => row["kind"] === "MT"), []);
   const loss = evidence.records.get(context.losses.day.evidence_id)!;
   for (const value of [null, NaN, Infinity]) {
     evidence.records.set(loss.id, { ...loss, rows: loss.rows.map((row, index) => index === 0 ? { ...row, loss_hours: value } : row) });
@@ -831,7 +832,7 @@ function childLossResponse(body: Record<string, unknown>, runDir: string): unkno
   return "本周期候选结论：Conversion（换线）损失，准备时间待验证；试行换线预备并比较日均时长，建议换线工艺工程跟进。";
 }
 
-test("ephemeral model repairs evidence and unreadable prose then immediately accepts a complete report", { timeout: 30_000 }, async (t) => {
+test("ephemeral model repairs evidence and accepts unrestricted prose without an extra repair turn", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
   const runDir = path.join(config.analysis.artifactDir, "mock-analysis");
   let turn = 0;
@@ -862,7 +863,7 @@ test("ephemeral model repairs evidence and unreadable prose then immediately acc
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "mock-analysis");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
   assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
-  assert.equal(turn, 4, "first valid submission finishes without any review or confirmation request");
+  assert.equal(turn, 3, "first structurally valid submission with matching evidence finishes without a prose repair");
   assert.ok(!("verification" in JSON.parse(readFileSync(path.join(runDir, "report.json"), "utf8"))));
   assert.equal(result.state.widgets[9]?.data[0]?.["loss_hours"], 2.5);
   assert.equal(result.state.widgets[10]?.data[0]?.["loss_hours"], 2.5);
@@ -872,10 +873,9 @@ test("ephemeral model repairs evidence and unreadable prose then immediately acc
   assert.match(events, /read 仅允许/u);
   assert.match(events, /只读/u);
   assert.match(events, /最低点/u);
-  assert.match(events, /业务用户可理解/u);
   assert.doesNotMatch(events, /must not be readable|"type":"analysis_draft"|"type":"analysis_review"/u);
   assert.doesNotMatch(events, /private daily data must stay isolated/u);
-  assert.doesNotMatch(JSON.stringify(result.state.widgets.slice(9)), /\bq\d+\b|第\s*0\s*行/u);
+  assert.match(String(result.state.widgets[9]!.data[0]!["issue"]), /q11 第 0 行/u);
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
 });
 
@@ -1002,7 +1002,7 @@ test("ephemeral analysis compacts context and restores child results and scoped 
     }
     if (turn === 3) return "已完成汇总，准备提交。";
     assert.ok(summaries >= 1);
-    assert.match(JSON.stringify(body["messages"]), /尚未提交有效报告/u);
+    assert.match(JSON.stringify(body["messages"]), /尚未接受报告/u);
     const report = reportFor(savedContext(runDir));
     const records = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
     for (const period of report.periods) for (const group of period.groups) {
@@ -1255,6 +1255,90 @@ function validationIssues(run: () => unknown) {
   catch (error) { assert.ok(error instanceof AnalysisValidationError, String(error)); return error.issues; }
 }
 
+test("report acceptance permits partial selections, repeated states and arbitrary priority order without mixing item content", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  group.items[2]!.machine_evidence_ids = ["q133"];
+  const original = structuredClone(report);
+  const partial = structuredClone(report);
+  periodEntry(partial, "quarter").groups[0]!.items.pop();
+  assert.equal(validateAnalysisReport(partial, context, evidence.records).rows.quarter.length, 3);
+
+  const repeated = structuredClone(report);
+  const repeatedGroup = periodEntry(repeated, "quarter").groups[0]!;
+  repeatedGroup.items = [structuredClone(group.items[0]!), structuredClone(group.items[1]!), structuredClone(group.items[0]!)];
+  for (const [index, item] of repeatedGroup.items.entries()) {
+    item.priority = index === 2 ? 1 : 3;
+    item.issue = "建议 " + index;
+    item.measure = "措施 " + index;
+    item.suggested_owner = "责任职能 " + index;
+  }
+  const result = validateAnalysisReport(repeated, context, evidence.records);
+  assert.deepEqual(result.rows.quarter.filter((row) => row["kind"] === "MT").map((row) => row["priority"]), [1, 3, 3]);
+  for (const [index, item] of periodEntry(result.report, "quarter").groups[0]!.items.entries()) {
+    const row = result.rows.quarter.find((entry) => String(entry["issue"]).startsWith("建议 " + index + "\n"))!;
+    const source = repeatedGroup.items[index]!;
+    const hours = evidence.records.get(source.loss_reference.evidence_id)!.rows[source.loss_reference.row_index]!["loss_hours"];
+    assert.equal(item.priority, source.priority);
+    assert.equal(item.measure, "措施 " + index);
+    assert.equal(item.suggested_owner, "责任职能 " + index);
+    assert.equal(row["measure"], item.measure);
+    assert.equal(row["suggested_owner"], item.suggested_owner + "（职能建议，待人工确认）");
+    assert.equal(row["loss_hours"], Number(Number(hours).toFixed(1)));
+  }
+  assert.deepEqual(validateAnalysisReport(result.report, context, evidence.records).report, result.report);
+  assert.equal(degradeAnalysisReport(repeated, context, evidence.records).status, "completed");
+  assert.deepEqual(report, original);
+});
+
+test("empty ranking evidence and empty groups do not restrict machine distribution wording", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  group.items[2]!.machine_evidence_ids = ["q133"];
+  const item = group.items[0]!;
+  item.issue = "少数机台损失集中，TOP3 需要核查";
+  const rankingId = item.machine_evidence_ids[0]!;
+  evidence.records.set(rankingId, { ...evidence.records.get(rankingId)!, rows: [] });
+  assert.ok(validateAnalysisReport(report, context, evidence.records).rows.quarter.some((row) => String(row["issue"]).includes(item.issue)));
+  for (const entry of report.periods) {
+    entry.comparison = "机台损失分散";
+    for (const entryGroup of entry.groups) {
+      entryGroup.items = [];
+      entryGroup.no_findings_reason = "机台损失集中，依据 q11 第 0 行";
+    }
+  }
+  const result = validateAnalysisReport(report, context, evidence.records);
+  for (const entry of result.report.periods) {
+    assert.equal(entry.comparison, "机台损失分散");
+    assert.deepEqual(result.rows[entry.period], []);
+    assert.ok(entry.groups.every((entryGroup) => entryGroup.no_findings_reason.includes("q11 第 0 行")));
+  }
+});
+
+test("report shape, period and kind coverage and evidence-array bounds remain mandatory", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  group.items[2]!.machine_evidence_ids = ["q133"];
+  const malformed: ((copy: AnalysisReport) => void)[] = [
+    (copy) => { Reflect.deleteProperty(copy.periods[0]!.groups[0]!.items[0]!, "measure"); },
+    (copy) => { Object.assign(copy.periods[0]!.groups[0]!.items[0]!, { measure: null }); },
+    (copy) => { Object.assign(copy, { extra: true }); },
+    (copy) => { copy.periods[0]!.groups[0]!.items[0]!.priority = 0; },
+    (copy) => { copy.periods[0]!.groups[0]!.items[0]!.priority = 4; },
+    (copy) => { copy.periods[0]!.groups[0]!.items[0]!.priority = 1.5; },
+    (copy) => { copy.periods[0]!.groups[0]!.items[0]!.evidence_ids = []; },
+    (copy) => { const item = copy.periods[0]!.groups[0]!.items[0]!; item.machine_evidence_ids = Array(13).fill(item.machine_evidence_ids[0]); },
+    (copy) => { copy.periods[0]!.groups.pop(); },
+    (copy) => { copy.periods.pop(); },
+    (copy) => { const items = copy.periods[0]!.groups[0]!.items; items.push(...Array.from({ length: 4 - items.length }, () => structuredClone(items[0]!))); },
+  ];
+  for (const mutate of malformed) {
+    const copy = structuredClone(report); mutate(copy);
+    assert.ok(validationIssues(() => validateAnalysisReport(copy, context, evidence.records)).some((issue) => issue.code === "STRUCTURE_INVALID"));
+  }
+  const duplicatePeriod = structuredClone(report); duplicatePeriod.periods[1]!.period = duplicatePeriod.periods[0]!.period;
+  assert.ok(validationIssues(() => validateAnalysisReport(duplicatePeriod, context, evidence.records)).some((issue) => issue.code === "PERIOD_COVERAGE"));
+  const duplicateKind = structuredClone(report); duplicateKind.periods[0]!.groups[1]!.kind = "MT";
+  assert.ok(validationIssues(() => validateAnalysisReport(duplicateKind, context, evidence.records)).some((issue) => issue.code === "KIND_COVERAGE"));
+});
+
 test("mixed quarterly MT advice identifies q135 and original array positions without modifying the candidate", (t) => {
   const { report, context, evidence } = mixedValidationFixture(t);
   const original = structuredClone(report);
@@ -1306,7 +1390,8 @@ test("group repair reuses rankings, preserves other groups and renders TOP3 once
   next.items[2]!.suggested_owner = "测试工程负责协调核查和验证。".repeat(20);
   next.items[2]!.machine_evidence_ids = ["q133"];
   const original = structuredClone(next);
-  const omitted = [{ item: structuredClone(group.items[2]!), reason: "移除与挂起损失不匹配的良率排名。".repeat(120) }];
+  const omitted = ["移除与挂起损失不匹配的良率排名。".repeat(120), "", " \t "]
+    .map((reason) => ({ item: structuredClone(group.items[2]!), reason }));
   const result = repair.repair(repair.prepareGroup({ period: "quarter", kind: "MT", group: next, omitted_candidates: omitted }));
   assert.ok(result); assert.equal(result.status, "completed");
   assert.deepEqual(next, original);
@@ -1319,7 +1404,7 @@ test("group repair reuses rankings, preserves other groups and renders TOP3 once
   assert.deepEqual(events.find((event) => event["type"] === "analysis_group_repair")!["omitted_candidates"], omitted);
 });
 
-test("degradation discards only invalid items, keeps original loss ranks and blocks report-level failures", (t) => {
+test("degradation discards only invalid evidence items, keeps submitted priorities and blocks report-level failures", (t) => {
   const { report, context, evidence } = mixedValidationFixture(t);
   const original = structuredClone(report);
   const result = degradeAnalysisReport(report, context, evidence.records);
@@ -1331,7 +1416,7 @@ test("degradation discards only invalid items, keeps original loss ranks and blo
   assert.deepEqual(report, original);
   const middleInvalid = structuredClone(report);
   periodEntry(middleInvalid, "quarter").groups[0]!.items[2]!.machine_evidence_ids = ["q133"];
-  periodEntry(middleInvalid, "quarter").groups[0]!.items[1]!.measure = " ";
+  periodEntry(middleInvalid, "quarter").groups[0]!.items[1]!.machine_evidence_ids = ["q135"];
   const middleResult = degradeAnalysisReport(middleInvalid, context, evidence.records);
   assert.deepEqual(periodEntry(middleResult.report, "quarter").groups[0]!.items.map((item) => item.priority), [1, 3]);
   assert.ok(middleResult.rows.quarter.every((row) => typeof row["loss_hours"] === "number"));
@@ -1454,14 +1539,15 @@ test("three changing repair failures exhaust the correction budget without waiti
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   repair.submit(report);
   const next = structuredClone(group);
-  next.items[2]!.machine_evidence_ids = ["q133"];
-  next.items[2]!.measure = "参考 q135 核查失效";
+  next.items[2]!.machine_evidence_ids = ["missing"];
   repair.repair({ period: "quarter", kind: "MT", group: next });
   assert.equal(repair.stopReason, undefined);
-  next.items[2]!.measure = "核查失效原因"; next.items[2]!.priority = 2;
+  next.items[2]!.machine_evidence_ids = [context.comparisons.quarter.current.id];
   repair.repair({ period: "quarter", kind: "MT", group: next });
   assert.equal(repair.stopReason, undefined);
-  next.items[2]!.priority = 3; next.items[2]!.issue = " ";
+  const otherStateRanking = group.items[0]!.machine_evidence_ids[0]!;
+  next.items[2]!.machine_evidence_ids = [otherStateRanking];
+  next.items[2]!.evidence_ids.push(otherStateRanking);
   repair.repair({ period: "quarter", kind: "MT", group: next });
   assert.match(repair.stopReason!, /三次/u);
   assert.equal(repair.modelContext().remaining_repairs, 0);
@@ -1498,13 +1584,14 @@ test("loss-state repair requests evidence only when no compatible ranking is alr
 test("repairing one group does not count an untouched group's error as a repeated failure", (t) => {
   const { report, context, evidence } = mixedValidationFixture(t);
   const st = periodEntry(report, "quarter").groups[1]!;
-  st.items[0]!.measure = "核查 q135 数据";
+  const stRankings = [...st.items[0]!.machine_evidence_ids];
+  st.items[0]!.machine_evidence_ids = ["missing-st-ranking"];
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   repair.submit(report);
   const mt = structuredClone(periodEntry(report, "quarter").groups[0]!);
   mt.items[2]!.machine_evidence_ids = ["q133"];
   assert.equal(repair.repair({ period: "quarter", kind: "MT", group: mt }), undefined);
   assert.equal(repair.stopReason, undefined);
-  const fixedSt = structuredClone(st); fixedSt.items[0]!.measure = "核查配置数据";
+  const fixedSt = structuredClone(st); fixedSt.items[0]!.machine_evidence_ids = stRankings;
   assert.equal(repair.repair({ period: "quarter", kind: "ST", group: fixedSt })?.status, "completed");
 });

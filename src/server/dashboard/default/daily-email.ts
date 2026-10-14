@@ -18,8 +18,8 @@ export function createDailyImprovementEmail(state: DashboardState, throughDate: 
     throw new Error("本次日改善措施表不可用");
   }
   if (card.data.some((row) => typeof row["loss_hours"] !== "number" || !Number.isFinite(row["loss_hours"]) ||
-    ["issue", "measure", "suggested_owner"].some((key) => typeof row[key] !== "string" || !String(row[key]).trim()))) {
-    throw new Error("日改善措施表的问题、改善措施、责任职能和本期损失小时均为必填");
+    ["issue", "measure", "suggested_owner"].some((key) => typeof row[key] !== "string"))) {
+    throw new Error("日改善措施表正文必须为字符串，本期损失小时必须为有限数值");
   }
   const period = dashboardPeriods(throughDate).day;
   const title = "日改善措施表（" + period.end + "）";

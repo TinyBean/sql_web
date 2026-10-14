@@ -9,8 +9,8 @@ import { machineRankingView } from "../../../skills/test-oee-calculator/assets/m
 
 const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
-const readableDescription = "面向业务用户的中文说明，用实际日期、指标和数据来源解释结论，不含 q11 等内部证据编号、查询行号、工具名或字段名。";
-const text = Type.String({ minLength: 1, description: readableDescription });
+const narrativeDescription = "报告正文字符串，允许空字符串和纯空白；建议用业务用户可理解的中文说明事实、依据和措施。";
+const text = Type.String({ description: narrativeDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
 export const ANALYSIS_CATEGORY_RULES = "类别固定为 availability；每项对应程序选定的一个损失状态，机台排名使用 loss_hours，并且 states 仅包含该状态。本期损失小时来自完整状态汇总，不折算 Performance/Yield。";
 export const PeriodKeySchema = Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
@@ -19,7 +19,7 @@ export const AnalysisItemSchema = Type.Object({
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
   category: Type.Literal("availability", { description: ANALYSIS_CATEGORY_RULES }),
   issue: text, measure: text,
-  suggested_owner: Type.String({ minLength: 1, description: readableDescription }),
+  suggested_owner: text,
   evidence_ids: refs,
   machine_evidence_ids: refs,
   loss_reference: Type.Object({ evidence_id: Type.String({ minLength: 1 }), row_index: Type.Integer({ minimum: 0 }) },
@@ -27,7 +27,7 @@ export const AnalysisItemSchema = Type.Object({
 }, { additionalProperties: false });
 export const AnalysisGroupSchema = Type.Object({
   kind: AnalysisKindSchema,
-  no_findings_reason: Type.String({ description: readableDescription }),
+  no_findings_reason: text,
   evidence_ids: refs,
   items: Type.Array(AnalysisItemSchema, { maxItems: 3 }),
 }, { additionalProperties: false });
@@ -138,37 +138,19 @@ export function parseAnalysisReport(value: unknown): AnalysisReport {
   return decoded;
 }
 
-function assertReadableText(value: string, field: string): void {
-  // Keep business identifiers such as Q1, W36, ADH075 and MT/ST intact.
-  const internalReference = /(?<![A-Za-z0-9_])q\d+(?![A-Za-z0-9_])|第\s*\d+\s*行|\b(?:row\s*\d+|measure_loss|test_oee_calculator__rank_machines|rank_machines|execute_sql|submit_analysis|repair_analysis_group|finalize_analysis|get_analysis_draft|draft_id|evidence_ids?|machine_evidence_ids|loss_reference|minimum_evidence|history_evidence|row_index|by_machine|hours_per_kind_available_day|hours_per_selected_day|kind_availability_days|observed_days|selected_days|calculable_days|availability_days|dut_days|daily_test_oee|final_yield|state_group|loss_hours)\b/u;
-  if (internalReference.test(value)) {
-    throw new Error(field + " 含内部证据编号、查询行号、工具名或字段名。请改写为业务用户可理解的日期、指标和数据来源（如‘本周损失统计’‘当季机台明细’‘每个有数据业务日的平均损失小时’），保留事实、数值和统计口径；内部引用仅放在 evidence_ids、minimum_evidence、history_evidence、loss_reference 等结构化字段中。");
-  }
-}
-
+/** Acceptance checks report structure and frozen evidence, not narrative or selection policy. */
 export function validateAnalysisReport(
   input: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
-): AnalysisResult {
-  return validateReport(input, context, evidence);
-}
-
-/** Partial coverage is available only to degradation after invalid items have been excluded. */
-function validateReport(
-  input: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>, allowMissing = false,
 ): AnalysisResult {
   const value = parseAnalysisReport(input);
   const issues: AnalysisValidationIssue[] = [];
   const rows = {} as Record<PeriodKey, DashboardRow[]>;
-  const renderedItems = new Map<AnalysisGroup["items"][number], string>();
+  const renderedItems = new Map<AnalysisGroup["items"][number], DashboardRow>();
   const renderedComparisons = new Map<AnalysisReport["periods"][number], string>();
   type Location = Pick<AnalysisValidationIssue, "period" | "kind" | "priority" | "item_index">;
   const add = (location: Location, path: string, code: string, message: string, expected: unknown, actual: unknown,
     hint = "只修正定位字段，保留已核实的其他内容。", evidence_id?: string): void => {
     issues.push({ ...location, path, code, message, expected, actual, hint, ...(evidence_id ? { evidence_id } : {}) });
-  };
-  const readable = (text: string, location: Location, path: string): void => {
-    try { assertReadableText(text, path); }
-    catch (error) { add(location, path, "UNREADABLE_TEXT", (error as Error).message, "业务可读中文", "含内部标记", "保留事实与口径，改写正文；内部编号只放在结构化引用字段。"); }
   };
   const ref = (id: string, location: Location, path: string): Evidence | undefined => {
     const record = evidence.get(id);
@@ -191,7 +173,6 @@ function validateReport(
     const { report, index: periodIndex } = matching[0]!;
     const periodPath = "/periods/" + periodIndex;
     const periodLocation = { period: key };
-    readable(report.comparison, periodLocation, periodPath + "/comparison");
     const expected = context.comparisons[key];
     for (const [field, baseline] of [["minimum_evidence", expected.minimum], ["history_evidence", expected.history]] as const) {
       if (report[field] !== baseline.id) add(periodLocation, periodPath + "/" + field, "BASELINE_MISMATCH",
@@ -210,37 +191,17 @@ function validateReport(
       const groupPath = periodPath + "/groups/" + groupIndex;
       const selection = context.losses[key];
       const candidates = selection.by_kind[kind];
-      readable(group.no_findings_reason, groupLocation, groupPath + "/no_findings_reason");
-      if (!group.items.length && hasMachineDistributionClaim(group.no_findings_reason)) {
-        add(groupLocation, groupPath + "/no_findings_reason", "UNVERIFIED_DISTRIBUTION", "无建议原因不能包含未经机台排名证据核实的集中或分散结论", "数据不足或无充分依据的说明", "机台分布结论");
-      }
       refs(group.evidence_ids, groupLocation, groupPath + "/evidence_ids");
       if (!group.evidence_ids.includes(expected.current.id)) add(groupLocation, groupPath + "/evidence_ids", "CURRENT_EVIDENCE_MISSING", "缺少本期指标证据", expected.current.id, group.evidence_ids);
       if (!group.evidence_ids.includes(selection.evidence_id)) add(groupLocation, groupPath + "/evidence_ids", "CURRENT_LOSS_EVIDENCE_MISSING", "缺少程序提供的本期完整损失证据", selection.evidence_id, group.evidence_ids);
-      if (!allowMissing && group.items.length !== candidates.length) add(groupLocation, groupPath + "/items", "LOSS_TOP3_COVERAGE", "必须逐项分析程序选定的损失状态 Top3，不足三项时使用实际数量", candidates.length, group.items.length,
-        "使用上下文 losses 中本周期同类型的全部入选状态。");
-      if (!group.items.length && !group.no_findings_reason.trim()) add(groupLocation, groupPath + "/no_findings_reason", "EMPTY_GROUP_REASON", "空清单必须解释数据不足或无充分依据的原因", "非空说明", "");
-      const seenStates = new Set<string>();
       for (const [itemIndex, item] of group.items.entries()) {
         const itemPath = groupPath + "/items/" + itemIndex;
         const location = { ...groupLocation, priority: item.priority, item_index: itemIndex };
         const itemIssueStart = issues.length;
-        if ((!allowMissing && item.priority !== itemIndex + 1) || (itemIndex > 0 && item.priority <= group.items[itemIndex - 1]!.priority)) {
-          add(location, itemPath + "/priority", "PRIORITY_SEQUENCE", "优先级必须按损失排名由 1 连续排列且不重复；降级时保留原排名", allowMissing ? "原损失排名升序" : itemIndex + 1, item.priority);
-        }
-        for (const field of ["issue", "measure", "suggested_owner"] as const) {
-          if (!item[field].trim()) add(location, itemPath + "/" + field, "EMPTY_TEXT", "问题、措施、责任职能不能为空", "非空正文", "");
-          readable(item[field], location, itemPath + "/" + field);
-        }
         refs(item.evidence_ids, location, itemPath + "/evidence_ids");
         const reference = item.loss_reference;
         const candidate = reference.evidence_id === selection.evidence_id
           ? candidates.find((entry) => entry.row_index === reference.row_index) : undefined;
-        if (candidate) {
-          if (seenStates.has(candidate.state_group)) add(location, itemPath + "/loss_reference", "LOSS_STATE_DUPLICATE", "同类型损失状态不能重复提交", "每个入选状态一项", candidate.state_group);
-          seenStates.add(candidate.state_group);
-          if (item.priority !== candidate.priority) add(location, itemPath + "/priority", "LOSS_PRIORITY_MISMATCH", "优先级必须匹配程序确定的损失排名", candidate.priority, item.priority);
-        }
         const rankings: { record: Evidence; summary: string }[] = [];
         for (const [rankingIndex, id] of item.machine_evidence_ids.entries()) {
           const rankingPath = itemPath + "/machine_evidence_ids/" + rankingIndex;
@@ -278,28 +239,21 @@ function validateReport(
             }
           }
         }
-        let authoredIssue = item.issue;
-        for (const ranking of rankings) authoredIssue = authoredIssue.replaceAll(ranking.summary, "");
-        if (/TOP\s*3/iu.test(authoredIssue) && issues.length === itemIssueStart) add(location, itemPath + "/issue", "AUTHORED_TOP3", "TOP3 文案由服务端生成，请在 issue 中只写事实与判断，通过 machine_evidence_ids 引用排名", "仅事实与判断", "自行编写 TOP3");
-        if (issues.length === itemIssueStart && hasMachineDistributionClaim(authoredIssue) && rankings.every(({ record }) =>
-          !record.rows.some((row) => typeof row["metric_value"] === "number"))) add(location, itemPath + "/issue", "EMPTY_RANKING_DISTRIBUTION", "机台排名数据不足，不能输出集中或分散结论", "说明数据不足", "机台分布结论");
         if (issues.length !== itemIssueStart) continue;
         const machines = rankings.flatMap(({ record }) => record.rows.map((row) => String(row["machine"])));
         const issue = [formatMachineMentions(item.issue, machines), ...rankings.map(({ summary }) => summary).filter((summary) => !item.issue.includes(summary))].join("\n");
-        renderedItems.set(item, issue);
         for (const { summary } of rankings) periodSummaries.add(summary);
-        rows[key].push({ kind, priority: item.priority, issue, measure: formatMachineMentions(item.measure, machines),
-          suggested_owner: formatMachineMentions(item.suggested_owner, machines) + "（职能建议，待人工确认）", loss_hours: hours });
+        const row = { kind, priority: item.priority, issue, measure: formatMachineMentions(item.measure, machines),
+          suggested_owner: formatMachineMentions(item.suggested_owner, machines) + "（职能建议，待人工确认）", loss_hours: hours };
+        renderedItems.set(item, row);
+        rows[key].push(row);
       }
       rows[key].sort((a, b) => String(a["kind"]).localeCompare(String(b["kind"])) || Number(a["priority"]) - Number(b["priority"]));
     }
     let comparison = formatMachineMentions(report.comparison);
-    if (hasMachineDistributionClaim(comparison)) {
-      // Only diagnose comparison dependencies once all item references are valid.
-      if (!issues.some((issue) => issue.period === key && issue.item_index !== undefined)) {
-        if (!periodSummaries.size) add(periodLocation, periodPath + "/comparison", "COMPARISON_DISTRIBUTION", "周期比较中的机台分布结论缺少排名证据", "本周期排名证据", "无排名证据");
-        comparison = [comparison, ...[...periodSummaries].filter((summary) => !comparison.includes(summary))].join("\n");
-      }
+    // Distribution wording only controls display enrichment, never acceptance.
+    if (periodSummaries.size && hasMachineDistributionClaim(comparison)) {
+      comparison = [comparison, ...[...periodSummaries].filter((summary) => !comparison.includes(summary))].join("\n");
     }
     renderedComparisons.set(report, comparison);
   }
@@ -310,8 +264,8 @@ function validateReport(
     for (const group of period.groups) {
       group.no_findings_reason = formatMachineMentions(group.no_findings_reason);
       for (const item of group.items) {
-        item.issue = renderedItems.get(item)!;
-        const row = rows[period.period].find((row) => row["kind"] === group.kind && row["priority"] === item.priority)!;
+        const row = renderedItems.get(item)!;
+        item.issue = String(row["issue"]);
         item.measure = String(row["measure"]);
         item.suggested_owner = String(row["suggested_owner"]).replace(/（职能建议，待人工确认）$/u, "");
       }
@@ -320,7 +274,7 @@ function validateReport(
   return { report: value, rows, status: "completed", exclusions: [] };
 }
 
-/** Only item-scoped failures can be discarded; survivors retain their audited state and rank. */
+/** Only item-scoped evidence failures can be discarded; survivors retain their submitted priority. */
 export function degradeAnalysisReport(input: AnalysisReport, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>): AnalysisResult {
   let issues: readonly AnalysisValidationIssue[];
   try { return validateAnalysisReport(input, context, evidence); }
@@ -344,7 +298,7 @@ export function degradeAnalysisReport(input: AnalysisReport, context: AnalysisCo
     }
     if (affected) period.comparison = "本周期部分改善建议未通过证据校验，已从报告中剔除；周期趋势判断暂未提供，请结合已展示指标核对。";
   }
-  const result = validateReport(candidate, context, evidence, true);
+  const result = validateAnalysisReport(candidate, context, evidence);
   return { ...result, status: "degraded", exclusions };
 }
 

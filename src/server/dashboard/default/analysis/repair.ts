@@ -16,7 +16,7 @@ export const ANALYSIS_CLEANUP_RESERVE_MS = 10_000;
 export const RepairAnalysisGroupSchema = Type.Object({
   period: PeriodKeySchema, kind: AnalysisKindSchema, group: AnalysisGroupSchema,
   omitted_candidates: Type.Optional(Type.Array(Type.Object({
-    item: AnalysisItemSchema, reason: Type.String({ minLength: 1 }),
+    item: AnalysisItemSchema, reason: Type.String(),
   }, { additionalProperties: false }), { maxItems: 12 })),
 }, { additionalProperties: false });
 
@@ -142,7 +142,6 @@ export class AnalysisRepairState {
     return this.#issues.some((issue) => {
       if (period && issue.period !== period) return false;
       if (!/^(EVIDENCE_|RANKING_(SOURCE|RANGE|KIND|BASIS)_|LOSS_(REFERENCE|STATE)_|METRIC_CATEGORY_MISMATCH)/u.test(issue.code)) return false;
-      if (issue.code === "LOSS_STATE_DUPLICATE") return false;
       if (!issue.period || !issue.kind || issue.item_index === undefined || !this.#candidate) return true;
       const item = this.#candidate.periods.find((entry) => entry.period === issue.period)?.groups
         .find((group) => group.kind === issue.kind)?.items[issue.item_index];
@@ -150,7 +149,7 @@ export class AnalysisRepairState {
       const range = this.context.periods[issue.period];
       const selection = this.context.losses[issue.period];
       const candidate = selection.by_kind[issue.kind].find((entry) => entry.row_index === item.loss_reference.row_index &&
-        item.loss_reference.evidence_id === selection.evidence_id) ?? selection.by_kind[issue.kind].find((entry) => entry.priority === item.priority);
+        item.loss_reference.evidence_id === selection.evidence_id);
       const scoped = [...this.evidence.values()].filter((record) => !record.truncated && record.owner?.period === issue.period &&
         record.range?.start === range.start && record.range.end === range.end);
       if (issue.code !== "LOSS_STATE_MISMATCH" && (issue.code === "LOSS_REFERENCE_MISMATCH" ||

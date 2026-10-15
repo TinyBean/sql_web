@@ -57,6 +57,7 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/dashboard-drag.js", { root: "public", filename: "generated/client/dashboard-drag.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/contracts.js", { root: "public", filename: "generated/shared/contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/dashboard.js", { root: "public", filename: "generated/shared/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
+  ["/shared/number-format.js", { root: "public", filename: "generated/shared/number-format.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown-parser.js", { root: "public", filename: "generated/client/markdown-parser.js", contentType: "text/javascript; charset=utf-8" }],
   ["/markdown.js", { root: "public", filename: "generated/client/markdown.js", contentType: "text/javascript; charset=utf-8" }],
   ["/stream-state.js", { root: "public", filename: "generated/client/stream-state.js", contentType: "text/javascript; charset=utf-8" }],

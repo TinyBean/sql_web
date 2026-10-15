@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { preProcessFile } from "typescript";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import {
@@ -224,6 +225,25 @@ test("serves the app with restrictive security headers", async (t) => {
   const dashboardDragModule = await fetch(`${baseUrl}/dashboard-drag.js`);
   assert.equal(dashboardDragModule.status, 200);
   assert.match(await dashboardDragModule.text(), /export function dashboardDropTarget/u);
+});
+
+test("serves every module imported by the browser entry point", async (t) => {
+  const baseUrl = await createFixture(t);
+  const pending = [new URL("/app.js", baseUrl).href];
+  const visited = new Set<string>();
+  for (const moduleUrl of pending) {
+    if (visited.has(moduleUrl)) continue;
+    visited.add(moduleUrl);
+    const response = await fetch(moduleUrl);
+    assert.equal(response.status, 200, `Browser module failed to load: ${moduleUrl}`);
+    assert.match(response.headers.get("content-type") ?? "", /javascript/u, moduleUrl);
+    const source = await response.text();
+    for (const imported of preProcessFile(source).importedFiles) {
+      const dependency = new URL(imported.fileName, moduleUrl);
+      assert.equal(dependency.origin, baseUrl, "Browser modules must load from the app origin");
+      pending.push(dependency.href);
+    }
+  }
 });
 
 test("exposes health, schema, and session endpoints", async (t) => {

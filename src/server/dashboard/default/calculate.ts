@@ -19,7 +19,7 @@ function average(rows: readonly DashboardRow[], column: string): number | null {
 }
 
 function percentage(value: number | null): number | null {
-  return value === null ? null : Math.round(value * 10_000) / 100;
+  return value === null ? null : value * 100;
 }
 
 function groupPeriods(rows: readonly DashboardRow[], grain: Grain): PeriodData[] {

@@ -25,7 +25,7 @@ export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): D
       ...(!effective ? { avg_performance_percent: null } : {}) }],
     encoding: { value, label, description: WAITING, gauges },
     format: { unit: "%", precision: 2 },
-    metricDefinition: `${kind} ${label} = AVG(${kind} 日 ${label})×100;日 ${label} = ${availability}×Performance (DUT-On)×Performance (Test Time)×Yield。` +
+    metricDefinition: `${kind} ${label} = AVG(${kind} 日 ${label})x100;日 ${label} = ${availability}xPerformance (DUT-On)xPerformance (Test Time)xYield。` +
       (effective ? "Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))。" : "") +
       `五项指标分别对该类型 ${label} 可计算日等权平均;OEE 不由组成项的平均值再次相乘。所有指标先排除大写 Q/E 前缀 LOT。Availability 和 Idle 使用过滤后全部状态秒数作分母;仅 Yield 再筛选 P/M/R/A/F/L 前缀 LOT。沿用 PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
   };
@@ -70,7 +70,7 @@ export function createMachineExtremesTemplate(): DashboardTableWidget {
       { key: "oee_percent", label: "周期OEE%" }, { key: "top10_machines", label: "TOP10 机台(机台 OEE 最低)" },
     ] },
     format: { unit: "%", precision: 2 },
-    metricDefinition: "与 OEE 极值明细(周/月/季)逐项对应;周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总:运行秒数÷整期全部状态秒数×SUM(IN_QTY)÷SUM(DUT_NUM)×[SUM(同日同类型截尾标准秒数×机台TD次数)÷SUM(机台实际测试秒数)]×SUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)×100;所有数据先排除大写 Q/E 前缀 LOT;两项 Performance 保留其余 LOT,仅 Yield 再应用 P/M/R/A/F/L 白名单;标准秒数来自当日该类型过滤后全部合格 DUT,含无匹配 Availability 的记录;MT/ST 合并为一台,按 Availability 累计时长标注主要类型,并列取 MT。按未舍入机台 OEE 升序取最低 10 台,并列按机台编号;不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计,缺日不会补零。",
+    metricDefinition: "与 OEE 极值明细(周/月/季)逐项对应;周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总:运行秒数÷整期全部状态秒数xSUM(IN_QTY)÷SUM(DUT_NUM)x[SUM(同日同类型截尾标准秒数x机台TD次数)÷SUM(机台实际测试秒数)]xSUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)x100;所有数据先排除大写 Q/E 前缀 LOT;两项 Performance 保留其余 LOT,仅 Yield 再应用 P/M/R/A/F/L 白名单;标准秒数来自当日该类型过滤后全部合格 DUT,含无匹配 Availability 的记录;MT/ST 合并为一台,按 Availability 累计时长标注主要类型,并列取 MT。按未舍入机台 OEE 升序取最低 10 台,并列按机台编号;不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计,缺日不会补零。",
   };
 }
 
@@ -82,7 +82,7 @@ export function createAnalysisTemplate(key: PeriodKey): DashboardTableWidget {
       { key: "kind", label: "类型" }, { key: "priority", label: "优先级" }, { key: "issue", label: "问题(损失源)" },
       { key: "measure", label: "改善措施" }, { key: "suggested_owner", label: "建议责任人" }, { key: "loss_hours", label: "本期损失小时" },
     ] },
-    format: { unit: "", precision: 1 },
+    format: { unit: "", precision: 2 },
     metricDefinition: "MT/ST 分别按本期完整损失状态累计小时降序取 Top3,按未舍入小时排名,并列按状态名称排序;不足三项展示实际数量。每状态单独分析问题、措施与建议责任职能;本期损失小时直接引用该状态实测汇总且必填,缺失不补零。问题内的机台 TOP3 对应同周期、同类型、同状态的损失排名。",
   };
 }

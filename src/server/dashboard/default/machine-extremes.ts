@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { DashboardRow, DashboardTableWidget } from "../../../shared/dashboard.ts";
+import { formatDisplayNumber } from "../../../shared/number-format.ts";
 import { addDays, assertDate, type DatePeriod } from "../../database/business-dates.ts";
 import { machinePeriodSql } from "../../skills/test-oee-calculator/assets/machine-metrics.ts";
 import { machineLabel, machinePlatform } from "../../skills/test-oee-calculator/assets/machine-platforms.ts";
@@ -66,7 +67,7 @@ export function buildMachineExtremesTable(
         grain, point_type: pointType, period_label: row["period_label"] ?? null,
         oee_percent: row["oee_percent"] ?? null,
         top10_machines: top.length ? top.map((machine, index) =>
-          `${index + 1}.${machineLabel(machine.machine)}(${machine.kind} ${machine.oee!.toFixed(2)}%)`).join("、") : null,
+          `${index + 1}.${machineLabel(machine.machine)}(${machine.kind} ${formatDisplayNumber(machine.oee!)}%)`).join("、") : null,
       });
       for (const machine of top) {
         if (!machinePlatform(machine.machine)) missingPlatforms.add(machine.machine);

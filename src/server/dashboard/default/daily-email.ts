@@ -1,4 +1,5 @@
 import type { DashboardState } from "../../../shared/dashboard.ts";
+import { formatDisplayNumber } from "../../../shared/number-format.ts";
 import type { NotificationEmail } from "../../notifications.ts";
 import { dashboardPeriods } from "./periods.ts";
 import { analysisExclusionSummary, type AnalysisPublication } from "./analysis/report.ts";
@@ -19,13 +20,13 @@ export function createDailyImprovementEmail(state: DashboardState, throughDate: 
   }
   if (card.data.some((row) => typeof row["loss_hours"] !== "number" || !Number.isFinite(row["loss_hours"]) ||
     ["issue", "measure", "suggested_owner"].some((key) => typeof row[key] !== "string"))) {
-    throw new Error("日改善措施表正文必须为字符串，本期损失小时必须为有限数值");
+    throw new Error("日改善措施表正文必须为字符串,本期损失小时必须为有限数值");
   }
   const period = dashboardPeriods(throughDate).day;
-  const title = "日改善措施表（" + period.end + "）";
+  const title = "日改善措施表(" + period.end + ")";
   const description = [
-    "统计业务日：" + period.end,
-    "截止业务日：" + throughDate, card.subtitle,
+    "统计业务日:" + period.end,
+    "截止业务日:" + throughDate, card.subtitle,
   ];
   if (quality?.status === "degraded") description.push(analysisExclusionSummary(quality.exclusions), "仅展示已通过证据校验的日建议。其他周期的建议请查看看板。 ");
   const columns = template.encoding.columns;
@@ -33,10 +34,10 @@ export function createDailyImprovementEmail(state: DashboardState, throughDate: 
   const rows = card.data.map((row) => columns.map(({ key }) => {
     const value = row[key];
     return value === null || value === undefined ? "—" :
-      key === "loss_hours" && typeof value === "number" ? value.toFixed(card.format.precision) : String(value);
+      typeof value === "number" ? formatDisplayNumber(value) : String(value);
   }));
-  const emptyMessage = "本期未生成改善建议，原因见下方提示。";
-  const notes = ["统计口径：" + card.metricDefinition, ...card.warnings.map((warning) => "提示：" + warning)];
+  const emptyMessage = "本期未生成改善建议,原因见下方提示。";
+  const notes = ["统计口径:" + card.metricDefinition, ...card.warnings.map((warning) => "提示:" + warning)];
   return {
     subject: (quality?.status === "degraded" ? "【报告降级】" : "") + title + " · 截止 " + throughDate,
     text: [title, ...description, "", headers.join("\t"),

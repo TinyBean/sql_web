@@ -13,10 +13,10 @@ test("daily email preserves the six columns and published values, without includ
       data: widget.data.map((row) => ({ ...row, measure: '检查 <script>bad()</script> & "参数"\n核实原因' })) };
     return { ...widget, data: [{ issue: "不得出现在日表中的周月季信息" }] };
   }) }, "2026-09-14");
-  assert.equal(email.subject, "日改善措施表（2026-09-14） · 截止 2026-09-14");
+  assert.equal(email.subject, "日改善措施表(2026-09-14) · 截止 2026-09-14");
   for (const body of [email.text, email.html!]) {
-    for (const text of ["统计业务日：2026-09-14", "截止业务日：2026-09-14", "MT", "ST", "换线时间偏长",
-      "测试等待偏长", "2.5", "1.2", "职能建议，待人工确认", "数据缺失：仅反映已有数据", "统计口径："]) {
+    for (const text of ["统计业务日:2026-09-14", "截止业务日:2026-09-14", "MT", "ST", "换线时间偏长",
+      "测试等待偏长", "2.50", "1.20", "职能建议，待人工确认", "数据缺失：仅反映已有数据", "统计口径:"]) {
       assert.ok(body.includes(text), text);
     }
     assert.doesNotMatch(body, /不得出现在日表中的周月季信息/u);
@@ -39,8 +39,23 @@ test("daily email rejects invalid hours and narrative types, and preserves measu
   const email = createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
     ...widget, data: widget.data.map((row) => ({ ...row, loss_hours: 0 })),
   }) }, "2026-09-14");
-  assert.match(email.text, /\t0\.0/u);
+  assert.match(email.text, /\t0(?:\n|$)/u);
   assert.doesNotMatch(email.text, /—/u);
+});
+
+test("daily email uses the global display rule with legacy precision and retains source values", () => {
+  const state = dailyDashboard();
+  const values = [1.005, 1.2, 1.999, -1.005, -0.004, 12];
+  const expected = ["1.01", "1.20", "2.00", "-1.01", "0.00", "12"];
+  const source = { ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
+    ...widget, format: { unit: "", precision: 0 },
+    data: values.map((loss_hours) => ({ ...widget.data[0], loss_hours })),
+  }) };
+  const original = structuredClone(source);
+  const email = createDailyImprovementEmail(source, "2026-09-14");
+  assert.deepEqual(email.text.split("\n").filter((line) => line.startsWith("MT\t")).map((line) => line.split("\t").at(-1)), expected);
+  for (const value of expected) assert.ok(email.html!.includes("<td>" + value + "</td>"), value);
+  assert.deepEqual(source, original);
 });
 
 test("daily email accepts empty, whitespace and unrestricted narrative strings", () => {
@@ -59,9 +74,9 @@ test("empty suggestions retain both kinds' explanations", () => {
   const email = createDailyImprovementEmail({ ...state, widgets: state.widgets.map((widget) => widget.id !== dayId ? widget : {
     ...widget, data: [], warnings: [...widget.warnings, "MT 未生成建议：无充分依据", "ST 未生成建议：无可计算指标"],
   }) }, "2026-01-05");
-  assert.equal(email.subject, "日改善措施表（2026-01-05） · 截止 2026-01-05");
+  assert.equal(email.subject, "日改善措施表(2026-01-05) · 截止 2026-01-05");
   for (const body of [email.text, email.html!]) {
-    assert.match(body, /统计业务日：2026-01-05/u);
+    assert.match(body, /统计业务日:2026-01-05/u);
     assert.match(body, /本期未生成改善建议/u);
     assert.match(body, /MT 未生成建议：无充分依据/u);
     assert.match(body, /ST 未生成建议：无可计算指标/u);

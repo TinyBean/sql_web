@@ -16,6 +16,7 @@ import { SubagentRunner, type SubagentResult } from "../../../agent/subagent.ts"
 import { createAnalysisTools, createAnalysisSkillOptions } from "./tools.ts";
 import { AnalysisRepairState, RepairAnalysisGroupSchema } from "./repair.ts";
 import { createAnalysisTemplate } from "../template.ts";
+import { NUMBER_DISPLAY_RULES } from "../../../agent/prompts.ts";
 
 export { MAX_ANALYSIS_TOOL_CALLS } from "./budget.ts";
 
@@ -108,6 +109,7 @@ means 为原始比率,1 表示 100%,不截断上下界。daily_test_oee 是该�
 覆盖不同的期间宜比较日均或同覆盖值;日均值写明实际分母,避免直接比较覆盖不同的损失总小时。
 
 【业务写作:建议,不参与验收】
+${NUMBER_DISPLAY_RULES}
 建议完整分析入选状态、每状态一条、沿用损失排名;不要只调查固定状态或套用固定措施、责任人映射。Performance/Yield 可作调查线索,建议仍对应入选损失状态。
 comparison 简述相对最低点和历史的持续、改善或新出现情况及覆盖差异;issue 写关键事实、数值与判断,推测标注“待验证”;measure 写具体动作与验证指标;suggested_owner 给建议责任职能,未提供人员资料时避免姓名。空组建议说明原因。
 面向业务用户用简洁中文,来源写实际日期和内容,尽量把内部编号、行号、工具名和字段名留在结构化引用中。正文可保留 MT/ST、OEE、Q1、W36;状态和组成项首次出现宜加中文解释。

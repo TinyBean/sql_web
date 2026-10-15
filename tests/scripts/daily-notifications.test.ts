@@ -67,7 +67,7 @@ test("each successful run publishes before sending, including repeated dates and
   assert.deepEqual(calls, ["analyze", "publish", "send", "analyze", "publish", "send"]);
   assert.equal(smtp.messages.length, 2);
   assert.match(decodedBody(smtp.messages[0]!, "text/plain"), /换线时间偏长/u);
-  assert.match(decodedBody(smtp.messages[0]!, "text/html"), /<td>1\.2<\/td>/u);
+  assert.match(decodedBody(smtp.messages[0]!, "text/html"), /<td>1\.20<\/td>/u);
   assert.doesNotMatch(decodedBody(smtp.messages[0]!, "text/html"), /<td>—<\/td>/u);
   assert.doesNotMatch(JSON.stringify(f.logs), /Cheng\.Wu|missing@example|换线时间/u);
 

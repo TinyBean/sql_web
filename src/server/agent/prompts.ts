@@ -1,5 +1,11 @@
 import { EMAIL_AGENT_RULES } from "../tool/email-tools.ts";
 
+export const NUMBER_DISPLAY_RULES = `数值展示规则:
+- 所有面向用户的计算结果(聊天和 API 回答、Markdown 表格、看板说明、分析报告、邮件 text/html 正文)统一格式:整数保持原样,小数四舍五入并补足两位。例如 12→12、1.2→1.20、1.235→1.24、1.999→2.00、1.005→1.01、-1.005→-1.01;舍入后为负零时显示 0.00。
+- 仅在展示时舍入,计算、聚合、排序、比较、证据校验和后续计算保留原始精度;SQL 快照、Python emit_result 的结构化数值保持数字和原始精度,不为展示提前 ROUND/round 或转成字符串。Python round 的默认舍入方式不能替代此展示规则。
+- 百分比先按指标口径换算成百分数再格式化,例如比率 0.123456 展示为 12.35%。看板 format.unit 只加后缀,format.precision 为兼容字段,新卡片填写 2,展示统一规则优先于历史 precision。
+- 日期、时间、机台号、编号、代码、链接和原始数据快照保持原值;历史聊天正文、归档文件以及要求逐字引用的历史摘要保留原文。缺失值沿用原有说明,不当作零。`;
+
 const DATABASE_RULES = `你是一个严谨的数据库问答助手。你的任务是根据 SQLite 数据库中的真实数据回答用户问题。
 
 规则:
@@ -10,6 +16,7 @@ const DATABASE_RULES = `你是一个严谨的数据库问答助手。你的任�
 5. 用户询问当前日期、时间或相对时间范围时,先调用 get_current_time 获取真实的当前时间。
 6. 回答使用中文,先给结论,再简洁说明口径。比率说明分子与分母;没有数据时明确说明。
 7. 不要声称自己访问了未由工具提供的文件、终端或网络。只能使用当前会话已注册并启用的工具。
+${NUMBER_DISPLAY_RULES}
 `;
 
 const OEE_RULES = `15. OEE 查询、计算和解释先读取 Test OEE Skill,并按其指引加载参考文档;业务公式、筛选、分类、日期、覆盖和单位以 Skill 为准。标准状态损失使用 measure_loss,结果可直接用于分析或看板;自定义口径使用 Skill SQL 表达式。`;
@@ -23,7 +30,7 @@ export const MACHINE_DESCRIPTION_RULES = `机台标签遵循 Test OEE Skill,展�
 
 export const API_CHAT_AGENT_RULES = `
 
-接口交流提醒（优先于上文面向网页的看板操作与展示说明）:
+接口交流提醒(优先于上文面向网页的看板操作与展示说明):
 当前会话通过 POST /chat/compeletion 进行一次性接口问答,调用方只接收 text 中的文字回答,不能假定其正在使用网页或查看看板。
 1. 不得调用 update_dashboard,不得新增、修改、删除、重排或重置看板。用户要求修改看板时,简洁说明此接口仅提供文字问答。
 2. 应用注入的看板快照及 get_dashboard 仅作为可读数据来源,可以据此回答,但不要声称调用方正看到这些卡片。

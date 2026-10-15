@@ -1,6 +1,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
+import { formatDisplayNumber } from "../../../../shared/number-format.ts";
 import type { MachineRow as DashboardRow, MachineDatePeriod as DatePeriod, RankingSnapshot as DataSnapshotDescriptor, TestOeeRuntime } from "./runtime.ts";
 import { machinePeriodSql } from "./machine-metrics.ts";
 import { machineLabel, machinePlatform, MACHINE_PLATFORM_VERSION } from "./machine-platforms.ts";
@@ -71,24 +72,24 @@ export function machineRankingView(record: Pick<MachineRankingMeasurement, "rows
   }));
   const top3Share = sharesValid ? top3.reduce((sum, entry) => sum + entry.value, 0) / total! * 100 : null;
   const missingPlatforms = record.rows.filter((row) => row["platform"] === null).map((row) => String(row["machine"]));
-  const label = metricNames[record.scope.metric] + (loss && record.scope.states.length ? "（" + record.scope.states.join("、") + "）" : "");
+  const label = metricNames[record.scope.metric] + (loss && record.scope.states.length ? "(" + record.scope.states.join("、") + ")" : "");
   const coverage = (entry: typeof top3[number]): string => {
-    const available = typeof entry.availability_days === "number" ? "，状态数据覆盖 " + entry.availability_days + "/" + entry.selected_days + " 天" : "";
-    const dut = !loss && typeof entry.dut_days === "number" ? "，DUT 数据覆盖 " + entry.dut_days + "/" + entry.selected_days + " 天" : "";
+    const available = typeof entry.availability_days === "number" ? ",状态数据覆盖 " + entry.availability_days + "/" + entry.selected_days + " 天" : "";
+    const dut = !loss && typeof entry.dut_days === "number" ? ",DUT 数据覆盖 " + entry.dut_days + "/" + entry.selected_days + " 天" : "";
     return available + dut;
   };
-  const summary = record.scope.kind + " " + record.range.start + " 至 " + record.range.end + " " + label + "：" +
-    (top3.length ? "TOP3（实际 " + top3.length + " 台，可计算 " + candidates.length + "/" + record.rows.length + " 台）" +
-      top3.map((entry) => entry.machine_label + " " + entry.value.toFixed(loss ? 1 : 2) + (loss ? " 小时" : "%") +
-        (entry.share_percent === null ? "" : "（占该项损失 " + entry.share_percent.toFixed(1) + "%）") + coverage(entry)).join("、") +
-      (top3Share === null ? "" : "；TOP3 合计占该项损失 " + top3Share.toFixed(1) + "%") :
-      "机台数据不足，无法生成 TOP3；无匹配记录不代表零损失或完整覆盖") +
+  const summary = record.scope.kind + " " + record.range.start + " 至 " + record.range.end + " " + label + ":" +
+    (top3.length ? "TOP3(实际 " + top3.length + " 台,可计算 " + candidates.length + "/" + record.rows.length + " 台)" +
+      top3.map((entry) => entry.machine_label + " " + formatDisplayNumber(entry.value) + (loss ? " 小时" : "%") +
+        (entry.share_percent === null ? "" : "(占该项损失 " + formatDisplayNumber(entry.share_percent) + "%)") + coverage(entry)).join("、") +
+      (top3Share === null ? "" : ";TOP3 合计占该项损失 " + formatDisplayNumber(top3Share) + "%") :
+      "机台数据不足,无法生成 TOP3;无匹配记录不代表零损失或完整覆盖") +
     (["test_time_performance", "oee", "effective_oee"].includes(record.scope.metric)
-      ? record.scope.basis === "machine_day" ? "；机台天口径（Test Time 1% 截尾、上限 100%）"
-        : record.scope.testTimeRule === "machine_period_1pct" ? "；整期机台口径（Test Time 使用本机台周期同类型 1% 截尾标准、上限 100%）"
-          : "；整期机台口径（Test Time 使用同日同类型 0.2% 截尾标准）"
-      : record.scope.basis === "machine_day" ? "；单业务日机台统计" : "；整期机台汇总") +
-    (missingPlatforms.length ? "；平台映射待维护 " + missingPlatforms.length + " 台" : "");
+      ? record.scope.basis === "machine_day" ? ";机台天口径(Test Time 1% 截尾、上限 100%)"
+        : record.scope.testTimeRule === "machine_period_1pct" ? ";整期机台口径(Test Time 使用本机台周期同类型 1% 截尾标准、上限 100%)"
+          : ";整期机台口径(Test Time 使用同日同类型 0.20% 截尾标准)"
+      : record.scope.basis === "machine_day" ? ";单业务日机台统计" : ";整期机台汇总") +
+    (missingPlatforms.length ? ";平台映射待维护 " + missingPlatforms.length + " 台" : "");
   return { top3, machine_count: candidates.length, observed_machine_count: record.rows.length,
     total_loss_hours: finite(total) ? total : null, top3_share_percent: top3Share,
     missing_platforms: missingPlatforms, summary };
@@ -146,7 +147,7 @@ export function rankMachines(
       GROUP BY f.machine, f.kind, f.state_group ORDER BY f.kind, f.machine, f.state_group`;
     } else sql = machinePeriodSql(range, true);
     const data = runtime.querySnapshot("rank-source-" + range.start.replaceAll("-", "") + "-" + range.end.replaceAll("-", ""), sql, signal);
-    if (data.truncated) throw new Error("机台排名源数据超过快照上限，请缩小日期范围");
+    if (data.truncated) throw new Error("机台排名源数据超过快照上限,请缩小日期范围");
     source = { sql, rows: data.rows };
     cache?.set(key, source);
   }
@@ -179,7 +180,7 @@ export function createRankMachinesTool(
 ) {
   return defineTool({
     name: RANK_MACHINES_LOCAL_TOOL_NAME, label: "查询问题指标机台 TOP3", executionMode: "sequential",
-    description: "查询同业务日范围、MT/ST 和问题指标的机台 TOP3，保存完整候选快照。loss_hours 按损失小时降序，其余指标按数值升序；states 仅用于 loss_hours。value/metric_value 为百分数值，损失为小时；NULL 不排名。问题分析逐字引用 summary。公式、占比分母、覆盖和历史口径见 Skill 业务规则。",
+    description: "查询同业务日范围、MT/ST 和问题指标的机台 TOP3,保存完整候选快照。loss_hours 按损失小时降序,其余指标按数值升序;states 仅用于 loss_hours。value/metric_value 为百分数值,损失为小时;NULL 不排名。问题分析逐字引用 summary。公式、占比分母、覆盖和历史口径见 Skill 业务规则。",
     parameters: rankMachinesParameters,
     async execute(_id, params, signal) {
       signal?.throwIfAborted();

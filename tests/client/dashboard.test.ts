@@ -91,7 +91,7 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
   const formatTooltip = tooltip["formatter"] as (params: unknown) => string;
   assert.equal(formatTooltip([
     { axisValueLabel: "2026-09-08", seriesName: "OEE", value: 1 },
-  ]), "2026-09-08\nOEE  1.0%");
+  ]), "2026-09-08\nOEE  1%");
   const twoWidgets: DashboardState = {
     ...dashboard(1),
     widgets: [

@@ -257,7 +257,7 @@ export function validateAnalysisReport(
               message: "损失小时必须引用程序提供的本期同类型完整状态汇总入选行：" + reasons.join("；"),
               hint: "使用 repair_plan 中的合法损失候选及原始行号，保留其他建议；多个候选需按分析对象选择。" });
             else {
-              hours = Number((row!["loss_hours"] as number).toFixed(1));
+              hours = row!["loss_hours"] as number;
             }
           }
         }

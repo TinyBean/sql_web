@@ -128,7 +128,9 @@ test("loss TOP3 aggregates distinct machines across states, uses all scoped loss
   assert.equal(view.top3_share_percent, 30 / 38 * 100);
   assert.equal(view.top3[0]!.share_percent, 11 / 38 * 100);
   assert.equal(view.top3[0]!.availability_days, 2, "coverage is distinct machine days, not sums of state occurrence days");
-  assert.match(view.summary, /T5773\/ADH001 11.0 小时/u);
+  assert.match(view.summary, /T5773\/ADH001 11 小时/u);
+  assert.match(view.summary, /占该项损失 28\.95%/u);
+  assert.match(view.summary, /TOP3 合计占该项损失 78\.95%/u);
   assert.deepEqual(view.missing_platforms, ["ADH161"]);
   const saved = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(result.snapshot.name).filePath, "utf8"));
   assert.deepEqual(saved.rows, result.rows);
@@ -138,11 +140,25 @@ test("loss TOP3 aggregates distinct machines across states, uses all scoped loss
   assert.deepEqual(stateOnly.top3.map((r) => r.machine), ["ADH002", "ADH003", "ADH161"]);
 });
 
+test("ranking summaries round fractional values without altering structured evidence", () => {
+  const rows = [{ machine: "ADH001", machine_label: "T5773/ADH001", metric_value: 1.005 },
+    { machine: "ADH002", machine_label: "T5773/ADH002", metric_value: 1.2 }];
+  const original = structuredClone(rows);
+  const view = machineRankingView({ rows, range: { start: "2026-01-01", end: "2026-01-03" },
+    scope: { kind: "MT", metric: "loss_hours", states: [], basis: "report_period", platformVersion: "test" } });
+  assert.match(view.summary, /T5773\/ADH001 1\.01 小时/u);
+  assert.match(view.summary, /T5773\/ADH002 1\.20 小时/u);
+  assert.deepEqual(view.top3.map((entry) => entry.value), [1.2, 1.005]);
+  assert.deepEqual(rows, original);
+});
+
 test("empty, zero, NULL and unrounded tie cases retain actual counts and never infer full coverage", (t) => {
   const { a, queries, artifacts } = fixture(t);
   a("ADH001", 1); a("ADH002", 1.00001); a("ADH003", 1); a("ADH004", 0);
   const view = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours" }));
   assert.deepEqual(view.top3.map((r) => r.machine), ["ADH002", "ADH001", "ADH003"]);
+  assert.equal(view.top3[0]!.value, 1.00001);
+  assert.match(view.summary, /T5773\/ADH002 1\.00 小时/u);
   const zero = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["PM"] }));
   assert.equal(zero.machine_count, 0); assert.equal(zero.total_loss_hours, null);
   assert.match(zero.summary, /无匹配记录不代表零损失/u);
@@ -181,7 +197,7 @@ test("single-day ranking uses the period standard, preserves history, and reject
   const { testTimeRule, ...legacyScope } = measurement.scope;
   assert.equal(testTimeRule, "machine_period_1pct");
   const legacy = machineRankingView({ ...measurement, scope: legacyScope });
-  assert.match(legacy.summary, /同日同类型 0.2% 截尾标准/u);
+  assert.match(legacy.summary, /同日同类型 0.20% 截尾标准/u);
   assert.deepEqual(legacy.top3, period.top3);
   assert.deepEqual(period.top3.map((r) => r.machine), ["ADH001", "ADH002"]);
   assert.deepEqual(period.top3.map((r) => r.value), [100, 100]);
@@ -236,7 +252,7 @@ test("reports and email share server TOP3 text and reject wrong type, period, me
     })),
   })) };
   const result = validateAnalysisReport(report, context, evidence.records);
-  assert.match(result.rows.day[0]!["issue"] as string, /T5773\/ADH001.*4.0 小时/u);
+  assert.match(result.rows.day[0]!["issue"] as string, /T5773\/ADH001.*4 小时/u);
   assert.match(result.rows.day[1]!["issue"] as string, /T5851\/ADH092/u);
   const email = createDailyImprovementEmail(applyAnalysisReport(base, result), "2026-01-01");
   assert.ok(email.text.includes(String(result.rows.day[0]!["issue"])));

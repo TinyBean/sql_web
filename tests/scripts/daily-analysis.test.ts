@@ -12,6 +12,7 @@ import { AnalysisEvidence, type AnalysisContext } from "../../src/server/dashboa
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/periods.ts";
 import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
 import { analysisPrompt, runAnalysisAgent } from "../../src/server/dashboard/default/analysis/agent.ts";
+import { NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
 import { AnalysisRepairState } from "../../src/server/dashboard/default/analysis/repair.ts";
 import { analysisBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
 import { createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/tools.ts";
@@ -187,6 +188,7 @@ test("parallel SQL evidence registration is atomic and queued cancellations do n
     pythonPath: "/nonexistent/python", bwrapPath: "/nonexistent/bwrap", prlimitPath: "/nonexistent/prlimit" });
   t.after(() => interpreter.dispose());
   const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
+  assert.ok(analysisPrompt(context).includes(NUMBER_DISPLAY_RULES));
   const scopes = ANALYSIS_PERIOD_KEYS.map((period) => evidence.scope(context, period, period + "-agent"));
   const agents = scopes.map((scope) => createAnalysisTools(evidence, interpreter, scope));
   const query = (index: number, params: Record<string, unknown>, signal?: AbortSignal) =>
@@ -237,6 +239,7 @@ test("period evidence whitelists protect Python reads, initial context and newly
   for (const [index, scope] of scopes.entries()) {
     assert.deepEqual(evidence.catalog(scope).map((entry) => entry.evidence_id), scope.baselineIds);
     const prompt = analysisPrompt(context, scope.period);
+    assert.ok(prompt.includes(NUMBER_DISPLAY_RULES));
     assert.deepEqual(Object.keys(JSON.parse(prompt.split("\n").at(-1)!).periods), [scope.period]);
     assert.deepEqual(Object.keys(JSON.parse(prompt.split("\n").at(-1)!).losses), [scope.period]);
     await run(index, "code_interpreter", { snapshot: context.losses[scope.period].snapshot.name, code: "emit_result(summary='read')" });
@@ -658,7 +661,7 @@ test("all periods select independent MT/ST state Top3 before rounding and keep c
     assert.equal(result.rows[period].length, 6);
     assert.ok(result.rows[period].every((row) => typeof row["loss_hours"] === "number"));
   }
-  assert.deepEqual(result.rows.day.slice(0, 3).map((row) => row["loss_hours"]), [3, 3, 3]);
+  assert.deepEqual(result.rows.day.slice(0, 3).map((row) => row["loss_hours"]), context.losses.day.by_kind.MT.map((candidate) => candidate.loss_hours));
   const group = periodEntry(report, "day").groups[0]!;
   const rejected = (mutate: (copy: AnalysisReport) => void, code: string): void => {
     const copy = structuredClone(report); mutate(copy);
@@ -1285,7 +1288,7 @@ test("report acceptance permits partial selections, repeated states and arbitrar
     assert.equal(item.suggested_owner, "责任职能 " + index);
     assert.equal(row["measure"], item.measure);
     assert.equal(row["suggested_owner"], item.suggested_owner + "（职能建议，待人工确认）");
-    assert.equal(row["loss_hours"], Number(Number(hours).toFixed(1)));
+    assert.equal(row["loss_hours"], hours);
   }
   assert.deepEqual(validateAnalysisReport(result.report, context, evidence.records).report, result.report);
   assert.equal(degradeAnalysisReport(repeated, context, evidence.records).status, "completed");

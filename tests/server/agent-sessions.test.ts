@@ -15,6 +15,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore, SessionNotFoundError } from "../../src/server/agent/agent-sessions.ts";
+import { NUMBER_DISPLAY_RULES, websiteInvestigationPrompt } from "../../src/server/agent/prompts.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
@@ -87,6 +88,8 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   ]);
 
   const piSession = await store.get(created.id);
+  assert.ok(piSession.systemPrompt.includes(NUMBER_DISPLAY_RULES));
+  assert.ok(websiteInvestigationPrompt().includes(NUMBER_DISPLAY_RULES));
   const emptySessionFile = piSession.sessionFile;
   assert.ok(emptySessionFile);
   const sessionArtifactDirectory = path.join(artifacts.rootDir, created.id);

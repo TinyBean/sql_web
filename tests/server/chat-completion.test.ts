@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore } from "../../src/server/agent/agent-sessions.ts";
-import { API_CHAT_AGENT_RULES } from "../../src/server/agent/prompts.ts";
+import { API_CHAT_AGENT_RULES, NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
 import { createWebServer } from "../../src/server/http-server.ts";
@@ -184,6 +184,7 @@ test("completion returns final text after tools, shares website configuration an
   const pageSystem = pageRequest.messages.filter((m) => m.role === "system").map((m) => contentText(m.content)).join("\n");
   const completionSystem = completionRequest.messages.filter((m) => m.role === "system").map((m) => contentText(m.content)).join("\n");
   assert.ok(completionSystem.includes(API_CHAT_AGENT_RULES));
+  assert.ok(completionSystem.includes(NUMBER_DISPLAY_RULES));
   assert.equal(pageSystem.includes(API_CHAT_AGENT_RULES), false);
   assert.equal(completionSystem.replace(API_CHAT_AGENT_RULES, ""), pageSystem);
   assert.ok(completionRequest.tools.some((tool) => tool.function.name === "send_email"));

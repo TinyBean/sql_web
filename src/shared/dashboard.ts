@@ -75,6 +75,7 @@ interface DashboardWidgetBase {
   readonly subtitle: string;
   readonly size: DashboardWidgetSize;
   readonly data: readonly DashboardRow[];
+  /** precision is retained for compatibility; displays use the shared two-decimal rule. */
   readonly format: { readonly unit: string; readonly precision: number };
   readonly metricDefinition: string;
   readonly warnings: readonly string[];

@@ -6,6 +6,7 @@ import type {
   DashboardState,
   DashboardWidget,
 } from "../shared/dashboard.ts";
+import { formatDisplayNumber } from "../shared/number-format.ts";
 import type { DashboardLayout, DashboardRect } from "./dashboard-drag.ts";
 
 interface EChartsInstance {
@@ -57,19 +58,20 @@ const WIDGET_COLUMN_SPANS = { small: 3, medium: 6, wide: 12 } as const;
 const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
 function scalarText(value: string | number | null | undefined): string {
-  return value === null || value === undefined ? "—" : String(value);
+  return value === null || value === undefined ? "—" :
+    typeof value === "number" ? formatDisplayNumber(value) : value;
 }
 
 function numeric(value: string | number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function formatted(value: string | number | null | undefined, unit: string, precision: number): string {
+function formatted(value: string | number | null | undefined, unit: string): string {
   const number = numeric(value);
-  return number === null ? "无法计算" : `${number.toFixed(precision)}${unit}`;
+  return number === null ? "无法计算" : `${formatDisplayNumber(number)}${unit}`;
 }
 
-function tooltipFormatter(unit: string, precision: number): (params: unknown) => string {
+function tooltipFormatter(unit: string): (params: unknown) => string {
   return (params) => {
     const items = Array.isArray(params) ? params : [params];
     const lines: string[] = [];
@@ -81,7 +83,7 @@ function tooltipFormatter(unit: string, precision: number): (params: unknown) =>
       const raw = Array.isArray(source["value"])
         ? source["value"].at(-1)
         : source["value"];
-      const value = typeof raw === "number" ? `${raw.toFixed(precision)}${unit}` : scalarText(raw as string | null);
+      const value = typeof raw === "number" ? `${formatDisplayNumber(raw)}${unit}` : scalarText(raw as string | null);
       if (!lines.length && axis) lines.push(axis);
       lines.push(`${label ? `${label}  ` : ""}${value}`);
     }
@@ -104,7 +106,7 @@ function commonChartOption(widget: DashboardWidget): Record<string, unknown> {
       borderColor: "#273a33",
       textStyle: { color: "#eef7f2" },
       renderMode: "richText",
-      formatter: tooltipFormatter(widget.format.unit, widget.format.precision),
+      formatter: tooltipFormatter(widget.format.unit),
     },
   };
 }
@@ -123,7 +125,7 @@ function cartesianOption(widget: DashboardLineWidget | DashboardBarWidget): Reco
     type: "value",
     axisLabel: {
       color: "#82968d",
-      formatter: `{value}${widget.format.unit}`,
+      formatter: (value: number) => `${formatDisplayNumber(value)}${widget.format.unit}`,
     },
     splitLine: { lineStyle: { color: "rgba(126, 151, 140, .12)" } },
   };
@@ -142,6 +144,8 @@ function cartesianOption(widget: DashboardLineWidget | DashboardBarWidget): Reco
       smooth: widget.kind === "line" ? 0.22 : false,
       stack: widget.kind === "stacked-bar" ? "total" : undefined,
       barMaxWidth: 24,
+      label: { formatter: (params: { readonly value: number | null }) =>
+        params.value === null ? "—" : `${formatDisplayNumber(params.value)}${widget.format.unit}` },
       itemStyle: widget.kind === "line" ? undefined : { borderRadius: horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] },
       lineStyle: { width: 2 },
       areaStyle: widget.kind === "line" && index === 0 ? { opacity: 0.06 } : undefined,
@@ -179,7 +183,11 @@ function donutOption(widget: DashboardDonutWidget): Record<string, unknown> {
       radius: ["53%", "78%"],
       center: ["38%", "52%"],
       avoidLabelOverlap: true,
-      label: { show: false },
+      label: {
+        show: false,
+        formatter: (params: { readonly name: string; readonly value: number | null }) =>
+          `${params.name}\n${params.value === null ? "—" : formatDisplayNumber(params.value) + widget.format.unit}`,
+      },
       emphasis: { label: { show: true, color: "#eef7f2", fontWeight: 700 } },
       data: widget.data.map((row) => ({
         name: scalarText(row[widget.encoding.category]),
@@ -245,7 +253,7 @@ function overviewOption(widget: DashboardOverviewWidget): Record<string, unknown
           fontWeight: 650,
           formatter: value === null
             ? "—"
-            : (displayValue: number) => `${displayValue.toFixed(1)}${widget.format.unit}`,
+            : (displayValue: number) => `${formatDisplayNumber(displayValue)}${widget.format.unit}`,
         },
         data: [{ value: value ?? 0, name: gauge.name
           .replace(/^Performance \((.+)\)$/u, "Performance\n($1)")
@@ -422,12 +430,12 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
     content.className = "kpi-content";
     const value = widget.data[0]?.[widget.encoding.value];
     const number = document.createElement("strong");
-    number.textContent = formatted(value, widget.format.unit, widget.format.precision);
+    number.textContent = formatted(value, widget.format.unit);
     number.classList.toggle("unavailable", numeric(value) === null);
     content.append(number);
     if (widget.encoding.comparison) {
       const comparison = document.createElement("span");
-      comparison.textContent = `对比 ${formatted(widget.data[0]?.[widget.encoding.comparison], widget.format.unit, widget.format.precision)}`;
+      comparison.textContent = `对比 ${formatted(widget.data[0]?.[widget.encoding.comparison], widget.format.unit)}`;
       content.append(comparison);
     }
     card.append(content);
@@ -440,7 +448,7 @@ function createWidget(widget: DashboardWidget): RenderedWidget {
     label.textContent = widget.encoding.label ?? widget.title;
     const number = document.createElement("strong");
     const value = widget.data[0]?.[widget.encoding.value];
-    number.textContent = formatted(value, widget.format.unit, widget.format.precision);
+    number.textContent = formatted(value, widget.format.unit);
     number.classList.toggle("unavailable", numeric(value) === null);
     const formula = document.createElement("small");
     formula.textContent = widget.encoding.description ?? widget.metricDefinition;

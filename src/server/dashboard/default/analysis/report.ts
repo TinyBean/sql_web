@@ -6,6 +6,7 @@ import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { createAnalysisTemplate } from "../template.ts";
 import { formatMachineMentions, hasMachineDistributionClaim } from "../../../skills/test-oee-calculator/assets/machine-platforms.ts";
 import { machineRankingView } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
+import { diagnosticValue, MAX_STRUCTURE_ISSUES, structureIssues, structureLocation } from "./structure.ts";
 
 const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
@@ -54,16 +55,21 @@ export interface AnalysisValidationIssue {
   readonly actual: unknown;
   readonly message: string;
   readonly hint: string;
+  readonly reason?: string;
+  readonly reasons?: readonly string[];
 }
 
 export class AnalysisValidationError extends Error {
   readonly issues: readonly AnalysisValidationIssue[];
-  constructor(issues: readonly AnalysisValidationIssue[]) {
-    super(issues.map((issue) => [issue.period, issue.kind, issue.priority === undefined ? "" : "第" + issue.priority + "条", issue.path,
-      issue.evidence_id, issue.message, "预期=" + JSON.stringify(issue.expected), "实际=" + JSON.stringify(issue.actual), issue.hint]
-      .filter(Boolean).join(" / ")).join("\n"));
+  readonly has_more: boolean;
+  constructor(issues: readonly AnalysisValidationIssue[], hasMore = false) {
+    const summary = issues.slice(0, 3).map((issue) => [issue.code, issue.period, issue.kind, issue.path,
+      issue.evidence_id, issue.message].filter(Boolean).join(" / ").slice(0, 180)).join("；");
+    super(summary.slice(0, 420) + (issues.length > 1 || hasMore
+      ? `；详见 analysis_repair.issues（本次 ${issues.length} 条${hasMore ? "，还有更多" : ""}）。` : ""));
     this.name = "AnalysisValidationError";
     this.issues = issues;
+    this.has_more = hasMore;
   }
 }
 
@@ -105,15 +111,19 @@ export function analysisExclusionSummary(exclusions: readonly Pick<AnalysisExclu
 /** Decode only structural fields; never guess repairs or echo report contents. */
 export function decodeAnalysisStructures(value: unknown): unknown {
   const structural = new Set(["periods", "groups", "group", "items", "evidence_ids", "machine_evidence_ids", "loss_reference", "omitted_candidates"]);
+  const issues: AnalysisValidationIssue[] = [];
+  let hasMore = false;
   const decode = (input: unknown, key = "", location = ""): unknown => {
     if (structural.has(key) && typeof input === "string") {
       try { input = JSON.parse(input) as unknown; }
       catch (error) {
         const position = error instanceof Error ? error.message.match(/position \d+|line \d+ column \d+/gu)?.join("; ") : undefined;
-        throw new AnalysisValidationError([{ code: "STRUCTURE_INVALID", path: location || "/",
-          expected: "数组/对象或合法的 JSON 字符串", actual: "无效 JSON 字符串",
+        if (issues.length === MAX_STRUCTURE_ISSUES) { hasMore = true; return input; }
+        issues.push({ code: "STRUCTURE_INVALID", path: location || "/", ...structureLocation(value, location),
+          reason: "invalid_json", expected: "数组/对象或合法的 JSON 字符串", actual: "无效 JSON 字符串",
           message: "结构字段不是合法的 JSON" + (position ? "（" + position + "）" : ""),
-          hint: "直接传结构化数组/对象，修正该字段，不要将整个报告转成字符串。" }]);
+          hint: "直接传结构化数组/对象，修正该字段，不要将整个报告转成字符串。" });
+        return input;
       }
     }
     if (Array.isArray(input)) return input.map((entry, index) => decode(entry, "", location + "/" + index));
@@ -123,17 +133,16 @@ export function decodeAnalysisStructures(value: unknown): unknown {
     }
     return input;
   };
-  return decode(value);
+  const decoded = decode(value);
+  if (issues.length) throw new AnalysisValidationError(issues, hasMore);
+  return decoded;
 }
 
 export function parseAnalysisReport(value: unknown): AnalysisReport {
   const decoded = decodeAnalysisStructures(value);
   if (!Value.Check(AnalysisReportSchema, decoded)) {
-    const first = [...Value.Errors(AnalysisReportSchema, decoded)][0];
-    throw new AnalysisValidationError([{ code: "STRUCTURE_INVALID", path: first?.instancePath || "/",
-      expected: "合法报告字段结构", actual: "结构无效",
-      message: "报告字段或结构无效：" + (first?.message ?? "缺少完整四期和 MT/ST 分组"),
-      hint: "修正定位字段结构；提交完整四期（日/周/月/季）、每期 MT/ST 两组。" }]);
+    const result = structureIssues(AnalysisReportSchema, decoded);
+    throw new AnalysisValidationError(result.issues, result.has_more);
   }
   return decoded;
 }
@@ -227,15 +236,28 @@ export function validateAnalysisReport(
           const measured = ref(reference.evidence_id, location, lossPath + "/evidence_id");
           if (measured) {
             const row = measured.rows[reference.row_index];
-            const validLoss = item.evidence_ids.includes(measured.id) && measured.source === "measure_loss" &&
-              measured.range?.start === context.periods[key].start && measured.range.end === context.periods[key].end &&
-              measured.lossScope?.byMachine === false && measured.lossScope.states.length === 0 && measured.lossScope.machines.length === 0 &&
-              candidate !== undefined && row?.["kind"] === kind && row["state_group"] === candidate.state_group &&
-              typeof row["loss_hours"] === "number" && Number.isFinite(row["loss_hours"]) && row["loss_hours"] === candidate.loss_hours;
-            if (!validLoss) add(location, lossPath, "LOSS_REFERENCE_MISMATCH", "损失小时必须引用程序通过 measure_loss 提供的本期同类型完整状态汇总入选行", { evidence_id: selection.evidence_id, source: "measure_loss", range: context.periods[key], kind, candidates },
-              { source: measured.source ?? null, range: measured.range ?? null, row: row ?? null, included: item.evidence_ids.includes(measured.id) }, "保留原始行号，复用本期同类型的标准实测损失证据。", measured.id);
+            const reasons = [
+              ...(!item.evidence_ids.includes(measured.id) ? ["损失证据未加入建议的 evidence_ids"] : []),
+              ...(reference.evidence_id !== selection.evidence_id ? ["必须使用程序提供的本期完整损失证据编号"] : []),
+              ...(measured.source !== "measure_loss" ? ["来源必须为 measure_loss"] : []),
+              ...(measured.range?.start !== context.periods[key].start || measured.range.end !== context.periods[key].end ? ["日期范围必须与本期完全一致"] : []),
+              ...(measured.lossScope?.byMachine !== false || measured.lossScope.states.length !== 0 || measured.lossScope.machines.length !== 0 ? ["必须使用未按机台、状态或机台列表过滤的完整状态汇总"] : []),
+              ...(!row ? ["原始 row_index 越界或不存在"] : []),
+              ...(!candidate ? ["行号未对应本期同类型的入选候选；不得将 priority 或 item_index 当作 row_index"] : []),
+              ...(row && row["kind"] !== kind ? ["原始行的 MT/ST 类型不匹配"] : []),
+              ...(candidate && row && row["state_group"] !== candidate.state_group ? ["原始行的损失状态不匹配"] : []),
+              ...(typeof row?.["loss_hours"] !== "number" || !Number.isFinite(row["loss_hours"]) ? ["损失小时必须为有限数字"] :
+                candidate && row["loss_hours"] !== candidate.loss_hours ? ["损失小时与入选候选保存的原始值不一致"] : []),
+            ];
+            if (reasons.length) issues.push({ ...location, path: lossPath, code: "LOSS_REFERENCE_MISMATCH", evidence_id: measured.id,
+              expected: { evidence_id: selection.evidence_id, source: "measure_loss", range: context.periods[key], kind, candidates },
+              actual: { source: measured.source ?? null, range: measured.range ?? null, loss_scope: measured.lossScope ?? null,
+                row_index: reference.row_index, row: row ? { kind: row["kind"], state_group: row["state_group"], loss_hours: diagnosticValue(row["loss_hours"]) } : null,
+                included: item.evidence_ids.includes(measured.id) }, reasons,
+              message: "损失小时必须引用程序提供的本期同类型完整状态汇总入选行：" + reasons.join("；"),
+              hint: "使用 repair_plan 中的合法损失候选及原始行号，保留其他建议；多个候选需按分析对象选择。" });
             else {
-              hours = Number((row["loss_hours"] as number).toFixed(1));
+              hours = Number((row!["loss_hours"] as number).toFixed(1));
             }
           }
         }

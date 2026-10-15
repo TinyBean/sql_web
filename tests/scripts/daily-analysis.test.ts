@@ -7,6 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
+import { Value } from "typebox/value";
 import { AnalysisEvidence, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/periods.ts";
 import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
@@ -32,7 +33,8 @@ import type { DashboardRow, DashboardState } from "../../src/shared/dashboard.ts
 import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.ts";
 import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.ts";
 import { createOeeSkillRuntime } from "../../src/server/agent/oee-skill-runtime.ts";
-import { rankMachines, type MachineMetric } from "../../src/server/skills/test-oee-calculator/assets/machine-ranking.ts";
+import { rankMachines, rankMachinesParameters, type MachineMetric } from "../../src/server/skills/test-oee-calculator/assets/machine-ranking.ts";
+import { pointerValue } from "../../src/server/dashboard/default/analysis/structure.ts";
 import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
 import type { SubagentResult } from "../../src/server/agent/subagent.ts";
 
@@ -1594,4 +1596,299 @@ test("repairing one group does not count an untouched group's error as a repeate
   assert.equal(repair.stopReason, undefined);
   const fixedSt = structuredClone(st); fixedSt.items[0]!.machine_evidence_ids = stRankings;
   assert.equal(repair.repair({ period: "quarter", kind: "ST", group: fixedSt })?.status, "completed");
+});
+
+test("structure feedback identifies independent fields, escaped paths and exact constraints without echoing prose", (t) => {
+  const { report, context, evidence } = mixedValidationFixture(t);
+  const item = report.periods[0]!.groups[0]!.items[0]!;
+  Reflect.deleteProperty(item, "category");
+  Reflect.set(item, "priority", "first");
+  item.machine_evidence_ids = [];
+  item.issue = "private narrative must not be echoed ".repeat(1000);
+  Reflect.set(report, "unexpected/field~name", true);
+  const before = structuredClone(report);
+  const events: Record<string, unknown>[] = [];
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, (event) => events.push(event));
+  assert.throws(() => repair.prepareReport(report), (error: unknown) => {
+    assert.ok(error instanceof AnalysisValidationError);
+    assert.equal(error.issues.length, 4);
+    assert.equal(error.has_more, false);
+    const missing = error.issues.find((issue) => issue.path.endsWith("/category"))!;
+    assert.equal(missing.reason, "required");
+    assert.equal(missing.period, "day"); assert.equal(missing.kind, "MT"); assert.equal(missing.item_index, 0);
+    assert.deepEqual(missing.expected, { type: "string", const: "availability" });
+    assert.deepEqual(missing.actual, { type: "missing" });
+    assert.ok(error.issues.some((issue) => issue.path === "/unexpected~1field~0name"));
+    assert.ok(error.message.length < 500); assert.ok(!error.message.includes("private narrative"));
+    return true;
+  });
+  const feedback = repair.modelContext();
+  assert.equal(feedback.repair_plan.submit_tool, "submit_analysis");
+  assert.equal(feedback.repair_plan.corrections.find((entry) => entry.path.endsWith("/category"))!.replacement, "availability");
+  assert.deepEqual(events[0]!["repair_plan"], feedback.repair_plan);
+  assert.deepEqual(report, before);
+  assert.equal(pointerValue({ "a/b~c": { value: 2 } }, "/a~1b~0c/value"), 2);
+  assert.equal(pointerValue({}, "/__proto__/toString"), undefined);
+});
+
+test("structure feedback caps expanded errors at eight and marks more errors in state and events", (t) => {
+  const { report, context, evidence } = mixedValidationFixture(t);
+  for (let index = 0; index < 12; index += 1) Reflect.set(report, "extra-" + index, true);
+  const events: Record<string, unknown>[] = [];
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, (event) => events.push(event));
+  assert.throws(() => repair.prepareReport(report), (error: unknown) => {
+    assert.ok(error instanceof AnalysisValidationError);
+    assert.equal(error.issues.length, 8); assert.equal(error.has_more, true); return true;
+  });
+  assert.equal(repair.modelContext().has_more, true);
+  assert.equal(events[0]!["has_more"], true);
+});
+
+test("structure diagnostics expose allowed period values and numeric bounds", (t) => {
+  const { report } = mixedValidationFixture(t);
+  Reflect.set(report.periods[1]!, "period", "year");
+  report.periods[0]!.groups[0]!.items[0]!.priority = 4;
+  const issues = validationIssues(() => parseAnalysisReport(report));
+  assert.equal(issues.length, 2, "literal union branches are one independent error and must not propose an arbitrary period");
+  assert.deepEqual(issues.find((entry) => entry.path === "/periods/1/period")!.expected,
+    { enum: ["day", "week", "month", "quarter"] });
+  assert.deepEqual(issues.find((entry) => entry.path.endsWith("/priority"))!.expected,
+    { type: "integer", minimum: 1, maximum: 3 });
+});
+
+test("repair routing requires a complete submission without a candidate or with report-level failures", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  Reflect.deleteProperty(report.periods[0]!.groups[0]!.items[0]!, "category");
+  assert.throws(() => repair.prepareReport(report), AnalysisValidationError);
+  assert.equal(repair.repair({ period: "quarter", kind: "MT", group }), undefined);
+  const feedback = repair.modelContext();
+  assert.equal(feedback.issues[0]!.code, "REPAIR_TARGET_INVALID");
+  assert.equal(feedback.repair_plan.submit_tool, "submit_analysis");
+  assert.match(feedback.issues[0]!.hint, /submit_analysis/u);
+  assert.deepEqual(feedback.repair_plan.targets, []);
+  report.periods[0]!.groups[0]!.items[0]!.category = "availability";
+  const mixed = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  periodEntry(report, "quarter").minimum_evidence = "missing-baseline";
+  mixed.submit(report);
+  assert.ok(mixed.modelContext().pending_groups.length);
+  assert.equal(mixed.modelContext().repair_plan.submit_tool, "submit_analysis");
+  assert.equal(mixed.modelContext().repair_plan.corrections.find((entry) => entry.code === "BASELINE_MISMATCH")!.replacement,
+    context.comparisons.quarter.minimum.id);
+  mixed.stop("test stop");
+  assert.equal(mixed.modelContext().repair_plan.submit_tool, null);
+  assert.deepEqual(mixed.modelContext().repair_plan.evidence_actions, []);
+});
+
+test("malformed local patches retain the candidate and expose both patch and unresolved report paths", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  repair.submit(report);
+  const saved = structuredClone(repair.modelContext().pending_groups);
+  const invalid = structuredClone(group);
+  Reflect.deleteProperty(invalid.items[2]!, "measure");
+  const omitted = structuredClone(group.items[2]!); omitted.machine_evidence_ids = [];
+  assert.throws(() => repair.prepareGroup({ period: "quarter", kind: "MT", group: invalid,
+    omitted_candidates: [{ item: omitted, reason: "" }] }), AnalysisValidationError);
+  const feedback = repair.modelContext();
+  assert.equal(feedback.repair_plan.submit_tool, "repair_analysis_group");
+  assert.deepEqual(feedback.pending_groups, saved);
+  const field = feedback.repair_plan.corrections.find((entry) => entry.path === "/group/items/2/measure")!;
+  assert.equal(field.argument_path, "/group/items/2/measure");
+  assert.equal(field.report_path, "/periods/3/groups/0/items/2/measure");
+  assert.match(feedback.repair_plan.corrections.find((entry) => entry.path.startsWith("/omitted_candidates"))!.instruction, /可省略/u);
+  const evidenceFix = feedback.repair_plan.corrections.find((entry) => entry.code === "METRIC_CATEGORY_MISMATCH")!;
+  assert.equal(evidenceFix.argument_path, "/group/items/2/machine_evidence_ids/1");
+  assert.ok(evidenceFix.choices!.includes("q133"));
+  const fixed = structuredClone(group); fixed.items[2]!.machine_evidence_ids = ["q133"];
+  assert.equal(repair.repair(repair.prepareGroup({ period: "quarter", kind: "MT", group: fixed }))?.status, "completed");
+});
+
+test("invalid repair targets list allowed groups and mismatched group kinds have an exact correction", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  repair.submit(report);
+  repair.repair({ period: "day", kind: "MT", group });
+  let plan = repair.modelContext().repair_plan;
+  assert.deepEqual(plan.targets, [{ period: "quarter", kind: "MT" }]);
+  assert.equal(plan.submit_tool, "repair_analysis_group");
+  assert.equal(plan.corrections[0]!.report_path, undefined);
+  assert.ok(plan.corrections.some((entry) => entry.code === "METRIC_CATEGORY_MISMATCH"));
+  assert.ok(plan.evidence_actions.every((entry) => entry.period === "quarter"));
+  const mismatch = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  mismatch.submit(report);
+  mismatch.repair({ period: "quarter", kind: "MT", group: { ...group, kind: "ST" } });
+  plan = mismatch.modelContext().repair_plan;
+  assert.equal(plan.corrections[0]!.replacement, "MT");
+  assert.equal(plan.corrections[0]!.argument_path, "/group/kind");
+  assert.equal(plan.corrections[0]!.report_path, "/periods/3/groups/0/kind");
+});
+
+test("loss feedback explains invalid original rows and supplies all legitimate candidates without choosing one", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  group.items[2]!.machine_evidence_ids = ["q133"];
+  group.items[0]!.loss_reference.row_index = 999999;
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  repair.submit(report);
+  const feedback = repair.modelContext();
+  const issue = feedback.issues.find((entry) => entry.code === "LOSS_REFERENCE_MISMATCH")!;
+  assert.ok(issue.reasons!.some((reason) => reason.includes("越界")));
+  assert.ok(issue.reasons!.some((reason) => reason.includes("priority")));
+  const fix = feedback.repair_plan.corrections.find((entry) => entry.code === "LOSS_REFERENCE_MISMATCH")!;
+  assert.equal(fix.replacement, undefined);
+  assert.deepEqual(fix.choices, context.losses.quarter.by_kind.MT.map((entry) => ({
+    evidence_id: context.losses.quarter.evidence_id, row_index: entry.row_index, state_group: entry.state_group, loss_hours: entry.loss_hours,
+  })));
+  assert.equal(repair.needsEvidence("quarter"), false);
+  assert.equal(group.items[0]!.loss_reference.row_index, 999999);
+});
+
+test("loss diagnostics distinguish source, date, filtering, kind, state and numeric failures", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  group.items[2]!.machine_evidence_ids = ["q133"];
+  const source = evidence.records.get(context.losses.quarter.evidence_id)!;
+  const rowIndex = group.items[0]!.loss_reference.row_index;
+  const changes: [string, (entry: typeof source) => void][] = [
+    ["来源", (entry) => { Reflect.set(entry, "source", "rank_machines"); }],
+    ["日期", (entry) => { Reflect.set(entry, "range", { start: "2026-01-01", end: "2026-01-01" }); }],
+    ["过滤", (entry) => { Reflect.set(entry, "lossScope", { states: ["Conversion"], machines: [], byMachine: false }); }],
+    ["MT/ST", (entry) => { Reflect.set(entry.rows[rowIndex]!, "kind", "ST"); }],
+    ["损失状态", (entry) => { Reflect.set(entry.rows[rowIndex]!, "state_group", "different-state"); }],
+    ["有限数字", (entry) => { Reflect.set(entry.rows[rowIndex]!, "loss_hours", Infinity); }],
+    ["原始值", (entry) => { Reflect.set(entry.rows[rowIndex]!, "loss_hours", Number(entry.rows[rowIndex]!["loss_hours"]) + 1); }],
+  ];
+  for (const [reason, change] of changes) {
+    const altered = structuredClone(source); change(altered);
+    const records = new Map(evidence.records); records.set(source.id, altered);
+    const issues = validationIssues(() => validateAnalysisReport(report, context, records));
+    assert.ok(issues.some((issue) => issue.item_index === 0 && issue.reasons?.some((entry) => entry.includes(reason))), reason);
+  }
+});
+
+test("using loss evidence as a machine ranking recommends a compatible ranking rather than changing the loss selection", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  group.items[2]!.machine_evidence_ids = ["q133"];
+  const loss = context.losses.quarter.evidence_id;
+  group.items[0]!.machine_evidence_ids = [loss];
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  repair.submit(report);
+  const fix = repair.modelContext().repair_plan.corrections.find((entry) => entry.code === "RANKING_SOURCE_MISMATCH")!;
+  assert.ok(fix.choices?.length);
+  assert.ok(fix.choices.every((id) => typeof id === "string" && evidence.records.get(id)?.source === "rank_machines"));
+  assert.equal(repair.needsEvidence("quarter"), false);
+});
+
+test("ranking guidance and acquisition guard agree and refresh when compatible evidence becomes available", (t) => {
+  const { report, group, context, evidence } = mixedValidationFixture(t);
+  const item = group.items[2]!;
+  const original = structuredClone(report);
+  const events: Record<string, unknown>[] = [];
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, (event) => events.push(event));
+  repair.submit(report);
+  let plan = repair.modelContext().repair_plan;
+  assert.equal(repair.needsEvidence("quarter"), false);
+  assert.ok(plan.evidence_actions.some((action) => action.action === "reuse" && action.evidence_ids?.includes("q133")));
+  assert.deepEqual(events.at(-1)!["repair_plan"], plan);
+  for (const [id, entry] of evidence.records) if (entry.owner?.period === "quarter" && entry.rankingScope?.kind === "MT" && entry.rankingScope.states[0] === "HangUp") {
+    evidence.records.set(id, { ...entry, rankingScope: { ...entry.rankingScope, states: ["Assistance"] } });
+  }
+  plan = repair.modelContext().repair_plan;
+  const action = plan.evidence_actions.find((entry) => entry.action === "query")!;
+  assert.ok(action);
+  assert.equal(repair.needsEvidence("quarter"), true); assert.equal(repair.needsEvidence("day"), false);
+  const { period, ...params } = action.arguments!;
+  assert.equal(period, "quarter"); assert.equal(action.tool, "test_oee_calculator__rank_machines");
+  assert.equal(Value.Check(rankMachinesParameters, params), true);
+  assert.ok(!("basis" in params)); assert.match(action.instruction, /Skill/u);
+  repair.repair({ period: "day", kind: "MT", group });
+  assert.equal(repair.needsEvidence("quarter"), true, "an invalid repair target cannot hide the candidate's missing evidence");
+  assert.ok(repair.modelContext().repair_plan.evidence_actions.some((entry) => entry.action === "query" && entry.period === "quarter"));
+  const measurement = rankMachines(createOeeSkillRuntime(evidence.queries, evidence.artifacts!),
+    params as Parameters<typeof rankMachines>[1], undefined, evidence.machineRankingCache);
+  const added = evidence.recordMachineRanking(measurement, { period: "quarter", agentId: "root" });
+  assert.equal(repair.needsEvidence("quarter"), false);
+  assert.ok(repair.modelContext().repair_plan.evidence_actions.some((entry) => entry.evidence_ids?.includes(added.id)));
+  const fixed = structuredClone(group); fixed.items[2]!.machine_evidence_ids = [added.id]; fixed.items[2]!.evidence_ids.push(added.id);
+  assert.equal(repair.repair({ period: "quarter", kind: "MT", group: fixed })?.status, "completed");
+  assert.deepEqual(report, original); assert.deepEqual(item, original.periods[3]!.groups[0]!.items[2]);
+});
+
+test("repair pointers follow reordered arrays and do not treat repeated priorities as item indices", (t) => {
+  const { report, context, evidence } = mixedValidationFixture(t);
+  report.periods.reverse(); const quarter = periodEntry(report, "quarter"); quarter.groups.reverse();
+  const group = quarter.groups[1]!; group.items.reverse();
+  group.items.forEach((item) => { item.priority = 1; });
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  repair.submit(report);
+  const fix = repair.modelContext().repair_plan.corrections.find((entry) => entry.code === "METRIC_CATEGORY_MISMATCH")!;
+  assert.equal(fix.report_path, "/periods/0/groups/1/items/0/machine_evidence_ids/1");
+  assert.equal(fix.argument_path, "/group/items/0/machine_evidence_ids/1");
+  assert.equal(repair.modelContext().issues[0]!.priority, 1);
+});
+
+for (const mode of ["structure", "ranking"] as const) test("model follows structured " + mode + " feedback in one correction", { timeout: 30000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  addQuarterlyLosses(config.databasePath);
+  const runId = "guided-" + mode; const runDir = path.join(config.analysis.artifactDir, runId);
+  let turn = 0;
+  await mockModel(t, directory, (body) => {
+    const { root } = modelContext(body);
+    if (!root) return childWithQuarterlyRankings(body, runDir);
+    turn += 1;
+    if (turn === 1) {
+      const report = mode === "ranking" ? quarterlyMixedReport(runDir) : lossReport(runDir);
+      if (mode === "structure") Reflect.deleteProperty(report.periods[0]!.groups[0]!.items[0]!, "category");
+      return [toolCall(0, "submit_analysis", report)];
+    }
+    assert.equal(turn, 2);
+    const feedback = root.analysis_repair;
+    const returned = businessToolResults(body).flatMap((message) => {
+      try { return [JSON.parse(message.content)]; } catch { return []; }
+    }).find((entry) => entry.accepted === false);
+    assert.deepEqual(returned.repair_plan, feedback.repair_plan);
+    if (mode === "structure") {
+      assert.equal(feedback.repair_plan.submit_tool, "submit_analysis");
+      assert.deepEqual(feedback.repair_plan.targets, []);
+      const report = lossReport(runDir);
+      const fix = feedback.repair_plan.corrections.find((entry: { path: string }) => entry.path.endsWith("/category"));
+      assert.equal(fix.replacement, "availability");
+      report.periods[0]!.groups[0]!.items[0]!.category = fix.replacement;
+      return [toolCall(0, feedback.repair_plan.submit_tool, report)];
+    }
+    assert.equal(feedback.repair_plan.submit_tool, "repair_analysis_group");
+    assert.ok(feedback.repair_plan.evidence_actions.every((entry: { action: string }) => entry.action === "reuse"));
+    const target = feedback.repair_plan.targets[0];
+    const pending = feedback.pending_groups.find((entry: { period: string; kind: string }) => entry.period === target.period && entry.kind === target.kind);
+    const group = structuredClone(pending.group);
+    const fix = feedback.repair_plan.corrections.find((entry: { code: string }) => entry.code === "LOSS_STATE_MISMATCH");
+    const match = fix.argument_path.match(/^\/group\/items\/(\d+)\/machine_evidence_ids/u);
+    const item = group.items[Number(match[1])];
+    item.machine_evidence_ids = [fix.choices[0]];
+    if (!item.evidence_ids.includes(fix.choices[0])) item.evidence_ids.push(fix.choices[0]);
+    return [toolCall(0, feedback.repair_plan.submit_tool, { ...target, group })];
+  });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? ""); assert.equal(turn, 2);
+  assertNumericCardsUnchanged(result.state, runDir);
+  const events = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const rejected = events.find((event) => event.type === "analysis_validation_failed");
+  assert.ok(rejected.repair_plan.corrections.length);
+  const failure = events.find((event) => event.type === "tool_result" && event.name === "submit_analysis" && event.isError);
+  assert.deepEqual(failure.result.details.repair_plan, rejected.repair_plan);
+  const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
+  assert.equal(metrics.validation.failures, 1);
+  assert.equal(metrics.tools.submit_analysis.calls, mode === "structure" ? 2 : 1);
+  assert.equal(metrics.tools.repair_analysis_group?.calls ?? 0, mode === "structure" ? 0 : 1);
+});
+
+test("initial main and child prompt examples conform to the report schema", (t) => {
+  const { context } = mixedValidationFixture(t);
+  for (const period of [undefined, ...ANALYSIS_PERIOD_KEYS]) {
+    const prompt = analysisPrompt(context, period);
+    const line = prompt.split("\n").find((entry) => entry.startsWith('{"period":'))!;
+    const sample = JSON.parse(line);
+    assert.equal(sample.period, period ?? "day");
+    assert.doesNotThrow(() => parseAnalysisReport({ periods: ANALYSIS_PERIOD_KEYS.map((key) => ({ ...sample, period: key })) }));
+    if (!period) assert.ok(prompt.includes("repair_plan") && prompt.includes("omitted_candidates"));
+  }
 });

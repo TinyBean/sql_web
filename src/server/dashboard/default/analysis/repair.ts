@@ -1,13 +1,15 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type { AnalysisContext, Evidence } from "./evidence.ts";
-import type { PeriodKey } from "../periods.ts";
+import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
 import { normalizeDataSnapshotName } from "../../../tool/artifact-store.ts";
 import {
   AnalysisGroupSchema, AnalysisItemSchema, AnalysisKindSchema, PeriodKeySchema,
   AnalysisValidationError, decodeAnalysisStructures, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport,
   type AnalysisReport, type AnalysisResult, type AnalysisValidationIssue,
 } from "./report.ts";
+import { analysisRepairPlan, type RepairAttempt, type RepairTarget } from "./feedback.ts";
+import { pointerValue, structureIssues } from "./structure.ts";
 
 export const MAX_REPORT_REPAIRS = 3;
 export const REPORT_REPAIR_TIMEOUT_MS = 120_000;
@@ -42,6 +44,8 @@ export class AnalysisRepairState {
   #failures = 0;
   #repairDeadline: number | undefined;
   #stopReason: string | undefined;
+  #hasMore = false;
+  #lastAttempt: RepairAttempt = { tool: "submit_analysis" };
 
   readonly context: AnalysisContext;
   readonly evidence: ReadonlyMap<string, Evidence>;
@@ -57,25 +61,29 @@ export class AnalysisRepairState {
   get stopReason(): string | undefined { return this.#stopReason; }
 
   prepareReport(input: unknown): AnalysisReport {
+    this.#lastAttempt = { tool: "submit_analysis" };
     try { return parseAnalysisReport(input); }
     catch (error) { this.#rejectStructure(error); throw error; }
   }
 
   prepareGroup(input: unknown): Static<typeof RepairAnalysisGroupSchema> {
+    const period = pointerValue(input, "/period");
+    const kind = pointerValue(input, "/kind");
+    this.#lastAttempt = { tool: "repair_analysis_group",
+      ...(ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey) && (kind === "MT" || kind === "ST")
+        ? { target: { period: period as PeriodKey, kind } } : {}) };
     try {
       const decoded = decodeAnalysisStructures(input);
       if (!Value.Check(RepairAnalysisGroupSchema, decoded)) {
-        const first = [...Value.Errors(RepairAnalysisGroupSchema, decoded)][0];
-        throw new AnalysisValidationError([{ code: "STRUCTURE_INVALID", path: first?.instancePath || "/",
-          expected: "合法局部修正字段结构", actual: "结构无效",
-          message: "局部修正字段或结构无效：" + (first?.message ?? "缺少周期、类型和建议组"),
-          hint: "只修正定位字段，保留其他组；group 必须是结构化对象。" }]);
+        const result = structureIssues(RepairAnalysisGroupSchema, decoded);
+        throw new AnalysisValidationError(result.issues, result.has_more);
       }
       return decoded;
     } catch (error) { this.#rejectStructure(error); throw error; }
   }
 
   submit(candidate: AnalysisReport, target?: { period: PeriodKey; kind: "MT" | "ST" }): AnalysisResult | undefined {
+    this.#lastAttempt = target ? { tool: "repair_analysis_group", target } : { tool: "submit_analysis" };
     this.#candidate = structuredClone(candidate);
     this.onEvent({ type: "analysis_candidate", report: this.#candidate });
     try { return validateAnalysisReport(this.#candidate, this.context, this.evidence); }
@@ -88,12 +96,15 @@ export class AnalysisRepairState {
   }
 
   repair(params: Static<typeof RepairAnalysisGroupSchema>): AnalysisResult | undefined {
+    this.#lastAttempt = { tool: "repair_analysis_group", target: { period: params.period, kind: params.kind } };
     const invalid = !this.#candidate ? "尚无结构合法的完整候选，请先调用 submit_analysis。" :
       params.group.kind !== params.kind ? "group.kind 必须与待修正的 kind 一致。" :
       !this.#issues.some((issue) => issue.period === params.period && issue.kind === params.kind) ? "只能修正当前校验指出的周期和类型。" : null;
     if (invalid) {
       this.#reject([{ code: "REPAIR_TARGET_INVALID", path: "/group", period: params.period, kind: params.kind,
-        expected: "校验指出的周期类型组", actual: "无效目标组", message: invalid, hint: "使用 analysis_repair.pending_groups 指定的组。" }]);
+        expected: this.#candidate ? this.modelContext().repair_plan.targets : "先用 submit_analysis 提交结构合法的完整四期报告",
+        actual: { period: params.period, kind: params.kind, group_kind: params.group.kind }, message: invalid,
+        hint: !this.#candidate ? "调用 submit_analysis 完整提交四期报告；尚不能调用 repair_analysis_group。" : "按 repair_plan.submit_tool 和 targets 选择修正方式。" }]);
       return undefined;
     }
     const next = structuredClone(this.#candidate!);
@@ -123,7 +134,8 @@ export class AnalysisRepairState {
     const groups = this.#candidate?.periods.flatMap((period) => period.groups.filter((group) =>
       this.#issues.some((issue) => issue.period === period.period && issue.kind === group.kind))
       .map((group) => ({ period: period.period, kind: group.kind, group }))) ?? [];
-    return { active: this.active, issues: this.#feedback, pending_groups: groups,
+    return { active: this.active, issues: this.#feedback, has_more: this.#hasMore, pending_groups: groups,
+      repair_plan: analysisRepairPlan(this.context, this.evidence, this.#candidate, this.#feedback, this.#issues, this.#lastAttempt, !!this.#stopReason),
       remaining_repairs: Math.max(0, MAX_REPORT_REPAIRS - Math.max(0, this.#failures - 1)),
       remaining_ms: this.#repairDeadline === undefined ? null : Math.max(0, this.#repairDeadline - Date.now()),
       stop_reason: this.#stopReason ?? null };
@@ -139,41 +151,19 @@ export class AnalysisRepairState {
 
   /** Permit investigation only when an evidence failure cannot be resolved from the catalogue. */
   needsEvidence(period?: PeriodKey): boolean {
-    return this.#issues.some((issue) => {
-      if (period && issue.period !== period) return false;
-      if (!/^(EVIDENCE_|RANKING_(SOURCE|RANGE|KIND|BASIS)_|LOSS_(REFERENCE|STATE)_|METRIC_CATEGORY_MISMATCH)/u.test(issue.code)) return false;
-      if (!issue.period || !issue.kind || issue.item_index === undefined || !this.#candidate) return true;
-      const item = this.#candidate.periods.find((entry) => entry.period === issue.period)?.groups
-        .find((group) => group.kind === issue.kind)?.items[issue.item_index];
-      if (!item) return true;
-      const range = this.context.periods[issue.period];
-      const selection = this.context.losses[issue.period];
-      const candidate = selection.by_kind[issue.kind].find((entry) => entry.row_index === item.loss_reference.row_index &&
-        item.loss_reference.evidence_id === selection.evidence_id);
-      const scoped = [...this.evidence.values()].filter((record) => !record.truncated && record.owner?.period === issue.period &&
-        record.range?.start === range.start && record.range.end === range.end);
-      if (issue.code !== "LOSS_STATE_MISMATCH" && (issue.code === "LOSS_REFERENCE_MISMATCH" ||
-          issue.path.includes("loss_reference") || item.loss_reference?.evidence_id === issue.evidence_id)) {
-        return !scoped.some((record) => record.id === selection.evidence_id && record.source === "measure_loss");
-      }
-      if (issue.path.includes("machine_evidence_ids") || issue.code === "LOSS_STATE_MISMATCH" || item.machine_evidence_ids.includes(issue.evidence_id ?? "")) {
-        return !scoped.some((record) => record.source === "rank_machines" && record.rankingScope && record.rankingScope.kind === issue.kind &&
-          record.rankingScope.basis === "report_period" && record.rankingScope.metric === "loss_hours" &&
-          record.rows.every((row) => row["kind"] === issue.kind) &&
-          candidate !== undefined && record.rankingScope.states.length === 1 && record.rankingScope.states[0] === candidate.state_group);
-      }
-      return true;
-    });
+    return this.modelContext().repair_plan.evidence_actions.some((action) =>
+      (!period || action.period === period) && (action.action === "query" || action.action === "investigate"));
   }
 
   #rejectStructure(error: unknown): void {
-    if (error instanceof AnalysisValidationError) { this.#reject(error.issues); return; }
+    if (error instanceof AnalysisValidationError) { this.#reject(error.issues, this.#lastAttempt.target, error.has_more); return; }
     this.#reject([{ code: "STRUCTURE_INVALID", path: "/", expected: "合法结构化报告或组", actual: "结构无效",
       message: error instanceof Error ? error.message : String(error), hint: "修正字段结构，不要将整个报告转成字符串。" }]);
   }
 
-  #reject(issues: readonly AnalysisValidationIssue[], target?: { period: PeriodKey; kind: "MT" | "ST" }): void {
+  #reject(issues: readonly AnalysisValidationIssue[], target?: RepairTarget, hasMore = false): void {
     this.#feedback = issues;
+    this.#hasMore = hasMore;
     const current = fingerprint(issues);
     // An untouched failing group must not stop a successful repair of another group.
     const attempted = target ? fingerprint(issues.filter((issue) => issue.period === target.period && issue.kind === target.kind)) : current;
@@ -184,7 +174,8 @@ export class AnalysisRepairState {
     if (repeated) this.stop("同一校验错误连续出现两次");
     else if (this.#failures > MAX_REPORT_REPAIRS) this.stop("已用尽三次报告修正额度");
     else if (Date.now() >= this.#repairDeadline) this.stop("报告修正时间预算已耗尽");
-    this.onEvent({ type: "analysis_validation_failed", attempt: this.#failures, issues,
+    this.onEvent({ type: "analysis_validation_failed", attempt: this.#failures, issues, has_more: this.#hasMore,
+      repair_plan: this.modelContext().repair_plan,
       repair_deadline: this.#repairDeadline, stop_reason: this.#stopReason ?? null });
   }
 }

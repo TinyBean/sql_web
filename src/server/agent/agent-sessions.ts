@@ -44,7 +44,7 @@ import {
   SKILL_READ_TOOL_NAME,
   type AgentSkillCatalog,
 } from "./skill-catalog.ts";
-import { buildSystemPrompt, websiteInvestigationPrompt } from "./prompts.ts";
+import { API_CHAT_AGENT_RULES, buildSystemPrompt, websiteInvestigationPrompt } from "./prompts.ts";
 import { SubagentRunner, SUBAGENT_TOOL_NAME, SUBAGENT_AGENT_RULES } from "./subagent.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
@@ -61,6 +61,18 @@ export interface AgentSessionStoreOptions {
   readonly codeInterpreter: CodeInterpreterRuntime;
   readonly email?: EmailConfig | null;
   readonly logger?: AgentProcessLogger;
+}
+
+export interface ChatCompletionOptions {
+  readonly requestId?: string;
+  readonly signal?: AbortSignal;
+}
+
+export function validatePromptText(text: string): void {
+  if (typeof text !== "string" || !text.trim()) throw new TypeError("问题不能为空");
+  if (text.length > MAX_PROMPT_LENGTH) {
+    throw new TypeError(`问题不能超过 ${MAX_PROMPT_LENGTH} 个字符`);
+  }
 }
 
 type AgentProcessLogger = Pick<AppLogger, "info" | "warn" | "error">;
@@ -462,6 +474,9 @@ export class AgentSessionStore {
   readonly #unsubscribers = new Map<string, () => void>();
   readonly #toolStartedAt = new Map<string, number>();
   readonly #activeRequestIds = new Map<string, string>();
+  readonly #completions = new Set<Promise<string>>();
+  readonly #shutdown = new AbortController();
+  #disposePromise: Promise<void> | undefined;
 
   private constructor(
     { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, email, logger }:
@@ -652,15 +667,96 @@ export class AgentSessionStore {
   }
 
   async prompt(id: string, text: string, requestId?: string): Promise<void> {
-    if (typeof text !== "string" || !text.trim()) throw new TypeError("问题不能为空");
-    if (text.length > MAX_PROMPT_LENGTH) {
-      throw new TypeError(`问题不能超过 ${MAX_PROMPT_LENGTH} 个字符`);
-    }
+    validatePromptText(text);
     const session = await this.get(id);
     if (session.isStreaming) throw new SessionBusyError();
     if (!session.sessionName || session.sessionName === "新会话") {
       session.setSessionName(shortTitle(text));
     }
+    await this.#promptSession(session, text, requestId);
+  }
+
+  async complete(text: string, options: ChatCompletionOptions = {}): Promise<string> {
+    validatePromptText(text);
+    this.#shutdown.signal.throwIfAborted();
+    const signal = AbortSignal.any([
+      this.#shutdown.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    signal.throwIfAborted();
+    const completion = this.#complete(text, options.requestId, signal);
+    this.#completions.add(completion);
+    try {
+      return await completion;
+    } finally {
+      this.#completions.delete(completion);
+    }
+  }
+
+  async #complete(text: string, requestId: string | undefined, signal: AbortSignal): Promise<string> {
+    const manager = SessionManager.inMemory(this.#cwd);
+    const id = manager.getSessionId();
+    let session: AgentSession | undefined;
+    let unsubscribe: (() => void) | undefined;
+    const abort = (): void => {
+      session?.abortCompaction();
+      if (session) void session.abort().catch((error: unknown) => {
+        this.#logger.error("agent.completion.abort.failed", error, { sessionId: id });
+      });
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      this.#ensureDashboardMarker(manager);
+      session = await this.#createPiSession(manager, signal, API_CHAT_AGENT_RULES);
+      signal.throwIfAborted();
+      // Capture the current default dashboard before the first model request.
+      this.#dashboard.loadOrPreview(id);
+      // Cancellation may arrive during asynchronous prompt preflight, before
+      // the agent loop has installed its own abort controller.
+      unsubscribe = session.subscribe((event) => {
+        if (signal.aborted && (event.type === "agent_start" || event.type === "turn_start")) abort();
+      });
+      await this.#promptSession(session, text, requestId);
+      signal.throwIfAborted();
+      const last = session.messages.at(-1);
+      if (last?.role !== "assistant" || last.stopReason !== "stop") {
+        throw new Error(last?.role === "assistant"
+          ? last.errorMessage || `Agent 回答未完整结束:${last.stopReason}`
+          : "Agent 未返回完整回答");
+      }
+      const answer = messageText(last).trim();
+      if (!answer) throw new Error("Agent 返回了空回答");
+      return answer;
+    } catch (error) {
+      this.#logger.error("agent.completion.failed", error, { sessionId: id, requestId });
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      unsubscribe?.();
+      this.#unsubscribers.get(id)?.();
+      try {
+        session?.dispose();
+        await this.#subagents.get(id)?.dispose();
+      } finally {
+        this.#unsubscribers.delete(id);
+        this.#subagents.delete(id);
+        this.#activeRequestIds.delete(id);
+        for (const key of this.#toolStartedAt.keys()) {
+          if (key.startsWith(`${id}:`)) this.#toolStartedAt.delete(key);
+        }
+        this.#dashboard.forget(id);
+        try {
+          await this.#artifacts.deleteSession(id);
+        } catch (error) {
+          this.#logger.error("agent.completion.cleanup.failed", error, { sessionId: id, requestId });
+          throw error;
+        }
+      }
+    }
+  }
+
+  async #promptSession(session: AgentSession, text: string, requestId?: string): Promise<void> {
+    const id = session.sessionId;
     const prompt = text.trim();
     const startedAt = Date.now();
     if (requestId) this.#activeRequestIds.set(id, requestId);
@@ -728,8 +824,14 @@ export class AgentSessionStore {
     };
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    return this.#disposePromise ??= this.#dispose();
+  }
+
+  async #dispose(): Promise<void> {
     this.#logger.info("agent.store.disposing", { activeSessionCount: this.#sessions.size });
+    this.#shutdown.abort(new Error("Agent 服务正在关闭"));
+    await Promise.allSettled([...this.#completions]);
     for (const unsubscribe of this.#unsubscribers.values()) unsubscribe();
     for (const session of this.#sessions.values()) session.dispose();
     this.#unsubscribers.clear();
@@ -743,7 +845,11 @@ export class AgentSessionStore {
     this.#codeInterpreter.dispose();
   }
 
-  async #createPiSession(sessionManager: SessionManager): Promise<AgentSession> {
+  async #createPiSession(
+    sessionManager: SessionManager,
+    signal?: AbortSignal,
+    additionalInstructions = "",
+  ): Promise<AgentSession> {
     const settingsManager = SettingsManager.create(this.#cwd, this.#agentDir, { projectTrusted: false });
     const model = this.#modelRuntime.getModel(this.#model.provider, this.#model.model);
     if (!model) {
@@ -756,6 +862,7 @@ export class AgentSessionStore {
     let parent: AgentSession;
     const subagents = new SubagentRunner({
       cwd: this.#cwd, agentDir: this.#agentDir, catalog: this.#skillCatalog, parent: () => parent,
+      ...(signal ? { signal } : {}),
       onEvent: (event) => this.#logger.info("agent.subagent.event", {
         ...event, sessionId: sessionManager.getSessionId(), requestId: this.#activeRequestIds.get(sessionManager.getSessionId()),
       }),
@@ -774,36 +881,38 @@ export class AgentSessionStore {
         });
       },
     });
-    const tools = [...createAgentTools(
-      this.#database,
-      artifacts,
-      this.#codeInterpreter,
-      { dashboard: this.#dashboard, sessionId: sessionManager.getSessionId() },
-    ), ...(this.#email ? [createEmailTool(this.#email, this.#logger, sessionManager.getSessionId())] : []), subagents.createTool()];
-    const resourceLoader = await createLockedResourceLoader(
-      buildSystemPrompt(this.#codeInterpreter.status.available, this.#email !== null) + SUBAGENT_AGENT_RULES,
-      this.#skillCatalog,
-      this.#cwd,
-      this.#agentDir,
-      settingsManager,
-      this.#logger,
-      this.#dashboard,
-      { ...oeeSkillSessionOptions(this.#database, artifacts), readDataDirectory: true },
-    );
-    const { session } = await createAgentSession({
-      cwd: this.#cwd,
-      agentDir: this.#agentDir,
-      model,
-      modelRuntime: this.#modelRuntime,
-      settingsManager,
-      sessionManager,
-      resourceLoader,
-      customTools: tools,
-      noTools: "builtin",
-    });
-    parent = session;
-
+    let session: AgentSession | undefined;
     try {
+      const tools = [...createAgentTools(
+        this.#database,
+        artifacts,
+        this.#codeInterpreter,
+        { dashboard: this.#dashboard, sessionId: sessionManager.getSessionId() },
+      ), ...(this.#email ? [createEmailTool(this.#email, this.#logger, sessionManager.getSessionId())] : []), subagents.createTool()];
+      const resourceLoader = await createLockedResourceLoader(
+        buildSystemPrompt(this.#codeInterpreter.status.available, this.#email !== null) +
+          SUBAGENT_AGENT_RULES + additionalInstructions,
+        this.#skillCatalog,
+        this.#cwd,
+        this.#agentDir,
+        settingsManager,
+        this.#logger,
+        this.#dashboard,
+        { ...oeeSkillSessionOptions(this.#database, artifacts), readDataDirectory: true },
+      );
+      ({ session } = await createAgentSession({
+        cwd: this.#cwd,
+        agentDir: this.#agentDir,
+        model,
+        modelRuntime: this.#modelRuntime,
+        settingsManager,
+        sessionManager,
+        resourceLoader,
+        customTools: tools,
+        noTools: "builtin",
+      }));
+      parent = session;
+
       await session.bindExtensions({
         mode: "print",
         onError: (error) => this.#logger.error(
@@ -813,14 +922,16 @@ export class AgentSessionStore {
         ),
       });
       validatedAgentToolNames(session);
+      const created = session;
+      const unsubscribe = session.subscribe((event) => this.#logAgentEvent(created.sessionId, event));
+      this.#unsubscribers.set(session.sessionId, unsubscribe);
+      this.#subagents.set(session.sessionId, subagents);
+      return session;
     } catch (error) {
-      session.dispose();
+      session?.dispose();
+      await subagents.dispose();
       throw error;
     }
-    const unsubscribe = session.subscribe((event) => this.#logAgentEvent(session.sessionId, event));
-    this.#unsubscribers.set(session.sessionId, unsubscribe);
-    this.#subagents.set(session.sessionId, subagents);
-    return session;
   }
 
   #logAgentEvent(sessionId: string, event: AgentSessionEvent): void {

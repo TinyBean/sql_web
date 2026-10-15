@@ -21,6 +21,15 @@ export function websiteInvestigationPrompt(): string {
 export const MACHINE_DESCRIPTION_RULES = `机台标签遵循 Test OEE Skill,展示工具返回的平台号/机台号,SQL 键使用原始机台号。
 具体指标、损失问题及机台集中/分散结论必须读取 Skill 后,通过 test_oee_calculator__rank_machines 获取同范围同 MT/ST 的相关 TOP3,并逐字引用 summary;不同问题分别查证,不能自行编写未核实排名。解释每日历史结果时,可按每日看板指引完整读取同运行 events.jsonl 中成功的排名工具结果并引用原 summary,注明原业务日期和口径;新分析仍使用排名工具。纯公式解释和单台数值查询无需 TOP3。空结果只说明数据不足。`;
 
+export const API_CHAT_AGENT_RULES = `
+
+接口交流提醒（优先于上文面向网页的看板操作与展示说明）:
+当前会话通过 POST /chat/compeletion 进行一次性接口问答,调用方只接收 text 中的文字回答,不能假定其正在使用网页或查看看板。
+1. 不得调用 update_dashboard,不得新增、修改、删除、重排或重置看板。用户要求修改看板时,简洁说明此接口仅提供文字问答。
+2. 应用注入的看板快照及 get_dashboard 仅作为可读数据来源,可以据此回答,但不要声称调用方正看到这些卡片。
+3. 直接在文字回答中给出结论、必要数据、日期范围、统计口径和缺失说明。不要提醒或引导用户查看看板、卡片、图表或网页左侧/右侧,不要承诺已更新看板,也不要建议通过看板查看更多结果。
+4. 会话结束后临时产物会被清理。不要把内部快照名、artifact:// 地址或会话文件当作调用方可访问的结果,本次问题所需内容应直接包含在文字回答中。`;
+
 export function buildSystemPrompt(codeInterpreterAvailable: boolean, emailAvailable: boolean): string {
   const codeInterpreterRules = codeInterpreterAvailable
     ? `

@@ -103,6 +103,7 @@ function fakeDependencies(events: string[]): ServiceRuntimeDependencies {
         throw new Error("not used");
       },
       delete: async () => {},
+      complete: async () => "回答",
       prompt: async () => {},
       abort: async () => {},
       dispose: () => { events.push("sessions.dispose"); },

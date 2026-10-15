@@ -91,6 +91,19 @@ crontab -l
 
 聊天 Agent 可委派 1–3 项独立子任务；每日分析固定并行调查日、周、月、季，再汇总并校验证据。OEE 专属工具通过读取 Skill 按会话启用，公式和筛选规则由 Skill 统一维护。
 
+后台一次性问答使用 `POST /chat/compeletion`（路径保留此拼写）：
+
+```bash
+curl http://127.0.0.1:3000/chat/compeletion \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"昨天的 MT Effective OEE 是多少？"}'
+# {"text":"完整回答内容"}
+```
+
+`text` 必须是非空字符串，最多 4000 字符，请求体最多 64 KiB。接口等待完整回答后返回 JSON，不使用流式响应。每次调用创建独立的内存会话，使用与主页面相同的模型、基础提示词、Skill 和工具，并从当前默认看板初始化；不继承网页聊天历史，也不进入网页会话列表。返回前销毁会话并删除临时产物，客户端断开或服务关闭时取消运行并清理资源。模型失败、回答为空或输出被截断时返回错误，格式为 `{"error":"错误信息","requestId":"…"}`；响应头同时提供 `X-Request-Id`，运行日志照常保留。
+
+临时 Agent 额外收到接口交流提醒：直接在 `text` 中回答，可以读取看板作为数据来源，不修改看板，也不引导调用方查看网页看板或访问临时产物。
+
 新增看板在 `src/server/dashboard/index.ts` 注册 `DashboardDefinition`，提供 `id`、`loadInitial()` 和可选 `update(context)`；各看板独立计算并原子发布快照。
 
 ## 邮件通知

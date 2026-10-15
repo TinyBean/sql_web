@@ -9,6 +9,8 @@ import type {
   AbortResponse,
   AgentStatus,
   AutomaticCompactionReason,
+  ChatCompletionRequest,
+  ChatCompletionResponse,
   CompactionOutcome,
   DashboardEditRequest,
   DashboardEditResponse,
@@ -25,7 +27,10 @@ import type {
   SessionsResponse,
   SseEventMap,
 } from "../shared/contracts.ts";
-import { SessionBusyError, SessionNotFoundError } from "./agent/agent-sessions.ts";
+import {
+  SessionBusyError, SessionNotFoundError, validatePromptText,
+  type ChatCompletionOptions,
+} from "./agent/agent-sessions.ts";
 import { DatabaseInputError } from "./database/database.ts";
 import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
 import { DashboardConflictError, DashboardInputError } from "./agent/session-dashboard.ts";
@@ -81,6 +86,7 @@ export interface WebSessionPort {
   editDashboard(id: string, request: DashboardEditRequest): Promise<DashboardState>;
   delete(id: string): Promise<void>;
   prompt(id: string, text: string, requestId?: string): Promise<void>;
+  complete(text: string, options?: ChatCompletionOptions): Promise<string>;
   abort(id: string): Promise<void>;
 }
 
@@ -137,9 +143,10 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 
   let size = 0;
   const chunks: Buffer[] = [];
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
     if (size > MAX_BODY_BYTES) {
+      request.resume();
       throw new HttpError("请求体过大", 413);
     }
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -162,6 +169,17 @@ function requireMessageRequest(value: unknown): MessageRequest {
     throw new HttpError("请求体必须包含字符串类型的 message", 400);
   }
   return { message: value.message };
+}
+
+function requireChatCompletionRequest(value: unknown): ChatCompletionRequest {
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    !("text" in value) || typeof value.text !== "string"
+  ) {
+    throw new HttpError("请求体必须包含字符串类型的 text", 400);
+  }
+  validatePromptText(value.text);
+  return { text: value.text };
 }
 
 function requireDashboardEditRequest(value: unknown): DashboardEditRequest {
@@ -405,7 +423,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
   return http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const requestId = randomUUID();
-    const apiRequest = url.pathname.startsWith("/api/");
+    const apiRequest = url.pathname.startsWith("/api/") || url.pathname === "/chat/compeletion";
     const requestLogger = logger.child?.({ requestId }) ?? logger;
     const requestStartedAt = Date.now();
     let requestSettled = false;
@@ -435,6 +453,24 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
     }
     try {
       if (request.method === "GET" && (await serveStatic(response, publicDir, vendorDir, url.pathname))) return;
+
+      if (request.method === "POST" && url.pathname === "/chat/compeletion") {
+        const controller = new AbortController();
+        const onClose = (): void => {
+          if (!response.writableFinished) controller.abort(new Error("客户端已断开连接"));
+        };
+        response.once("close", onClose);
+        try {
+          const body = requireChatCompletionRequest(await readJson(request));
+          if (response.destroyed) controller.abort(new Error("客户端已断开连接"));
+          controller.signal.throwIfAborted();
+          const text = await sessions.complete(body.text, { requestId, signal: controller.signal });
+          if (!response.destroyed) json(response, 200, { text } satisfies ChatCompletionResponse);
+        } finally {
+          response.off("close", onClose);
+        }
+        return;
+      }
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         const body = {
@@ -531,6 +567,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         pathname: url.pathname,
         statusCode: errorStatus(error),
       });
+      if (response.destroyed) return;
       if (!response.headersSent) {
         json(response, errorStatus(error), {
           error: errorMessage(error, "服务器内部错误"),

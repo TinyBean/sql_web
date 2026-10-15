@@ -76,6 +76,7 @@ async function createFixture(
     getSerialized: async () => { throw new Error("not used in this test"); },
     editDashboard: async () => EMPTY_DASHBOARD,
     delete: async () => {},
+    complete: async () => "回答",
     prompt: async () => {},
     abort: async () => {},
   };
@@ -277,6 +278,7 @@ test("validates and persists manual dashboard edits", async (t) => {
       return updated;
     },
     delete: async () => {},
+    complete: async () => "回答",
     prompt: async () => {},
     abort: async () => {},
   };
@@ -391,6 +393,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     get: async () => streamable,
     getSerialized: async () => completedSession,
     delete: async () => {},
+    complete: async () => "回答",
     prompt: async () => {
       emit({ type: "turn_start" } as AgentSessionEvent);
       emit({
@@ -520,6 +523,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
     get: async () => streamable,
     getSerialized: async () => completedSession,
     delete: async () => {},
+    complete: async () => "回答",
     prompt: async () => {
       emit({ type: "turn_start" } as AgentSessionEvent);
       emit({
@@ -608,6 +612,7 @@ test("does not stream legacy images from any tool result", async (t) => {
     get: async () => streamable,
     getSerialized: async () => completedSession,
     delete: async () => {},
+    complete: async () => "回答",
     prompt: async () => {
       emit({ type: "turn_start" });
       emit({
@@ -721,6 +726,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
     get: async () => streamable,
     getSerialized: async () => completedSession,
     delete: async () => {},
+    complete: async () => "回答",
     prompt: async () => {
       emit({ type: "compaction_start", reason: "manual" });
       emit({

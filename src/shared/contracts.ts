@@ -110,6 +110,14 @@ export interface MessageRequest {
   readonly message: string;
 }
 
+export interface ChatCompletionRequest {
+  readonly text: string;
+}
+
+export interface ChatCompletionResponse {
+  readonly text: string;
+}
+
 export type DashboardEditRequest =
   | {
       readonly action: "remove";
@@ -166,6 +174,7 @@ export type ParsedSseEvent = {
 
 export type JsonResponseBody =
   | AbortResponse
+  | ChatCompletionResponse
   | DashboardEditResponse
   | DeleteSessionResponse
   | ErrorResponse

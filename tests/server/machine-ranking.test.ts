@@ -12,10 +12,10 @@ import { createOeeSkillRuntime } from "../../src/server/agent/oee-skill-runtime.
 import { createRankMachinesTool, rankMachines, machineRankingView, type MachineRankingCache } from "../../src/server/skills/test-oee-calculator/assets/machine-ranking.ts";
 import { createTools } from "../../src/server/skills/test-oee-calculator/assets/tools.ts";
 import { lossOutput } from "../../src/server/tool/loss-output.ts";
-import { createDailyImprovementEmail } from "../../src/server/dashboard/default/daily-email.ts";
-import { AnalysisEvidence } from "../../src/server/dashboard/default/analysis/evidence.ts";
-import { createAnalysisSkillOptions } from "../../src/server/dashboard/default/analysis/tools.ts";
-import { validateAnalysisReport, applyAnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
+import { createDailyImprovementEmail } from "../../src/server/dashboard/default/index.ts";
+import { AnalysisEvidence, createAnalysisSkillOptions } from "../../src/server/dashboard/default/analysis/agent.ts";
+
+import { validateAnalysisReport, applyAnalysisReport } from "../../src/server/dashboard/default/analysis/validation.ts";
 import { calculatedDashboard } from "../helpers/calculated-dashboard.ts";
 
 function fixture(t: TestContext) {

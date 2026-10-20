@@ -1,6 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { MAX_EMAIL_BODY_LENGTH, MAX_EMAIL_RECIPIENTS, sendEmail, type EmailConfig } from "../email.ts";
+import { MAX_EMAIL_BODY_LENGTH, MAX_EMAIL_RECIPIENTS, sendEmail, type EmailConfig } from "../dashboard/email.ts";
 import type { AppLogger } from "../logger.ts";
 
 export const EMAIL_TOOL_NAME = "send_email";

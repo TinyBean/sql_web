@@ -9,7 +9,7 @@ import { createWebServer, type WebSessionPort } from "../../src/server/http-serv
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import { createDashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { loadUserDashboards } from "../../src/server/dashboard/user-dashboards.ts";
-import { writeDefaultDashboard } from "../../src/server/dashboard/default/store.ts";
+import { writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
 import { AgentSessionStore } from "../../src/server/agent/agent-sessions.ts";
 import { OWNER_ENTRY, readSessionFile } from "../../src/server/agent/session-files.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
@@ -173,7 +173,7 @@ test("owned empty sessions persist watermarks, isolate cached access and freeze 
   const bob = env.store.forAccount("bob");
   const [a, b] = await Promise.all([alice.create(), bob.create()]);
   assert.equal(a.dashboard.widgets.length, 4);
-  assert.deepEqual(a.dashboard.widgets.map((item) => item.id), env.registry.loadInitial().widgets.slice(0, 4).map((item) => item.id));
+  assert.deepEqual(a.dashboard.widgets.map((item) => item.id), env.registry.loadInitial("test").widgets.map((item) => item.id));
   assert.equal(b.dashboard.widgets.length, 13);
   assert.deepEqual((await alice.list()).map((item) => item.id), [a.id]);
   assert.deepEqual((await bob.list()).map((item) => item.id), [b.id]);

@@ -1,5 +1,5 @@
 import type { DashboardState } from "../../src/shared/dashboard.ts";
-import { dashboardPeriods } from "../../src/server/dashboard/default/periods.ts";
+import { dashboardPeriods } from "../../src/server/dashboard/default/calculate/periods.ts";
 import { createAnalysisTemplate, createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 
 export function dailyDashboard(throughDate = "2026-09-14"): DashboardState {

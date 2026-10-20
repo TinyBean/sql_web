@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
-import { buildMachineExtremesTable } from "../../src/server/dashboard/default/machine-extremes.ts";
+import { buildMachineExtremesTable } from "../../src/server/dashboard/default/calculate/index.ts";
 
 function fixture(t: TestContext) {
   const database = new DatabaseSync(":memory:");

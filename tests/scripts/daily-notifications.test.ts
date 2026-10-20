@@ -8,11 +8,11 @@ import { loadDataCommandConfig } from "../../scripts/database/data-command-confi
 import { outcomeExitCode } from "../../scripts/database/oee-data-store.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
 import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
-import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
-import { writeDefaultDashboard } from "../../src/server/dashboard/default/store.ts";
-import type { DefaultDashboardResult } from "../../src/server/dashboard/default/run.ts";
-import { createNotificationDispatcher, type NotificationDispatcher } from "../../src/server/notifications.ts";
-import { sendEmail } from "../../src/server/email.ts";
+import { createDefaultDashboardDefinition, writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
+
+import type { DefaultDashboardResult } from "../../src/server/dashboard/default/analysis/index.ts";
+import { createNotificationDispatcher, type NotificationDispatcher, sendEmail } from "../../src/server/dashboard/email.ts";
+
 import type { AppLogger } from "../../src/server/logger.ts";
 import { smtpServer, decodedBody } from "../helpers/smtp.ts";
 import { dailyDashboard } from "../helpers/daily-dashboard.ts";
@@ -167,7 +167,6 @@ test("dry-run never resolves notification config or starts any update", async (t
   }), /dry-run/u);
   assert.deepEqual(readdirSync(f.directory), []);
 });
-
 
 test("degraded analysis publishes before sending marked daily mail and reports warnings", async (t) => {
   const f = fixture(t); f.saveRoute();

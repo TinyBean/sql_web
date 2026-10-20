@@ -8,25 +8,23 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 import { Value } from "typebox/value";
-import { AnalysisEvidence, type AnalysisContext } from "../../src/server/dashboard/default/analysis/evidence.ts";
-import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/periods.ts";
-import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport } from "../../src/server/dashboard/default/analysis/report.ts";
-import { analysisPrompt, runAnalysisAgent } from "../../src/server/dashboard/default/analysis/agent.ts";
+import { AnalysisEvidence, type AnalysisContext, analysisPrompt, runAnalysisAgent, analysisBudget, createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/agent.ts";
+import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/calculate/periods.ts";
+import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport, AnalysisRepairState, pointerValue } from "../../src/server/dashboard/default/analysis/validation.ts";
+
 import { NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
-import { AnalysisRepairState } from "../../src/server/dashboard/default/analysis/repair.ts";
-import { analysisBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
-import { createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/tools.ts";
+
 import { SessionArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime, type CodeInterpreterInput } from "../../src/server/tool/code-interpreter.ts";
-import { generateDefaultDashboard } from "../../src/server/dashboard/default/run.ts";
-import { createDailyImprovementEmail } from "../../src/server/dashboard/default/daily-email.ts";
+import { generateDefaultDashboard, summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/index.ts";
+import { createDailyImprovementEmail, createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
 import { calculatedDashboard } from "../helpers/calculated-dashboard.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
 import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
-import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
+
 import { createAnalysisTemplate, createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import type { DashboardRow, DashboardState } from "../../src/shared/dashboard.ts";
@@ -35,8 +33,7 @@ import { lossOutput, LOSS_VIEW_BYTES } from "../../src/server/tool/loss-output.t
 import { measureLoss, type LossResult } from "../../src/server/tool/loss-tools.ts";
 import { createOeeSkillRuntime } from "../../src/server/agent/oee-skill-runtime.ts";
 import { rankMachines, rankMachinesParameters, type MachineMetric } from "../../src/server/skills/test-oee-calculator/assets/machine-ranking.ts";
-import { pointerValue } from "../../src/server/dashboard/default/analysis/structure.ts";
-import { summarizeAnalysisEvents } from "../../src/server/dashboard/default/analysis/metrics.ts";
+
 import type { SubagentResult } from "../../src/server/agent/subagent.ts";
 
 const logger: AppLogger = { info() {}, warn() {}, error() {}, child() { return this; } };
@@ -1109,7 +1106,6 @@ test("tool budget includes malformed calls and terminates at sixty without a rep
   assert.equal(events.filter((event) => event.type === "tool_call").length, 60);
   assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
 });
-
 
 test("loss views preserve original row references and compute scoped statistics without summing coverage", () => {
   const rows = Array.from({ length: 40 }, (_, i) => ({ kind: i % 2 ? "ST" : "MT", state_group: i % 4 < 2 ? "PM" : "Conversion",

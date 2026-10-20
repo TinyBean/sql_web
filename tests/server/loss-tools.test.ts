@@ -6,8 +6,8 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
-import { AnalysisEvidence } from "../../src/server/dashboard/default/analysis/evidence.ts";
-import { createAnalysisTools } from "../../src/server/dashboard/default/analysis/tools.ts";
+import { AnalysisEvidence, createAnalysisTools } from "../../src/server/dashboard/default/analysis/agent.ts";
+
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";

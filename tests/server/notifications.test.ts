@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { createNotificationDispatcher } from "../../src/server/notifications.ts";
-import type { EmailConfig, EmailInput, EmailResult } from "../../src/server/email.ts";
+import { createNotificationDispatcher, type EmailConfig, type EmailInput, type EmailResult } from "../../src/server/dashboard/email.ts";
+
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 
 const email: EmailConfig = { host: "127.0.0.1", port: 25, fromAddress: "sender@example.com", fromName: "通知" };

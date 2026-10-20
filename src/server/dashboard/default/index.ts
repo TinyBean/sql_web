@@ -1,10 +1,76 @@
+import type { DashboardState } from "../../../shared/dashboard.ts";
+import { formatDisplayNumber } from "../../../shared/number-format.ts";
 import type { AppLogger } from "../../logger.ts";
 import type { DashboardDefinition } from "../index.ts";
-import type { DefaultDashboardAnalysisConfig } from "./config.ts";
-import type { generateDefaultDashboard } from "./run.ts";
-import { readDefaultDashboard, writeDefaultDashboard } from "./store.ts";
-import { skippedNotification, type NotificationDispatcher, type NotificationResult } from "../../notifications.ts";
-import { createDailyImprovementEmail, DAILY_IMPROVEMENT_NOTIFICATION } from "./daily-email.ts";
+import { readDashboardSnapshot, writeDashboardSnapshot } from "../snapshot-store.ts";
+import { skippedNotification, type NotificationDispatcher, type NotificationResult, type NotificationEmail } from "../email.ts";
+import { createDefaultDashboard, validateDefaultDashboard, createAnalysisTemplate } from "./template.ts";
+import { dashboardPeriods } from "./calculate/periods.ts";
+import type { DefaultDashboardAnalysisConfig, generateDefaultDashboard } from "./analysis/index.ts";
+import { analysisExclusionSummary, type AnalysisPublication } from "./analysis/validation.ts";
+
+export function readDefaultDashboard(filePath?: string, logger?: Pick<AppLogger, "info" | "error">): DashboardState {
+  if (!filePath) return createDefaultDashboard();
+  try {
+    return readDashboardSnapshot(filePath, validateDefaultDashboard);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      logger?.info("dashboard.default.fallback", { reason: "missing", filePath });
+    } else {
+      logger?.error("dashboard.default.invalid", error, { filePath });
+    }
+    return createDefaultDashboard();
+  }
+}
+
+export function writeDefaultDashboard(filePath: string, state: DashboardState): void {
+  writeDashboardSnapshot(filePath, state, validateDefaultDashboard);
+}
+
+export const DAILY_IMPROVEMENT_NOTIFICATION = "daily-improvement";
+
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;").replaceAll("\n", "<br>");
+}
+
+export function createDailyImprovementEmail(state: DashboardState, throughDate: string, quality?: AnalysisPublication): NotificationEmail {
+  const template = createAnalysisTemplate("day");
+  const card = state.widgets.find((widget) => widget.id === template.id);
+  if (!card || card.kind !== "table" || card.warnings.some((warning) => warning.startsWith("本次分析暂不可用"))) {
+    throw new Error("本次日改善措施表不可用");
+  }
+  if (card.data.some((row) => typeof row["loss_hours"] !== "number" || !Number.isFinite(row["loss_hours"]) ||
+    ["issue", "measure", "suggested_owner"].some((key) => typeof row[key] !== "string"))) {
+    throw new Error("日改善措施表正文必须为字符串,本期损失小时必须为有限数值");
+  }
+  const period = dashboardPeriods(throughDate).day;
+  const title = "日改善措施表(" + period.end + ")";
+  const description = [
+    "统计业务日:" + period.end,
+    "截止业务日:" + throughDate, card.subtitle,
+  ];
+  if (quality?.status === "degraded") description.push(analysisExclusionSummary(quality.exclusions), "仅展示已通过证据校验的日建议。其他周期的建议请查看看板。 ");
+  const columns = template.encoding.columns;
+  const headers = columns.map((column) => column.label);
+  const rows = card.data.map((row) => columns.map(({ key }) => {
+    const value = row[key];
+    return value === null || value === undefined ? "—" :
+      typeof value === "number" ? formatDisplayNumber(value) : String(value);
+  }));
+  const emptyMessage = "本期未生成改善建议,原因见下方提示。";
+  const notes = ["统计口径:" + card.metricDefinition, ...card.warnings.map((warning) => "提示:" + warning)];
+  return {
+    subject: (quality?.status === "degraded" ? "【报告降级】" : "") + title + " · 截止 " + throughDate,
+    text: [title, ...description, "", headers.join("\t"),
+      ...(rows.length ? rows.map((row) => row.join("\t")) : [emptyMessage]), "", ...notes].join("\n"),
+    html: "<h2>" + escapeHtml(title) + "</h2>" + description.map((line) => "<p>" + escapeHtml(line) + "</p>").join("") +
+      "<table><thead><tr>" + headers.map((header) => "<th>" + escapeHtml(header) + "</th>").join("") + "</tr></thead><tbody>" +
+      (rows.length ? rows.map((row) => "<tr>" + row.map((cell) => "<td>" + escapeHtml(cell) + "</td>").join("") + "</tr>").join("") :
+        '<tr><td colspan="6">' + emptyMessage + "</td></tr>") + "</tbody></table>" +
+      notes.map((note) => "<p>" + escapeHtml(note) + "</p>").join(""),
+  };
+}
 
 export interface DefaultDashboardOptions {
   readonly defaultDashboardPath?: string;
@@ -20,7 +86,7 @@ export interface DefaultDashboardDependencies {
 
 const DEFAULT_DEPENDENCIES: DefaultDashboardDependencies = {
   async generate(...args) {
-    const { generateDefaultDashboard } = await import("./run.ts");
+    const { generateDefaultDashboard } = await import("./analysis/index.ts");
     return generateDefaultDashboard(...args);
   },
   publish: writeDefaultDashboard,

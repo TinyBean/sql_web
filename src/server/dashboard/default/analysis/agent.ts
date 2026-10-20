@@ -1,42 +1,381 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { appendFileSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import {
   createAgentSession, DefaultResourceLoader, defineTool, ModelRuntime, SessionManager, SettingsManager,
   type ExtensionFactory, type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import { assertModelInLocalCatalog } from "../../../agent/local-model-catalog.ts";
-import { loadAgentSkillCatalog } from "../../../agent/skill-catalog.ts";
+import { Type } from "typebox";
+import type { DashboardRow, DashboardState } from "../../../../shared/dashboard.ts";
+import { AppDatabase, assertReadOnlyQuery, type SqlParameter } from "../../../database/database.ts";
+import { addDays, type DatePeriod } from "../../../database/business-dates.ts";
+import {
+  MAX_QUERY_ARTIFACT_BYTES, normalizeDataSnapshotName, SessionArtifactStore, type DataSnapshotDescriptor,
+} from "../../../tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../../tool/code-interpreter.ts";
-import type { DefaultDashboardAnalysisConfig } from "../config.ts";
-import { AnalysisEvidence, type AnalysisContext, type Evidence } from "./evidence.ts";
-import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../periods.ts";
-import { ANALYSIS_CATEGORY_RULES, AnalysisReportSchema, type AnalysisResult } from "./report.ts";
-import { analysisBudget, AnalysisToolCallBudget, MAX_ANALYSIS_TOOL_CALLS } from "./budget.ts";
+import { createAgentTools, createExecuteSqlTool, executeSqlParameters } from "../../../tool/database-tools.ts";
+import {
+  createMeasureLossTool, measureLoss, measureLossParameters, MEASURE_LOSS_TOOL_NAME, type LossMeasurement, type LossScope,
+} from "../../../tool/loss-tools.ts";
+import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import {
+  createRankMachinesTool, rankMachinesParameters, RANK_MACHINES_LOCAL_TOOL_NAME,
+  type MachineRankingMeasurement, type MachineRankingScope, type MachineRankingCache,
+} from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
+import { assertModelInLocalCatalog } from "../../../agent/local-model-catalog.ts";
+import { loadAgentSkillCatalog, type SkillSessionOptions } from "../../../agent/skill-catalog.ts";
+import { createOeeSkillRuntime } from "../../../agent/oee-skill-runtime.ts";
 import { SubagentRunner, type SubagentResult } from "../../../agent/subagent.ts";
-import { createAnalysisTools, createAnalysisSkillOptions } from "./tools.ts";
-import { AnalysisRepairState, RepairAnalysisGroupSchema } from "./repair.ts";
-import { createAnalysisTemplate } from "../template.ts";
 import { NUMBER_DISPLAY_RULES } from "../../../agent/prompts.ts";
+import { minimumComparisonPeriod, selectLosses, summarizeDailyOee, type AnalysisLossCandidate } from "../calculate/index.ts";
+import { dashboardPeriods, ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../calculate/periods.ts";
+import { createAnalysisTemplate } from "../template.ts";
+import type { DefaultDashboardAnalysisConfig } from "./index.ts";
+import {
+  ANALYSIS_CATEGORY_RULES, AnalysisReportSchema, PeriodKeySchema, AnalysisRepairState, RepairAnalysisGroupSchema,
+  applyAnalysisReport, type AnalysisResult, type AnalysisPublication,
+} from "./validation.ts";
 
-export { MAX_ANALYSIS_TOOL_CALLS } from "./budget.ts";
+export interface Evidence {
+  readonly id: string;
+  readonly sql: string;
+  readonly parameters: readonly SQLInputValue[];
+  readonly rows: readonly DashboardRow[];
+  readonly truncated: boolean;
+  readonly sourceId?: string;
+  readonly range?: DatePeriod;
+  readonly source?: "measure_loss" | "rank_machines";
+  readonly lossScope?: LossScope;
+  readonly rankingScope?: MachineRankingScope;
+  readonly snapshot?: DataSnapshotDescriptor;
+  readonly owner?: EvidenceOwner;
+}
+
+export interface EvidenceOwner {
+  readonly period: PeriodKey;
+  readonly agentId: string;
+}
+
+export interface AnalysisEvidenceScope extends EvidenceOwner {
+  readonly baselineIds: readonly string[];
+}
+
+export interface AnalysisContext {
+  readonly throughDate: string;
+  readonly periods: ReturnType<typeof dashboardPeriods>;
+  readonly comparisons: Record<PeriodKey, {
+    readonly current: Evidence;
+    readonly minimum: Evidence;
+    readonly history: Evidence;
+  }>;
+  readonly losses: Record<PeriodKey, {
+    readonly evidence_id: string;
+    readonly snapshot: DataSnapshotDescriptor;
+    readonly by_kind: Record<"MT" | "ST", readonly AnalysisLossCandidate[]>;
+  }>;
+  readonly dashboard: DashboardState;
+}
+
+function normalize(row: Record<string, unknown>): DashboardRow {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => {
+    if (value === null || typeof value === "string" || (typeof value === "number" && Number.isFinite(value))) {
+      return [key, value];
+    }
+    throw new Error("查询证据包含不可表示的值：" + key);
+  }));
+}
+
+/** Every reference resolves to a result from this run's single read transaction. */
+export class AnalysisEvidence {
+  readonly records = new Map<string, Evidence>();
+  readonly machineRankingCache: MachineRankingCache = new Map();
+  readonly queries: Pick<AppDatabase, "query" | "exportQueryJson">;
+  readonly artifacts: SessionArtifactStore | undefined;
+  readonly #database: DatabaseSync;
+  readonly #onEvidence: (evidence: Evidence) => void;
+  #pendingWrite: Promise<unknown> = Promise.resolve();
+
+  /** Reserve names, write the snapshot and register evidence as one operation across all agents. */
+  async withEvidenceWrite<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const result = this.#pendingWrite.then(() => {
+      signal?.throwIfAborted();
+      return operation();
+    });
+    this.#pendingWrite = result.catch(() => {});
+    return result;
+  }
+
+  constructor(database: DatabaseSync, onEvidence: (evidence: Evidence) => void = () => {}, artifacts?: SessionArtifactStore) {
+    this.#database = database;
+    this.#onEvidence = onEvidence;
+    this.queries = AppDatabase.readOnlyQueries(database);
+    this.artifacts = artifacts;
+  }
+
+  #save(record: Omit<Evidence, "id">): Evidence {
+    const id = "q" + (this.records.size + 1);
+    let snapshot = record.snapshot;
+    if (this.artifacts && !snapshot && !record.truncated) {
+      const columns = [...new Set(record.rows.flatMap((row) => Object.keys(row)))];
+      const content = JSON.stringify({ columns, rows: record.rows, rowCount: record.rows.length, truncated: false });
+      if (Buffer.byteLength(content) > MAX_QUERY_ARTIFACT_BYTES) throw new Error("分析证据超过快照大小上限，请缩小查询范围");
+      const { value: _value, replaced: _replaced, ...descriptor } = this.artifacts.createDataSnapshot("evidence-" + id, (fd) => {
+        writeSync(fd, content);
+        return { columns, rowCount: record.rows.length };
+      });
+      snapshot = descriptor;
+    }
+    const evidence: Evidence = { id, ...record, ...(snapshot ? { snapshot } : {}) };
+    this.records.set(evidence.id, evidence);
+    this.#onEvidence(evidence);
+    return evidence;
+  }
+
+  /** Register the complete result exported by the shared SQL tool, never its preview. */
+  recordSnapshot(sql: string, parameters: readonly SqlParameter[], name: string, owner: EvidenceOwner): Evidence {
+    if (!this.artifacts) throw new Error("分析快照存储尚未初始化");
+    const { filePath, ...snapshot } = this.artifacts.resolveDataSnapshot(name);
+    const data = JSON.parse(readFileSync(filePath, "utf8")) as { rows: DashboardRow[]; truncated: boolean };
+    if (data.truncated) throw new Error("分析证据快照被截断");
+    return this.#save({ sql, parameters: parameters.map((value) => typeof value === "boolean" ? Number(value) : value),
+      rows: data.rows, truncated: false, snapshot, owner });
+  }
+
+  scope(context: AnalysisContext, period: PeriodKey, agentId: string): AnalysisEvidenceScope {
+    return { period, agentId, baselineIds: [...Object.values(context.comparisons[period]).map((record) => record.id),
+      context.losses[period].evidence_id] };
+  }
+
+  #visible(record: Evidence, scope: AnalysisEvidenceScope): boolean {
+    return record.owner?.period === scope.period &&
+      (scope.baselineIds.includes(record.id) || record.owner.agentId === scope.agentId);
+  }
+
+  /** Check before resolving a name: the shared store's missing-name error lists all snapshots. */
+  assertSnapshotAccess(name: string, scope: AnalysisEvidenceScope): void {
+    const normalized = normalizeDataSnapshotName(name);
+    if (![...this.records.values()].some((record) => record.snapshot?.name === normalized && this.#visible(record, scope))) {
+      throw new Error("当前子任务无可用的该证据快照，请使用本周期证据目录中的名称");
+    }
+  }
+
+  catalog(scope?: AnalysisEvidenceScope) {
+    return [...this.records.values()].filter((record) => !scope || this.#visible(record, scope)).map((record) => ({
+      evidence_id: record.id, snapshot: record.snapshot?.name ?? null, row_count: record.rows.length,
+      truncated: record.truncated, range: record.range, source: record.source, loss_scope: record.lossScope,
+      ranking_scope: record.rankingScope, owner: record.owner,
+    }));
+  }
+
+  query(sql: string, parameters: readonly SQLInputValue[] = [], maxRows = 200, owner?: EvidenceOwner): Evidence {
+    return this.#save({ ...this.#read(sql, parameters, maxRows), ...(owner ? { owner } : {}) });
+  }
+
+  #read(sql: string, parameters: readonly SQLInputValue[], maxRows = 200): Omit<Evidence, "id"> {
+    assertReadOnlyQuery(sql);
+    const rows: DashboardRow[] = [];
+    let bytes = 0;
+    let truncated = false;
+    for (const raw of this.#database.prepare(sql).iterate(...parameters)) {
+      const row = normalize(raw);
+      bytes += Buffer.byteLength(JSON.stringify(row));
+      if (rows.length === maxRows || bytes > (maxRows > 200 ? MAX_QUERY_ARTIFACT_BYTES - 4096 : 512 * 1024)) { truncated = true; break; }
+      rows.push(row);
+    }
+    return { sql, parameters, rows, truncated };
+  }
+
+  context(state: DashboardState, throughDate: string): AnalysisContext {
+    if (!this.artifacts) throw new Error("每日分析需要独立的数据快照存储");
+    const periods = dashboardPeriods(throughDate);
+    const source = this.query(getDefaultTestOeeSql(periods.syncStart, throughDate).sql, [], 800);
+    if (source.truncated) throw new Error("基础分析证据被截断");
+    const slice = (period: PeriodKey, range: DatePeriod | undefined): Evidence => this.#save({
+      sql: source.sql, parameters: [], sourceId: source.id, ...(range ? { range } : {}),
+      owner: { period, agentId: "baseline" },
+      rows: range ? source.rows.filter((row) => String(row["day"]) >= range.start && String(row["day"]) <= range.end) : [],
+      truncated: false,
+    });
+    const comparisons = {} as AnalysisContext["comparisons"];
+    const losses = {} as AnalysisContext["losses"];
+    for (const key of ANALYSIS_PERIOD_KEYS) {
+      comparisons[key] = {
+        current: slice(key, periods[key]),
+        minimum: slice(key, minimumComparisonPeriod(state, source.rows, throughDate, key)),
+        history: slice(key, periods[key].start > periods.trend.start ? {
+          start: periods.trend.start, end: addDays(periods[key].start, -1),
+        } : undefined),
+      };
+      const loss = this.recordLoss(measureLoss(this.queries, this.artifacts.scoped("baseline/" + key), {
+        start_date: periods[key].start, end_date: periods[key].end,
+      }), { period: key, agentId: "baseline" });
+      losses[key] = { evidence_id: loss.id, snapshot: loss.snapshot!,
+        by_kind: { MT: selectLosses(loss.rows, "MT"), ST: selectLosses(loss.rows, "ST") } };
+    }
+    return { throughDate, periods, comparisons, losses, dashboard: state };
+  }
+
+  /** Only the shared standard measurement path can mark report loss references. */
+  recordLoss(measurement: LossMeasurement, owner: EvidenceOwner): Evidence {
+    return this.#save({
+      sql: measurement.sql,
+      parameters: measurement.parameters.map((value) => typeof value === "boolean" ? Number(value) : value),
+      rows: measurement.rows, truncated: false, snapshot: measurement.snapshot,
+      range: measurement.range, lossScope: measurement.scope, source: "measure_loss", owner,
+    });
+  }
+
+  recordMachineRanking(measurement: MachineRankingMeasurement, owner: EvidenceOwner): Evidence {
+    return this.#save({ sql: measurement.sql, parameters: [], rows: measurement.rows, truncated: false,
+      snapshot: measurement.snapshot, range: measurement.range, rankingScope: measurement.scope,
+      source: "rank_machines", owner });
+  }
+}
+
+export const MAX_ANALYSIS_TOOL_CALLS = 60;
+const ANALYSIS_PARENT_TOOL_RESERVE = 8;
+
+/** All agents acquire a slot synchronously, before SDK argument validation. */
+export class AnalysisToolCallBudget {
+  #used = 0;
+  get used(): number { return this.#used; }
+  get remainingForChildren(): number { return Math.max(0, MAX_ANALYSIS_TOOL_CALLS - ANALYSIS_PARENT_TOOL_RESERVE - this.#used); }
+  take(child = false): boolean {
+    if (this.#used >= MAX_ANALYSIS_TOOL_CALLS - (child ? ANALYSIS_PARENT_TOOL_RESERVE : 0)) return false;
+    this.#used += 1;
+    return true;
+  }
+}
+
+export function analysisBudget(
+  model: { readonly contextWindow: number; readonly maxTokens: number },
+  config: Pick<DefaultDashboardAnalysisConfig, "contextWindow" | "maxOutputTokens">,
+) {
+  // The deployment limit can be lower than the model catalogue's advertised window.
+  const contextWindow = Math.min(model.contextWindow, config.contextWindow);
+  const maxTokens = Math.min(model.maxTokens, config.maxOutputTokens, Math.floor(contextWindow / 4));
+  // Reserve output plus room for instructions, tool schemas, and the evidence index.
+  const reserveTokens = Math.min(Math.floor(contextWindow / 2), maxTokens + 32768);
+  return {
+    contextWindow, maxTokens,
+    compaction: { enabled: true, reserveTokens, keepRecentTokens: Math.min(16384, Math.floor(contextWindow / 8)) },
+  };
+}
+
+function evidenceOwner(params: object, scope?: AnalysisEvidenceScope): EvidenceOwner {
+  if (scope) {
+    if ("period" in params) throw new Error("子任务周期由服务端绑定，不能指定 period");
+    return { period: scope.period, agentId: scope.agentId };
+  }
+  const period = "period" in params ? params.period : undefined;
+  if (!ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：day、week、month 或 quarter");
+  return { period: period as PeriodKey, agentId: "root" };
+}
+
+/** Full rows stay on disk and in the audit registry, not in model messages. */
+export function evidenceOutput(record: Evidence) {
+  const preview = [];
+  let bytes = 0;
+  for (const [row_index, row] of record.rows.slice(0, 3).entries()) {
+    bytes += Buffer.byteLength(JSON.stringify(row));
+    if (bytes > 6000) break;
+    preview.push({ row_index, row });
+  }
+  const details = {
+    evidence_id: record.id, range: record.range, source: record.source, owner: record.owner,
+    snapshot: record.snapshot ?? null, row_count: record.rows.length, truncated: record.truncated,
+    preview: { rows: preview, truncated: preview.length < record.rows.length },
+    pythonInput: { rows: "snapshot_rows", rowShape: "list[dict]", rowAccess: "row['column_name']",
+      row_index: "Use enumerate(snapshot_rows) BEFORE sorting/filtering to preserve evidence row indices." },
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
+}
+
+export function createAnalysisTools(evidence: AnalysisEvidence, interpreter: CodeInterpreterRuntime, scope?: AnalysisEvidenceScope) {
+  const sharedArtifacts = evidence.artifacts;
+  if (!sharedArtifacts) throw new Error("每日分析需要独立的数据快照存储");
+  const ownerFor = (params: object) => evidenceOwner(params, scope);
+  const storeFor = (owner: EvidenceOwner) => sharedArtifacts.scoped(owner.agentId + "/" + owner.period);
+  const sqlParameters = scope
+    ? Type.Object(executeSqlParameters.properties, { additionalProperties: false })
+    : Type.Object({ ...executeSqlParameters.properties, period: PeriodKeySchema }, { additionalProperties: false });
+  const lossParameters = scope
+    ? Type.Object(measureLossParameters.properties, { additionalProperties: false })
+    : Type.Object({ ...measureLossParameters.properties, period: PeriodKeySchema }, { additionalProperties: false });
+  const tool = createExecuteSqlTool(evidence.queries, sharedArtifacts);
+  const loss = createMeasureLossTool(evidence.queries, sharedArtifacts);
+  const auxiliary = createAgentTools(evidence.queries, sharedArtifacts, interpreter)
+    .filter((entry) => entry.name !== "execute_sql" && entry.name !== MEASURE_LOSS_TOOL_NAME)
+    .map((entry) => !scope || entry.name !== "code_interpreter" ? entry : defineTool({
+      ...entry,
+      async execute(id, params, signal, update, ctx) {
+        if (params && typeof params === "object" && "snapshot" in params && typeof params.snapshot === "string") {
+          evidence.assertSnapshotAccess(params.snapshot, scope);
+        }
+        return entry.execute(id, params, signal, update, ctx);
+      },
+    }));
+  return [
+    ...auxiliary,
+    defineTool({ ...loss, parameters: lossParameters,
+      description: loss.description + (scope ? " Evidence is private to the assigned period and task." : " period is required and assigns the evidence to one report period."),
+      execute: (id, params, signal, update, ctx) => {
+        const owner = ownerFor(params);
+        const scopedLoss = createMeasureLossTool(evidence.queries, storeFor(owner), (measurement) => evidence.recordLoss(measurement, owner).id);
+        return evidence.withEvidenceWrite(() => scopedLoss.execute(id, params, signal, update, ctx), signal);
+      },
+    }),
+    defineTool({
+      ...tool,
+      parameters: sqlParameters,
+      description: tool.description + " Daily analysis always saves the complete result as an immutable evidence snapshot, even when save_as is omitted. Returns an evidence_id and at most 3 preview rows. Existing evidence names cannot be replaced; use a new save_as name. Names beginning evidence- are reserved. All queries share the dashboard read transaction." + (scope ? " Evidence is private to the assigned period and task." : " period is required and assigns the evidence to one report period."),
+      async execute(id, params, signal, onUpdate, ctx) {
+        const owner = ownerFor(params);
+        const artifacts = storeFor(owner);
+        const scopedSql = createExecuteSqlTool(evidence.queries, artifacts);
+        return evidence.withEvidenceWrite(async () => {
+          const name = normalizeDataSnapshotName(params.save_as ?? "query-" + (evidence.records.size + 1));
+          const canonicalName = artifacts.snapshotName(name);
+          if (name.startsWith("evidence-") || name.startsWith("sa-") || [...evidence.records.values()].some((record) =>
+            record.snapshot?.name === canonicalName || record.snapshot?.name === name)) {
+            throw new Error("快照名称已固定为审计证据或属于保留名称，请使用新的 save_as 名称");
+          }
+          await scopedSql.execute(id, { ...params, save_as: name, limit: Math.min(params.limit ?? 3, 3) }, signal, onUpdate, ctx);
+          return evidenceOutput(evidence.recordSnapshot(params.sql, params.parameters ?? [], canonicalName, owner));
+        }, signal);
+      },
+    }),
+  ];
+}
+
+/** Ranking is published only by Skill activation; this wrapper binds audited analysis resources. */
+export function createAnalysisSkillOptions(evidence: AnalysisEvidence, scope?: AnalysisEvidenceScope): SkillSessionOptions {
+  const artifacts = evidence.artifacts;
+  if (!artifacts) throw new Error("每日分析需要独立的数据快照存储");
+  return { decorateTool(skillName, definition) {
+    if (skillName !== "test-oee-calculator" || definition.name !== RANK_MACHINES_LOCAL_TOOL_NAME) return definition;
+    const parameters = scope
+      ? Type.Object(rankMachinesParameters.properties, { additionalProperties: false })
+      : Type.Object({ ...rankMachinesParameters.properties, period: PeriodKeySchema }, { additionalProperties: false });
+    return { ...definition, parameters,
+      description: definition.description + (scope ? " Evidence is private to the assigned period and task." : " period is required and assigns the evidence to one report period."),
+      execute(id, params, signal, update, ctx) {
+        if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("机台排名参数无效");
+        const owner = evidenceOwner(params, scope);
+        const scopedRanking = createRankMachinesTool(createOeeSkillRuntime(evidence.queries, artifacts.scoped(owner.agentId + "/" + owner.period)),
+          (measurement) => evidence.recordMachineRanking(measurement, owner).id, evidence.machineRankingCache);
+        const { period: _period, ...rankingParams } = params as typeof params & { period?: PeriodKey };
+        return evidence.withEvidenceWrite(() => scopedRanking.execute(id, rankingParams, signal, update, ctx), signal);
+      },
+    };
+  } };
+}
 
 function summary(evidence: Evidence) {
   return {
     evidence_id: evidence.id, snapshot: evidence.snapshot?.name ?? null, range: evidence.range ?? null,
-    by_kind: ["MT", "ST"].map((kind) => {
-      const rows = evidence.rows.filter((row) => row["kind"] === kind);
-      const means = Object.fromEntries(["daily_test_oee", "availability", "dut_on", "test_time_performance", "final_yield"].map((column) => {
-        const values = rows.filter((row) => typeof row["daily_test_oee"] === "number").map((row) => row[column]).filter((value): value is number => typeof value === "number");
-        return [column, values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null];
-      }));
-      return {
-        kind, selected_days: rows.length,
-        calculable_days: rows.filter((row) => typeof row["daily_test_oee"] === "number").length,
-        availability_days: rows.filter((row) => Number(row["availability_rows"]) > 0).length,
-        dut_days: rows.filter((row) => Number(row["dut_rows"]) > 0).length,
-        means,
-      };
-    }),
+    by_kind: summarizeDailyOee(evidence.rows),
   };
 }
 
@@ -382,4 +721,27 @@ async function runSession(
     await session.abort();
     session.dispose();
   }
+}
+
+/** The caller keeps the numeric cards' read transaction open until analysis completes. */
+export async function analyzeCards(
+  database: DatabaseSync, state: DashboardState, throughDate: string,
+  config: DefaultDashboardAnalysisConfig, runDir: string, onResult: (state: DashboardState, quality: AnalysisPublication) => void,
+  signal?: AbortSignal, deadline = Date.now() + config.timeoutMs,
+): Promise<void> {
+  const log = (name: string, event: unknown): void => {
+    appendFileSync(path.join(runDir, name + ".jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event as object }) + "\n", { mode: 0o600 });
+  };
+  const artifacts = new SessionArtifactStore(runDir, "analysis-data");
+  const evidence = new AnalysisEvidence(database, (record) => log("evidence", record), artifacts);
+  const context = evidence.context(state, throughDate);
+  writeFileSync(path.join(runDir, "context.json"), JSON.stringify(context), { mode: 0o600 });
+  await runAnalysisAgent(config, context, evidence, (event) => log("events", event), (result) => {
+    writeFileSync(path.join(runDir, "report.json"), JSON.stringify(result.report, null, 2), { mode: 0o600 });
+    const quality: AnalysisPublication = { status: result.status, exclusions: result.exclusions.map((entry) => ({
+      period: entry.period, kind: entry.kind, priority: entry.priority, codes: [...new Set(entry.issues.map((issue) => issue.code))],
+    })) };
+    writeFileSync(path.join(runDir, "report-quality.json"), JSON.stringify(quality, null, 2), { mode: 0o600 });
+    onResult(applyAnalysisReport(state, result), quality);
+  }, signal, deadline);
 }

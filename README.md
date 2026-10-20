@@ -39,7 +39,7 @@ npm run build && setsid -f node --enable-source-maps dist/src/server/main.js >> 
 }
 ```
 
-所有验证成功的域账号都可登录，未单独配置的账号使用 `default`。`test` 派生自最新默认快照的前四张卡片：MT Effective OEE、MT Test OEE、ST Effective OEE、ST Test OEE；无需额外每日计算。配置引用的看板必须已注册，未知 ID 会使启动失败。
+所有验证成功的域账号都可登录，未单独配置的账号使用 `default`。`test` 由独立模板按卡片 ID 复用最新默认快照的四张概览卡：MT Effective OEE、MT Test OEE、ST Effective OEE、ST Test OEE；无需额外每日计算或 Agent 分析。配置引用的看板必须已注册，未知 ID 会使启动失败。
 
 每个新会话绑定当前登录账号，并立即保存初始看板。文件名自动包含账号水印，例如 `3000100562__2026-10-19T08-00-00-000Z__<会话ID>.jsonl`，文件内另记录归属。只有所有者能看到、继续、编辑或删除私有会话；同一账号在不同浏览器登录可看到相同历史。配置只决定新会话的初始看板，已有会话的快照与后续编辑保持独立。
 
@@ -120,6 +120,8 @@ crontab -l
 
 聊天 Agent 可委派 1–3 项独立子任务；每日分析固定并行调查日、周、月、季，再汇总并校验证据。OEE 专属工具通过读取 Skill 按会话启用，公式和筛选规则由 Skill 统一维护。
 
+每日分析在汇总前使用发布校验规则预检各子任务候选，将具体错误和可复用的证据反馈给主 Agent。`measure_loss` 的局部排序仅供调查；`machine_evidence_ids` 必须引用 `rank_machines` 标准排名，工具返回的 `source` 和 `report_usage` 说明引用用途。逐组修正中，已修好的组不消耗失败修正额度；最多允许三次失败修正，重复错误、修正时限和总工具额度仍会触发止损。
+
 后台一次性问答使用 `POST /chat/compeletion`（路径保留此拼写）：
 
 ```bash
@@ -133,9 +135,35 @@ curl http://127.0.0.1:3000/chat/compeletion \
 
 临时 Agent 额外收到接口交流提醒：直接在 `text` 中回答，可以读取看板作为数据来源，不修改看板，也不引导调用方查看网页看板或访问临时产物。
 
-新增看板在 `src/server/dashboard/index.ts` 注册 `DashboardDefinition`，提供 `id`、`loadInitial()` 和可选 `update(context)`；各看板独立计算并原子发布快照。
+各看板位于 `src/server/dashboard/<看板 ID>/`，在公共入口 `src/server/dashboard/index.ts` 注册 `DashboardDefinition`，提供 `id`、`loadInitial()` 和可选 `update(context)`。公共层负责注册、账号映射、通用快照存储，以及供看板按需引用的邮件发送和通知路由。
+
+```text
+src/server/dashboard/
+├── email.ts                 # SMTP 发送、收件路由及通知结果
+├── default/
+│   ├── index.ts             # 看板定义、快照读写、日邮件内容生成
+│   ├── template.ts          # 卡片数量、类型、顺序及静态展示配置
+│   ├── calculate/
+│   │   ├── index.ts         # 指标计算、分析占位卡及业务数值汇总
+│   │   └── periods.ts       # 业务周期与日期计算
+│   └── analysis/
+│       ├── index.ts         # 运行配置、子进程调度、超时与运行统计
+│       ├── agent.ts         # Agent、工具、证据管理及调用预算
+│       ├── validation.ts    # 报告结构、证据校验、修复反馈与降级
+│       └── worker.ts        # IPC 子进程入口
+└── test/
+    ├── index.ts
+    ├── template.ts
+    └── calculate/index.ts   # 按模板 ID 投影默认快照
+```
+
+`calculate/index.ts` 提供 `calculateDefaultDashboard()`，在调用方的只读事务内完成计算并按 ID 填回模板。Agent 在基础指标交给父进程后加载，计算与分析使用同一只读事务，成功后原子发布快照。看板入口可引用公共 `email.ts` 的通知分发器，提供信息类型和邮件内容生成函数；未配置发送规则时跳过发送。
+
+`test/` 引用默认看板资源，按自身模板顺序读取指定卡片并返回独立副本，不注册每日更新任务，也不启用分析模块；默认快照缺失或无效时复用默认空模板，仍展示四张等待更新的概览卡。
 
 ## 邮件通知
+
+邮件发送与收件路由统一位于 `src/server/dashboard/email.ts`；各看板按需引用，聊天的 `send_email` 工具也复用同一发送实现。
 
 在 `.env` 中同时配置 SMTP 主机、固定发件地址和显示名称即可启用邮件；默认端口为 25，使用无需认证的中继，支持服务器提供的 STARTTLS。
 

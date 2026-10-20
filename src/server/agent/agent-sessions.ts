@@ -34,7 +34,7 @@ import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
 import { createEmailTool, EMAIL_TOOL_NAME } from "../tool/email-tools.ts";
-import type { EmailConfig } from "../email.ts";
+import type { EmailConfig } from "../dashboard/email.ts";
 import { SessionDashboardStore, type InitialDashboardProvider } from "./session-dashboard.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import { oeeSkillSessionOptions } from "./oee-skill-runtime.ts";

@@ -1,10 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { parseDashboardState } from "../../../shared/dashboard.ts";
-import type { DefaultDashboardAnalysisConfig } from "./config.ts";
-import { createDefaultDashboard } from "./template.ts";
-import { calculateNumericCards } from "./calculate.ts";
-import { dashboardPeriods } from "./periods.ts";
-import { prepareAnalysisCards, analyzeCards } from "./analysis/index.ts";
+import type { DefaultDashboardAnalysisConfig } from "./index.ts";
+import { calculateDefaultDashboard } from "../calculate/index.ts";
 
 export interface DefaultDashboardWorkerRequest {
   readonly databasePath: string;
@@ -26,13 +22,11 @@ async function run(request: DefaultDashboardWorkerRequest, signal: AbortSignal):
   const database = new DatabaseSync(request.databasePath, { readOnly: true, timeout: 5000 });
   try {
     database.exec("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF; BEGIN");
-    const template = createDefaultDashboard(new Date(request.now));
-    const numericCards = calculateNumericCards(database, request.throughDate, request.warnings);
-    const analysisCards = prepareAnalysisCards(database, request.throughDate, request.warnings);
-    const state = parseDashboardState({ ...template, dateRange: dashboardPeriods(request.throughDate).trend,
-      widgets: [...numericCards, ...analysisCards] });
+    const state = calculateDefaultDashboard(database, request.throughDate, new Date(request.now), request.warnings);
     const deadline = Date.now() + request.config.timeoutMs;
     await send({ type: "base", state, deadline });
+    // Model SDK loading must not delay delivery of the usable numeric snapshot.
+    const { analyzeCards } = await import("./agent.ts");
     let completed: Promise<void> | undefined;
     await analyzeCards(database, state, request.throughDate, request.config, request.runDir, (analyzed, quality) => {
       signal.throwIfAborted();

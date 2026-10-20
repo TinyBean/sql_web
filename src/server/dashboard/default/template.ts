@@ -1,11 +1,26 @@
 import {
   parseDashboardState, type DashboardState, type DashboardOverviewWidget,
-  type DashboardLineWidget, type DashboardTableWidget,
+  type DashboardLineWidget, type DashboardTableWidget, type DashboardWidget,
 } from "../../../shared/dashboard.ts";
-import { PERIOD_KEYS, ANALYSIS_PERIOD_KEYS, PERIOD_GRAINS, type PeriodKey } from "./periods.ts";
+import { PERIOD_KEYS, ANALYSIS_PERIOD_KEYS, PERIOD_GRAINS, type PeriodKey } from "./calculate/periods.ts";
 
 const WAITING = "尚未更新,等待每日任务生成数据";
 const empty = () => ({ subtitle: WAITING, data: [], warnings: [WAITING] });
+
+/** Copy runtime values while keeping the template's identity, layout and encoding. */
+export function fillCardTemplate(template: DashboardWidget, values: DashboardWidget): DashboardWidget {
+  if (template.id !== values.id || template.kind !== values.kind) {
+    throw new Error("卡片计算结果与模板不匹配：" + template.id);
+  }
+  const card = { ...template, data: values.data, title: values.title, subtitle: values.subtitle,
+    metricDefinition: values.metricDefinition, warnings: values.warnings };
+  if (card.kind === "overview" && values.kind === "overview") {
+    return { ...card, encoding: { ...card.encoding,
+      ...(values.encoding.description !== undefined ? { description: values.encoding.description } : {}),
+    } };
+  }
+  return card;
+}
 
 export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): DashboardOverviewWidget {
   const label = effective ? "Effective OEE" : "Test OEE";
@@ -92,7 +107,16 @@ const CARD_TEMPLATES = [
   ...PERIOD_KEYS.map(createTrendTemplate), createExtremesTemplate(), createMachineExtremesTemplate(),
   ...ANALYSIS_PERIOD_KEYS.map(createAnalysisTemplate),
 ];
-export const DEFAULT_CARD_IDS: readonly string[] = CARD_TEMPLATES.map((widget) => widget.id);
+
+/** Initial snapshots and generated dashboards share the template's card structure. */
+export function validateDefaultDashboard(state: DashboardState): void {
+  if (state.widgets.length !== CARD_TEMPLATES.length || state.widgets.some((widget, index) => {
+    const template = CARD_TEMPLATES[index]!;
+    return widget.id !== template.id || widget.kind !== template.kind;
+  })) {
+    throw new Error(`默认看板必须包含模板指定顺序和类型的 ${CARD_TEMPLATES.length} 张卡片`);
+  }
+}
 
 export function createDefaultDashboard(now = new Date()): DashboardState {
   // Parsing validates the templates and gives every session its own copy.

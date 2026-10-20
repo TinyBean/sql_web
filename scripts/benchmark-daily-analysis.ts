@@ -6,9 +6,8 @@ import { DatabaseSync, backup } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { loadDataCommandConfig } from "./database/data-command-config.ts";
 import { assertDate } from "../src/server/database/business-dates.ts";
-import { readAnalysisEvents, summarizeAnalysisEvents } from "../src/server/dashboard/default/analysis/metrics.ts";
+import { readAnalysisEvents, summarizeAnalysisEvents, type generateDefaultDashboard } from "../src/server/dashboard/default/analysis/index.ts";
 import type { AppLogger } from "../src/server/logger.ts";
-import type { generateDefaultDashboard } from "../src/server/dashboard/default/run.ts";
 
 const { values } = parseArgs({ options: {
   "baseline-root": { type: "string" }, "candidate-root": { type: "string", default: process.cwd() },
@@ -53,8 +52,11 @@ const now = new Date(); // Identical dashboard timestamps avoid irrelevant basel
 for (let pair = 1; pair <= pairs; pair += 1) {
   for (const variant of pair % 2 ? ["baseline", "candidate"] : ["candidate", "baseline"]) {
     const root = variant === "baseline" ? baselineRoot : candidateRoot;
-    const currentEntry = path.join(root, "src/server/dashboard/default/run.ts");
-    const module = await import(pathToFileURL(existsSync(currentEntry) ? currentEntry : path.join(root, "src/server/dashboard/default/analysis/run.ts")).href);
+    // Baseline checkouts can still use either of the previous generation entrypoints.
+    const entry = ["src/server/dashboard/default/run.ts", "src/server/dashboard/default/analysis/run.ts",
+      "src/server/dashboard/default/analysis/index.ts"].map((file) => path.join(root, file)).find(existsSync);
+    if (!entry) throw new Error("找不到看板生成入口：" + root);
+    const module = await import(pathToFileURL(entry).href);
     const generate = (module.generateDefaultDashboard ?? module.generateAnalyzedDashboard) as typeof generateDefaultDashboard;
     const runId = variant + "-" + pair;
     console.log(JSON.stringify({ event: "benchmark.started", runId, at: new Date().toISOString() }));

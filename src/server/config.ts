@@ -3,7 +3,7 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 import { fileURLToPath } from "node:url";
 import type { ModelSelection } from "../shared/contracts.ts";
-import { validateEmailConfig, type EmailConfig } from "./email.ts";
+import { validateEmailConfig, type EmailConfig } from "./dashboard/email.ts";
 import { DEFAULT_DOMAIN_VERIFY_URL } from "./auth.ts";
 
 export interface AppEnvironment {

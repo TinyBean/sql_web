@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { readDefaultDashboard, writeDefaultDashboard } from "../../src/server/dashboard/default/store.ts";
+import { readDefaultDashboard, writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
+import { parseDashboardState } from "../../src/shared/dashboard.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
@@ -123,4 +124,28 @@ test("publication validates before writing and cleans temporary files after rena
   assert.throws(() => writeDefaultDashboard(directoryTarget, state));
   assert.equal(readFileSync(file, "utf8"), original);
   assert.deepEqual(readdirSync(root).sort(), ["blocked", "default.json"]);
+});
+
+test("default snapshot validation checks template types as well as IDs, count and order", (t) => {
+  const now = Date.parse("2026-10-20T01:00:00.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const root = mkdtempSync(path.join(tmpdir(), "dashboard-default-types-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "default.json");
+  const original = createDefaultDashboard();
+  const wrongType = parseDashboardState({ ...original, widgets: [
+    { ...original.widgets[0], kind: "kpi", encoding: { value: "value", comparison: null }, data: [{ value: 12 }] },
+    ...original.widgets.slice(1),
+  ] });
+  writeDefaultDashboard(file, original);
+  const saved = readFileSync(file, "utf8");
+  for (const invalid of [wrongType, { ...original, widgets: original.widgets.slice(1) },
+    { ...original, widgets: [...original.widgets].reverse() }]) {
+    assert.throws(() => writeDefaultDashboard(file, invalid), /模板指定顺序和类型的 13 张卡片/u);
+    assert.equal(readFileSync(file, "utf8"), saved);
+  }
+  const invalidJson = JSON.stringify(wrongType);
+  writeFileSync(file, invalidJson);
+  assert.deepEqual(readDefaultDashboard(file), original);
+  assert.equal(readFileSync(file, "utf8"), invalidJson);
 });

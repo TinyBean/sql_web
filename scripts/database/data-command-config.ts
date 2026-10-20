@@ -3,9 +3,9 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 import type { OeeDataStoreOptions } from "./oee-data-store.ts";
 import { loadEmailConfig } from "../../src/server/config.ts";
-import type { NotificationOptions } from "../../src/server/notifications.ts";
+import type { NotificationOptions } from "../../src/server/dashboard/email.ts";
 
-import type { DefaultDashboardAnalysisConfig } from "../../src/server/dashboard/default/config.ts";
+import type { DefaultDashboardAnalysisConfig } from "../../src/server/dashboard/default/analysis/index.ts";
 
 export interface DataCommandConfig extends OeeDataStoreOptions {
   readonly defaultDashboardPath: string;

@@ -11,7 +11,7 @@ import { loadAgentSkillCatalog } from "../../src/server/agent/skill-catalog.ts";
 import { SubagentRunner, type SubagentResult, type SubagentRunnerOptions } from "../../src/server/agent/subagent.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import { AnalysisToolCallBudget } from "../../src/server/dashboard/default/analysis/budget.ts";
+import { AnalysisToolCallBudget } from "../../src/server/dashboard/default/analysis/agent.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { createAgentTools } from "../../src/server/tool/database-tools.ts";
 import { oeeSkillSessionOptions } from "../../src/server/agent/oee-skill-runtime.ts";

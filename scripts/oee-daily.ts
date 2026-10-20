@@ -6,7 +6,7 @@ import { loadDataCommandConfig } from "./database/data-command-config.ts";
 import { dailyUpdatePlan } from "./database/daily-update.ts";
 import { runDailyUpdate } from "./scheduling/daily-update.ts";
 import { outcomeExitCode } from "./database/oee-data-store.ts";
-import { createNotificationDispatcher } from "../src/server/notifications.ts";
+import { createNotificationDispatcher } from "../src/server/dashboard/email.ts";
 
 async function main(): Promise<void> {
   const now = new Date();

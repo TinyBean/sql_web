@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import test from "node:test";
-import { sendEmail } from "../../src/server/email.ts";
+import { sendEmail } from "../../src/server/dashboard/email.ts";
 import { smtpServer, decodedBody } from "../helpers/smtp.ts";
 import { createEmailTool } from "../../src/server/tool/email-tools.ts";
 

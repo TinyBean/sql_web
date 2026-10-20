@@ -6,14 +6,13 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { readCalculatedDashboard } from "../helpers/calculated-dashboard.ts";
-import { calculateNumericCards } from "../../src/server/dashboard/default/calculate.ts";
-import { prepareAnalysisCards } from "../../src/server/dashboard/default/analysis/index.ts";
+import { calculateDefaultDashboard } from "../../src/server/dashboard/default/calculate/index.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
 import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
 import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
-import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/periods.ts";
+import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/calculate/periods.ts";
 import { addDays, latestClosedBusinessDate, latestCompleteWeek } from "../../src/server/database/business-dates.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import type { DashboardRow } from "../../src/shared/dashboard.ts";
@@ -122,7 +121,7 @@ test("week labels match SQLite %U including years beginning on Monday and Sunday
   assert.equal(weekLabel("2026-09-13"), "2026-W37");
 });
 
-test("numeric calculation and analysis preparation own separate cards without starting an agent or writing artifacts", (t) => {
+test("calculation fills the template and analysis placeholders without starting an agent or writing artifacts", (t) => {
   const { config, directory } = fixture(t);
   const database = new DatabaseSync(config.databasePath, { readOnly: true });
   try {
@@ -130,10 +129,15 @@ test("numeric calculation and analysis preparation own separate cards without st
     // Establish SQLite's read snapshot (and its WAL sidecars) before observing card generation.
     database.prepare("SELECT COUNT(*) FROM oee_availability").get();
     const before = readdirSync(directory, { recursive: true });
-    const numeric = calculateNumericCards(database, "2026-01-12");
-    assert.deepEqual(numeric.map((widget) => widget.id), createDefaultDashboard().widgets.slice(0, 9).map((widget) => widget.id));
-    const analysis = prepareAnalysisCards(database, "2026-01-12");
-    assert.deepEqual(analysis.map((widget) => widget.id), createDefaultDashboard().widgets.slice(9).map((widget) => widget.id));
+    const now = new Date("2026-01-13T01:00:00.000Z");
+    const state = calculateDefaultDashboard(database, "2026-01-12", now);
+    const template = createDefaultDashboard(now);
+    assert.equal(state.dataAsOf, now.toISOString());
+    assert.equal(state.revision, 0);
+    assert.deepEqual(state.widgets.map(({ id, kind, size, format }) => ({ id, kind, size, format })),
+      template.widgets.map(({ id, kind, size, format }) => ({ id, kind, size, format })));
+    const analysis = state.widgets.filter((widget) => widget.id.startsWith("improvement-actions-"));
+    assert.equal(analysis.length, 4);
     assert.ok(analysis.every((widget) => widget.data.length === 0));
     assert.equal(database.prepare("SELECT total_changes() AS changes").get()?.["changes"], 0);
     assert.deepEqual(readdirSync(directory, { recursive: true }), before);

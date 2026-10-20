@@ -2,6 +2,7 @@ import type { JsonObject } from "../../shared/contracts.ts";
 import { parseDashboardState, type DashboardState } from "../../shared/dashboard.ts";
 import type { AppLogger } from "../logger.ts";
 import { createDefaultDashboardDefinition, type DefaultDashboardOptions } from "./default/index.ts";
+import { createTestDashboardDefinition } from "./test/index.ts";
 
 export interface DashboardUpdateContext {
   /** Updates may only open this database read-only. Database ingestion runs separately. */
@@ -60,9 +61,6 @@ export function createDashboardRegistry(options: DefaultDashboardOptions = {}): 
   const defaultDefinition = createDefaultDashboardDefinition(options);
   return new DashboardRegistry([
     defaultDefinition,
-    { id: "test", loadInitial: () => {
-      const state = defaultDefinition.loadInitial();
-      return parseDashboardState({ ...state, widgets: state.widgets.slice(0, 4) });
-    } },
+    createTestDashboardDefinition(defaultDefinition),
   ]);
 }

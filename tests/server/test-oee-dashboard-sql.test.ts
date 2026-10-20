@@ -5,7 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { DashboardRow } from "../../src/shared/dashboard.ts";
-import { buildTypeOverviews } from "../../src/server/dashboard/default/overviews.ts";
+import { buildTypeOverviews } from "../../src/server/dashboard/default/calculate/index.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import {

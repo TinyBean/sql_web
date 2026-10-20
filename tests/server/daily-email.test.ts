@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createDailyImprovementEmail } from "../../src/server/dashboard/default/daily-email.ts";
+import { createDailyImprovementEmail } from "../../src/server/dashboard/default/index.ts";
 import { createAnalysisTemplate } from "../../src/server/dashboard/default/template.ts";
 import { dailyDashboard } from "../helpers/daily-dashboard.ts";
 
@@ -90,7 +90,6 @@ test("missing and unavailable daily cards cannot become a notification", () => {
     assert.throws(() => createDailyImprovementEmail({ ...state, widgets }, "2026-09-14"), /不可用/u);
   }
 });
-
 
 test("degraded email marks quality and affected periods while retaining only daily rows", () => {
   const state = dailyDashboard();

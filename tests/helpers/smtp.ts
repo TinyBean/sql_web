@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import type { TestContext } from "node:test";
-import type { EmailConfig } from "../../src/server/email.ts";
+import type { EmailConfig } from "../../src/server/dashboard/email.ts";
 
 interface SmtpOptions {
   readonly reject?: readonly string[];

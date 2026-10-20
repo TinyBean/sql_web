@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTypeOverviews } from "../../src/server/dashboard/default/overviews.ts";
+import { buildTypeOverviews } from "../../src/server/dashboard/default/calculate/index.ts";
 
 const range = { start: "2026-01-01", end: "2026-01-02" };
 

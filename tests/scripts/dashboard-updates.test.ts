@@ -9,7 +9,10 @@ import type { DashboardState } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import type { DashboardDefinition, DashboardUpdateContext, DashboardUpdateOutcome } from "../../src/server/dashboard/index.ts";
 import { DashboardRegistry, createDashboardRegistry } from "../../src/server/dashboard/index.ts";
-import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
+import { createDefaultDashboardDefinition, writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
+import { createTestDashboardDefinition } from "../../src/server/dashboard/test/index.ts";
+import { projectTestDashboard } from "../../src/server/dashboard/test/calculate/index.ts";
 import { readDashboardSnapshot, writeDashboardSnapshot } from "../../src/server/dashboard/snapshot-store.ts";
 import { dailyUpdatePlan, type DailyDatabaseDependencies } from "../../scripts/database/daily-update.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
@@ -174,7 +177,7 @@ test("daily CLI dry-run reports database requests and registered updates without
   assert.equal(output.dryRun, true);
   assert.equal(output.requests.length, 2);
   assert.equal(output.databasePath, config.databasePath);
-  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }, { dashboardId: "test", hasUpdate: false }]);
+  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }, { dashboardId: "test", hasUpdate: true }]);
   assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "throughDate", "timezone"]);
   assert.deepEqual(output.requests, [
     { dataset: "availability", date: "2026-01-12" },
@@ -188,4 +191,43 @@ test("shared registration loads initial snapshots without requiring an update ag
   assert.deepEqual(registry.list().map((definition) => definition.id), ["default", "test"]);
   assert.equal(registry.list()[0]?.update, undefined);
   assert.equal(registry.loadInitial().widgets.length, 13);
+});
+
+test("daily test refresh follows one default publication and skips old same-day data after a failed rerun", async (t) => {
+  const { config } = fixture(t);
+  let generations = 0;
+  let fail = false;
+  const definition = createDefaultDashboardDefinition(config, {
+    async generate(_config, throughDate, generatedAt, _warnings, _logger, runId) {
+      generations += 1;
+      if (fail) throw new Error("default generation failed");
+      const template = createDefaultDashboard(generatedAt);
+      const state = { ...template, dateRange: { start: "2026-01-01", end: throughDate },
+        widgets: template.widgets.map((widget) => ({ ...widget, warnings: [] })),
+      };
+      return { state, analysisStatus: "completed", analysisReason: null,
+        analysisRunId: runId!, analysisArtifactDir: "unused-analysis" };
+    },
+    publish: writeDefaultDashboard,
+  });
+  const registry = new DashboardRegistry([definition, createTestDashboardDefinition(definition)]);
+  const first = await runDailyUpdate(config, plan, registry, logger, database([]));
+  assert.equal(generations, 1, "test reuses publication without another model run");
+  assert.deepEqual(first.dashboards.map(({ dashboardId, status, published }) => ({ dashboardId, status, published })), [
+    { dashboardId: "default", status: "completed", published: true },
+    { dashboardId: "test", status: "completed", published: true },
+  ]);
+  assert.equal(first.dashboards[1]!.dataAsOf, first.dashboards[0]!.dataAsOf);
+  assert.deepEqual(registry.loadInitial("test"), projectTestDashboard(registry.loadInitial()));
+  const before = readFileSync(config.defaultDashboardPath, "utf8");
+
+  fail = true;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse(first.dashboards[0]!.dataAsOf!) + 60_000 });
+  const second = await runDailyUpdate(config, plan, registry, logger, database([]));
+  assert.equal(generations, 2);
+  assert.equal(second.dashboards[0]!.status, "failed");
+  assert.equal(second.dashboards[1]!.status, "skipped");
+  assert.equal(second.dashboards[1]!.published, false);
+  assert.match(second.dashboards[1]!.reason!, /本次未发布/u);
+  assert.equal(readFileSync(config.defaultDashboardPath, "utf8"), before);
 });

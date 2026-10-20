@@ -90,7 +90,7 @@ export function measureLoss(
       ...(signal === undefined ? {} : { signal }),
     });
     if (exported.truncated) {
-      throw new Error("损失查询结果超过" + (exported.truncationReason === "row_limit" ? "行数" : "字节") + "上限，快照未保存，请缩小查询范围");
+      throw new Error("损失查询结果超过" + (exported.truncationReason === "row_limit" ? "行数" : "字节") + "上限,快照未保存,请缩小查询范围");
     }
     return exported;
   });
@@ -107,7 +107,7 @@ export function createMeasureLossTool(
     name: MEASURE_LOSS_TOOL_NAME,
     label: "查询标准实测损失",
     description: "先读 Test OEE Skill 及参考文档。按业务日闭区间查询 MT/ST 非 Machine_Running 的 Availability 损失,遵循日期/PCIe/LOT 规则(排除 Q/E,Yield 白名单不适用)。states/machines 仅筛选损失,不影响类型覆盖天数;by_machine 返回机台明细。自动保存完整快照(最多 100,000 行、32 MiB,任一超限则失败且不保存),snapshot.name 可传给 code_interpreter/update_dashboard。返回明细或调查摘要,row_index 指向原始行;空结果不代表零损失或完整覆盖。每日分析的 evidence_id 可用于 evidence_ids,禁止用于 machine_evidence_ids;报告排名用 test_oee_calculator__rank_machines。loss_reference 必须沿用程序指定的 losses[period].evidence_id 及入选原始行。",
-    promptSnippet: "按业务日范围查询标准损失，保存完整快照并返回明细或摘要",
+    promptSnippet: "按业务日范围查询标准损失,保存完整快照并返回明细或摘要",
     executionMode: "sequential",
     parameters: measureLossParameters,
     async execute(_id, params, signal) {

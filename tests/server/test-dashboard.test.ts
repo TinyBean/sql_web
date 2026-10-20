@@ -9,6 +9,9 @@ import { writeDefaultDashboard } from "../../src/server/dashboard/default/index.
 import { createTestDashboardDefinition } from "../../src/server/dashboard/test/index.ts";
 import { createTestDashboard } from "../../src/server/dashboard/test/template.ts";
 import { projectTestDashboard } from "../../src/server/dashboard/test/calculate/index.ts";
+import type { DashboardUpdateContext } from "../../src/server/dashboard/index.ts";
+import type { AppLogger } from "../../src/server/logger.ts";
+import type { DashboardState } from "../../src/shared/dashboard.ts";
 
 const now = new Date("2026-10-20T01:00:00.000Z");
 const ids = ["mt-effective-oee-overview", "mt-oee-overview", "st-effective-oee-overview", "st-oee-overview"];
@@ -24,7 +27,7 @@ test("test dashboard selects values by ID in its own order and isolates every re
   };
   const definition = createTestDashboardDefinition({ loadInitial: () => source });
   assert.equal(definition.id, "test");
-  assert.equal(definition.update, undefined);
+  assert.equal(typeof definition.update, "function");
   const state = definition.loadInitial();
   assert.deepEqual(state, { ...source, widgets: ids.map((id) => source.widgets.find((widget) => widget.id === id)) });
   assert.deepEqual(state.widgets.map((widget) => widget.kind), Array(4).fill("overview"));
@@ -64,7 +67,7 @@ test("registered test dashboard follows default publication and falls back to fo
   const defaultDashboardPath = path.join(root, "default.json");
   const registry = createDashboardRegistry({ defaultDashboardPath });
   const empty = createTestDashboard(now);
-  assert.equal(registry.list().find((definition) => definition.id === "test")?.update, undefined);
+  assert.equal(typeof registry.list().find((definition) => definition.id === "test")?.update, "function");
   assert.deepEqual(registry.loadInitial("test"), empty);
   for (const invalid of ["{broken", JSON.stringify({ ...createDefaultDashboard(now), widgets: [] })]) {
     writeFileSync(defaultDashboardPath, invalid);
@@ -75,4 +78,55 @@ test("registered test dashboard follows default publication and falls back to fo
   writeDefaultDashboard(defaultDashboardPath, published);
   assert.deepEqual(registry.loadInitial("test"), { ...published, widgets: ids.map((id) => published.widgets.find((widget) => widget.id === id)) });
   assert.deepEqual(empty, createTestDashboard(now));
+});
+
+test("test updates only this run's published projection and carries overview and sync warnings", async () => {
+  const events: string[] = [];
+  const logger: AppLogger = { info(event) { events.push(event); }, warn() {}, error() {}, child() { return this; } };
+  const context: DashboardUpdateContext = {
+    databasePath: "/unused.sqlite", throughDate: "2026-10-19", now, syncWarnings: [], runId: "test-run", logger,
+  };
+  const original = createDefaultDashboard(now);
+  let source: DashboardState = { ...original, dateRange: { start: "2026-01-01", end: context.throughDate },
+    widgets: original.widgets.map((widget) => ({ ...widget, warnings: [] })),
+  };
+  const definition = createTestDashboardDefinition({ loadInitial: () => source });
+  const success = await definition.update!(context);
+  assert.equal(success.status, "completed");
+  assert.equal(success.published, true);
+  assert.equal(success.dataAsOf, context.now.toISOString());
+  assert.deepEqual(success.details, { sourceDashboardId: "default", widgetCount: 4 });
+  assert.deepEqual(definition.loadInitial(), projectTestDashboard(source));
+  assert.deepEqual(events, ["daily.dashboard.published"]);
+
+  // Analysis warnings on cards outside this projection do not degrade test's numeric overview.
+  source = { ...source, widgets: source.widgets.map((widget) => ({
+    ...widget, warnings: widget.kind === "overview" ? [] : ["分析暂不可用"],
+  })) };
+  assert.equal((await definition.update!(context)).status, "completed");
+  source = { ...source, widgets: source.widgets.map((widget, index) => ({
+    ...widget, warnings: index === 0 ? ["数据覆盖不完整"] : widget.warnings,
+  })) };
+  const warning = await definition.update!({ ...context, syncWarnings: ["同步缺日"] });
+  assert.equal(warning.status, "completed_with_warnings");
+  assert.equal(warning.published, true);
+  assert.equal(warning.reason, "同步缺日；数据覆盖不完整");
+
+  const latest = source;
+  for (const previous of [
+    { ...latest, dataAsOf: new Date(now.getTime() - 1).toISOString() },
+    { ...latest, dateRange: { start: "2026-01-01", end: "2026-10-18" } },
+    { ...latest, dateRange: { start: null, end: null } },
+  ]) {
+    source = previous;
+    const before = events.length;
+    const skipped = await definition.update!(context);
+    assert.equal(skipped.status, "skipped");
+    assert.equal(skipped.published, false);
+    assert.equal(skipped.dataAsOf, null);
+    assert.match(skipped.reason!, /本次未发布/u);
+    assert.equal(events.length, before);
+  }
+  source = { ...latest, widgets: latest.widgets.slice(1) };
+  await assert.rejects(definition.update!(context), /所需卡片/u);
 });

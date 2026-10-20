@@ -61,6 +61,7 @@ export function createDashboardRegistry(options: DefaultDashboardOptions = {}): 
   const defaultDefinition = createDefaultDashboardDefinition(options);
   return new DashboardRegistry([
     defaultDefinition,
+    // test refreshes its projection after default has published this run's snapshot.
     createTestDashboardDefinition(defaultDefinition),
   ]);
 }

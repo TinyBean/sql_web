@@ -21,11 +21,11 @@ export function lossView(record: LossResult) {
   const indexed = record.rows.map((row, row_index) => ({ row_index, row,
     ...(typeof row["machine"] === "string" ? { machine_label: machineLabel(row["machine"]) } : {}) }));
   if (record.truncated) return { mode: "unavailable" as const, rows_complete: false,
-    reason: "原始证据被截断，不能生成全量统计或用于报告；请缩小查询范围" };
+    reason: "原始证据被截断,不能生成全量统计或用于报告;请缩小查询范围" };
   const summaries = machineLossSummaries(record);
   const machine_summaries = byteLength(summaries) <= LOSS_VIEW_BYTES / 3 ? summaries : [];
   const machine_summaries_complete = machine_summaries.length === summaries.length;
-  const complete = { mode: "complete" as const, rows_complete: true, note: "空结果仅表示没有匹配损失行，不能推断数据覆盖完整或损失为零。", rows: indexed, machine_summaries, machine_summaries_complete };
+  const complete = { mode: "complete" as const, rows_complete: true, note: "空结果仅表示没有匹配损失行,不能推断数据覆盖完整或损失为零。", rows: indexed, machine_summaries, machine_summaries_complete };
   if (indexed.length <= 32 && byteLength(complete) <= LOSS_VIEW_BYTES) return complete;
   const byKind = ["MT", "ST"].map((kind) => {
     const entries = indexed.filter((entry) => entry.row["kind"] === kind);
@@ -51,7 +51,7 @@ export function lossView(record: LossResult) {
   });
   const summary = { mode: "summary" as const, rows_complete: false, totals_from_complete_evidence: true,
     state_summaries_complete: true, rankings_complete: false, by_kind: byKind, machine_summaries, machine_summaries_complete,
-    note: "合计与占比为当前筛选范围的派生统计，不是 loss_reference；ranking 的 row_index 指向原始证据。覆盖天数不是机台天数之和；无损失记录不等于零损失。" };
+    note: "合计与占比为当前筛选范围的派生统计,不是 loss_reference;ranking 的 row_index 指向原始证据。覆盖天数不是机台天数之和;无损失记录不等于零损失。" };
   // Trim evenly by rank, never accidentally give ST only the remainder of a shared row limit.
   while (byteLength(summary) > LOSS_VIEW_BYTES && byKind.some((group) => group.ranking.length)) {
     for (const group of byKind) group.ranking.pop();
@@ -65,9 +65,16 @@ export function lossView(record: LossResult) {
 }
 
 export function lossOutput(record: LossResult, evidenceId?: string) {
-  const details = { ...(evidenceId === undefined ? {} : { evidence_id: evidenceId }), range: record.range,
+  const details = { source: "measure_loss", ...(evidenceId === undefined ? {} : {
+    evidence_id: evidenceId,
+    report_usage: {
+      evidence_ids: "可作为同周期的补充调查证据。",
+      machine_evidence_ids: "禁止引用此编号。ranking 和 machine_summaries 仅供调查;报告排名必须使用 rank_machines 返回的编号。",
+      loss_reference: "仅引用程序指定的 losses[period].evidence_id 及入选原始行;不能用本次补查替换。",
+    },
+  }), range: record.range,
     scope: record.scope, snapshot: record.snapshot ?? null, row_count: record.rows.length,
     truncated: record.truncated, view: lossView(record),
-    next_step: "complete 视图已含全部结果，summary 已含全量计算的合计和局部排名；可直接分析。额外调查才用 SQL/Python。需要更多明细时按 snapshot.name 读取，保留原始 row_index。" };
+    next_step: "complete 视图包含全部明细,summary 包含派生统计和局部排序,可用于调查。报告机台排名请复用或调用 test_oee_calculator__rank_machines;局部排序不能替代标准排名证据。额外调查才用 SQL/Python;读取 snapshot.name 时保留原始 row_index。" };
   return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 }

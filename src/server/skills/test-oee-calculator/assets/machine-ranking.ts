@@ -180,14 +180,20 @@ export function createRankMachinesTool(
 ) {
   return defineTool({
     name: RANK_MACHINES_LOCAL_TOOL_NAME, label: "查询问题指标机台 TOP3", executionMode: "sequential",
-    description: "查询同业务日范围、MT/ST 和问题指标的机台 TOP3,保存完整候选快照。loss_hours 按损失小时降序,其余指标按数值升序;states 仅用于 loss_hours。value/metric_value 为百分数值,损失为小时;NULL 不排名。问题分析逐字引用 summary。公式、占比分母、覆盖和历史口径见 Skill 业务规则。",
+    description: "查询同业务日范围、MT/ST 和问题指标的机台 TOP3,保存完整候选快照。loss_hours 按损失小时降序,其余指标按数值升序;states 仅用于 loss_hours。value/metric_value 为百分数值,损失为小时;NULL 不排名。每日报告的 machine_evidence_ids 仅接受本工具 source=rank_machines 的同周期、同类型、单个入选状态 loss_hours 排名编号，同时加入 evidence_ids；不能用于 loss_reference。问题分析逐字引用 summary。公式、占比分母、覆盖和历史口径见 Skill 业务规则。",
     parameters: rankMachinesParameters,
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       if (!runtime) throw new Error("OEE Skill 排名工具缺少会话运行依赖");
       const measurement = rankMachines(runtime, params, signal, cache);
       const evidenceId = recordEvidence?.(measurement);
-      const details = { ...(evidenceId ? { evidence_id: evidenceId } : {}), range: measurement.range, scope: measurement.scope,
+      const details = { source: "rank_machines", ...(evidenceId ? { evidence_id: evidenceId,
+        report_usage: {
+          evidence_ids: "引用排名时同时加入此编号。",
+          machine_evidence_ids: "仅当归属本周期、同 MT/ST、同日期范围、metric=loss_hours、states 为单个入选状态且 basis=report_period 时可引用。",
+          loss_reference: "禁止使用派生排名；使用程序提供的完整损失汇总。",
+        },
+      } : {}), range: measurement.range, scope: measurement.scope,
         snapshot: measurement.snapshot, truncated: false, ...machineRankingView(measurement) };
       return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
     },

@@ -21,8 +21,10 @@ const AnalysisItemSchema = Type.Object({
   category: Type.Literal("availability", { description: ANALYSIS_CATEGORY_RULES }),
   issue: text, measure: text,
   suggested_owner: text,
-  evidence_ids: refs,
-  machine_evidence_ids: refs,
+  evidence_ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12,
+    description: "本建议使用的全部真实证据编号，必须包含 loss_reference.evidence_id 及 machine_evidence_ids。" }),
+  machine_evidence_ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12,
+    description: "仅接受 source=rank_machines 的本周期、同 MT/ST、同日期范围、单个入选状态的完整 loss_hours/report_period 排名。measure_loss 的 ranking 或 machine_summaries 不是合格来源，禁止填入其编号。编号同时加入 evidence_ids。" }),
   loss_reference: Type.Object({ evidence_id: Type.String({ minLength: 1 }), row_index: Type.Integer({ minimum: 0 }) },
     { additionalProperties: false, description: "必填；引用程序提供的本期完整损失证据和入选状态原始行号。" }),
 }, { additionalProperties: false });
@@ -32,13 +34,16 @@ const AnalysisGroupSchema = Type.Object({
   evidence_ids: refs,
   items: Type.Array(AnalysisItemSchema, { maxItems: 3 }),
 }, { additionalProperties: false });
-export const AnalysisReportSchema = Type.Object({
-  periods: Type.Array(Type.Object({
-    period: PeriodKeySchema, comparison: text,
-    minimum_evidence: Type.String(), history_evidence: Type.String(),
-    groups: Type.Array(AnalysisGroupSchema, { minItems: 2, maxItems: 2 }),
-  }, { additionalProperties: false }), { minItems: 4, maxItems: 4 }),
+const AnalysisPeriodSchema = Type.Object({
+  period: PeriodKeySchema, comparison: text,
+  minimum_evidence: Type.String(), history_evidence: Type.String(),
+  groups: Type.Array(AnalysisGroupSchema, { minItems: 2, maxItems: 2 }),
 }, { additionalProperties: false });
+const reportSchema = (periodCount: number) => Type.Object({
+  periods: Type.Array(AnalysisPeriodSchema, { minItems: periodCount, maxItems: periodCount }),
+}, { additionalProperties: false });
+export const AnalysisReportSchema = reportSchema(4);
+const AnalysisCandidateSchema = reportSchema(1);
 
 export type AnalysisReport = Static<typeof AnalysisReportSchema>;
 type AnalysisGroup = Static<typeof AnalysisGroupSchema>;
@@ -139,9 +144,13 @@ function decodeAnalysisStructures(value: unknown): unknown {
 }
 
 export function parseAnalysisReport(value: unknown): AnalysisReport {
+  return parseReport(value, AnalysisReportSchema);
+}
+
+function parseReport(value: unknown, schema: typeof AnalysisReportSchema): AnalysisReport {
   const decoded = decodeAnalysisStructures(value);
-  if (!Value.Check(AnalysisReportSchema, decoded)) {
-    const result = structureIssues(AnalysisReportSchema, decoded);
+  if (!Value.Check(schema, decoded)) {
+    const result = structureIssues(schema, decoded);
     throw new AnalysisValidationError(result.issues, result.has_more);
   }
   return decoded;
@@ -151,7 +160,12 @@ export function parseAnalysisReport(value: unknown): AnalysisReport {
 export function validateAnalysisReport(
   input: unknown, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
 ): AnalysisResult {
-  const value = parseAnalysisReport(input);
+  return validateReport(parseAnalysisReport(input), context, evidence, ANALYSIS_PERIOD_KEYS);
+}
+
+function validateReport(
+  value: AnalysisReport, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>, periods: readonly PeriodKey[],
+): AnalysisResult {
   const issues: AnalysisValidationIssue[] = [];
   const rows = {} as Record<PeriodKey, DashboardRow[]>;
   const renderedItems = new Map<AnalysisGroup["items"][number], DashboardRow>();
@@ -174,7 +188,7 @@ export function validateAnalysisReport(
   const refs = (ids: readonly string[], location: Location, path: string): void => {
     ids.forEach((id, index) => ref(id, location, path + "/" + index));
   };
-  for (const key of ANALYSIS_PERIOD_KEYS) {
+  for (const key of periods) {
     const matching = value.periods.map((report, index) => ({ report, index })).filter(({ report }) => report.period === key);
     if (matching.length !== 1) {
       add({ period: key }, "/periods", "PERIOD_COVERAGE", "每个周期必须且只能提交一次", 1, matching.length); continue;
@@ -294,6 +308,37 @@ export function validateAnalysisReport(
     }
   }
   return { report: value, rows, status: "completed", exclusions: [] };
+}
+
+/** Preflight uses the publication rules without accepting a report or spending repair attempts. */
+export function inspectAnalysisCandidate(
+  text: string, period: PeriodKey, context: AnalysisContext, evidence: ReadonlyMap<string, Evidence>,
+) {
+  let candidate: AnalysisReport | undefined;
+  try {
+    let input: unknown;
+    try {
+      // Some final replies introduce their JSON with a sentence or a Markdown fence.
+      // Accept exactly one complete object; never merge fragments or choose among multiple candidates.
+      const start = text.indexOf("{"), end = text.lastIndexOf("}");
+      if (start < 0 || end < start || !/^(?:\s*```)?\s*$/u.test(text.slice(end + 1))) throw new Error("incomplete candidate");
+      input = JSON.parse(text.slice(start, end + 1)) as unknown;
+    }
+    catch {
+      throw new AnalysisValidationError([{ code: "STRUCTURE_INVALID", path: "/", period,
+        expected: "单周期 JSON 对象", actual: "无法解析的 JSON", message: "子任务未返回合法的单周期 JSON",
+        hint: "从本周期冻结证据组装候选，不把自由文本或 Markdown 当作合格报告。" }]);
+    }
+    candidate = parseReport({ periods: [input] }, AnalysisCandidateSchema);
+    validateReport(candidate, context, evidence, [period]);
+    return { status: "valid" as const, issues: [], has_more: false, corrections: [], evidence_actions: [] };
+  } catch (error) {
+    if (!(error instanceof AnalysisValidationError)) throw error;
+    const plan = analysisRepairPlan(context, evidence, candidate, error.issues, error.issues, { tool: "submit_analysis" }, false);
+    return { status: "needs_repair" as const, issues: error.issues, has_more: error.has_more,
+      corrections: plan.corrections.map((correction) => ({ ...correction, argument_path: correction.report_path ?? correction.path })),
+      evidence_actions: plan.evidence_actions };
+  }
 }
 
 /** Only item-scoped evidence failures can be discarded; survivors retain their submitted priority. */
@@ -628,6 +673,7 @@ export class AnalysisRepairState {
   #feedback: readonly AnalysisValidationIssue[] = [];
   #previousFingerprints = new Set<string>();
   #failures = 0;
+  #failedRepairs = 0;
   #repairDeadline: number | undefined;
   #stopReason: string | undefined;
   #hasMore = false;
@@ -722,7 +768,7 @@ export class AnalysisRepairState {
       .map((group) => ({ period: period.period, kind: group.kind, group }))) ?? [];
     return { active: this.active, issues: this.#feedback, has_more: this.#hasMore, pending_groups: groups,
       repair_plan: analysisRepairPlan(this.context, this.evidence, this.#candidate, this.#feedback, this.#issues, this.#lastAttempt, !!this.#stopReason),
-      remaining_repairs: Math.max(0, MAX_REPORT_REPAIRS - Math.max(0, this.#failures - 1)),
+      remaining_repairs: Math.max(0, MAX_REPORT_REPAIRS - this.#failedRepairs),
       remaining_ms: this.#repairDeadline === undefined ? null : Math.max(0, this.#repairDeadline - Date.now()),
       stop_reason: this.#stopReason ?? null };
   }
@@ -755,10 +801,12 @@ export class AnalysisRepairState {
     const attempted = target ? fingerprint(issues.filter((issue) => issue.period === target.period && issue.kind === target.kind)) : current;
     const repeated = [...attempted].some((entry) => this.#previousFingerprints.has(entry));
     this.#previousFingerprints = current;
+    // A successfully repaired group leaves other groups pending; that is progress, not a failed repair.
+    if (this.active && (!target || attempted.size > 0)) this.#failedRepairs += 1;
     this.#failures += 1;
     this.#repairDeadline ??= Math.min(Date.now() + REPORT_REPAIR_TIMEOUT_MS, this.deadline - ANALYSIS_CLEANUP_RESERVE_MS);
     if (repeated) this.stop("同一校验错误连续出现两次");
-    else if (this.#failures > MAX_REPORT_REPAIRS) this.stop("已用尽三次报告修正额度");
+    else if (this.#failedRepairs >= MAX_REPORT_REPAIRS) this.stop("已用尽三次失败修正额度");
     else if (Date.now() >= this.#repairDeadline) this.stop("报告修正时间预算已耗尽");
     this.onEvent({ type: "analysis_validation_failed", attempt: this.#failures, issues, has_more: this.#hasMore,
       repair_plan: this.modelContext().repair_plan,

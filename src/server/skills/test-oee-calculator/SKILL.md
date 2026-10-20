@@ -28,6 +28,8 @@ SQL 与表达式工具只生成查询或片段，将 SQL 原样交给 `execute_s
 
 标准状态损失使用公共工具 `measure_loss`，其快照可直接用于后续分析或看板。少量 LOT／分类抽查通过表达式和 SQL VALUES 完成，示例见业务规则。
 
+每日分析引用以返回的 `source` 和 `report_usage` 为准：`measure_loss` 的 `ranking`／`machine_summaries` 仅供调查，其编号不能填入 `machine_evidence_ids`；该字段仅接受同周期、同类型、同入选状态的 `rank_machines` 标准排名编号，并须同时加入 `evidence_ids`。`loss_reference` 始终使用程序提供的 `losses[period].evidence_id` 和入选原始行，不能用补查或排名替换。
+
 ## 结果核对
 
 - 说明业务日范围、计算粒度与实际覆盖；缺失和不可计算结果不作为零，部分周期不作为完整周期。

@@ -10,7 +10,7 @@ import test, { type TestContext } from "node:test";
 import { Value } from "typebox/value";
 import { AnalysisEvidence, type AnalysisContext, analysisPrompt, runAnalysisAgent, analysisBudget, createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/agent.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/calculate/periods.ts";
-import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, parseAnalysisReport, validateAnalysisReport, type AnalysisReport, AnalysisRepairState, pointerValue } from "../../src/server/dashboard/default/analysis/validation.ts";
+import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, inspectAnalysisCandidate, parseAnalysisReport, validateAnalysisReport, type AnalysisReport, AnalysisRepairState, pointerValue } from "../../src/server/dashboard/default/analysis/validation.ts";
 
 import { NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
 
@@ -929,6 +929,49 @@ test("daily orchestration starts four isolated periods concurrently before the p
   assert.ok(!metrics.turns.some((turn: { phase: string }) => /review|draft/u.test(turn.phase)));
 });
 
+test("parent receives candidate evidence errors before its first submission and can reuse the correct ranking", { timeout: 30_000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runId = "candidate-preflight";
+  const runDir = path.join(config.analysis.artifactDir, runId);
+  let rootTurns = 0;
+  await mockModel(t, directory, (body) => {
+    const { root, child } = modelContext(body);
+    if (!root) {
+      const response = childLossResponse(body, runDir);
+      if (typeof response !== "string") return response;
+      const period = Object.keys(child.periods)[0] as PeriodKey;
+      const context = savedContext(runDir);
+      const candidate = periodEntry(reportFor(context), period);
+      const records = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      for (const group of candidate.groups) for (const item of group.items) {
+        const ranking = records.find((entry) => entry.source === "rank_machines" && entry.owner.period === period && entry.rankingScope.kind === group.kind);
+        assert.ok(ranking);
+        item.machine_evidence_ids = [period === "quarter" ? context.losses[period].evidence_id : ranking.id];
+        item.evidence_ids.push(...item.machine_evidence_ids);
+      }
+      return "本周期调查完成，返回候选：\n\n```json\n" + JSON.stringify(candidate) + "\n```";
+    }
+    rootTurns += 1;
+    assert.equal(root.analysis_repair.active, false, "preflight does not spend report repair attempts");
+    const candidates = root.subagent_results;
+    assert.deepEqual(candidates.map((entry: { validation: { status: string } }) => entry.validation.status),
+      ["valid", "valid", "valid", "needs_repair"]);
+    const diagnostic = candidates[3].validation;
+    assert.equal(diagnostic.issues.length, 2);
+    assert.ok(diagnostic.issues.every((issue: { code: string; actual: string }) =>
+      issue.code === "RANKING_SOURCE_MISMATCH" && issue.actual === "measure_loss"));
+    assert.ok(diagnostic.evidence_actions.every((action: { action: string; evidence_ids: string[] }) =>
+      action.action === "reuse" && action.evidence_ids.length === 1));
+    return [toolCall(0, "submit_analysis", lossReport(runDir))];
+  });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assert.equal(rootTurns, 1);
+  const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
+  assert.equal(metrics.validation.failures, 0);
+  assertNumericCardsUnchanged(result.state, runDir);
+});
+
 for (const failure of ["failed", "truncated"] as const) {
   test("parent fills the " + failure + " period from its own scoped evidence", { timeout: 30_000 }, async (t) => {
     const { config, directory } = fixture(t);
@@ -1595,6 +1638,65 @@ test("repairing one group does not count an untouched group's error as a repeate
   assert.equal(repair.stopReason, undefined);
   const fixedSt = structuredClone(st); fixedSt.items[0]!.machine_evidence_ids = stRankings;
   assert.equal(repair.repair({ period: "quarter", kind: "ST", group: fixedSt })?.status, "completed");
+});
+
+test("all eight groups can be repaired without charging successful groups against the failed repair allowance", (t) => {
+  const { context, evidence } = mixedValidationFixture(t);
+  const original = reportFor(context, evidence);
+  const candidate = structuredClone(original);
+  for (const period of candidate.periods) for (const group of period.groups) {
+    group.items[0]!.machine_evidence_ids = [context.losses[period.period].evidence_id];
+  }
+  const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
+  assert.equal(repair.submit(candidate), undefined);
+  const targets = original.periods.flatMap((period) => period.groups.map((group) => ({ period: period.period, kind: group.kind, group })));
+  assert.equal(repair.modelContext().pending_groups.length, 8);
+  for (const [index, target] of targets.entries()) {
+    const result = repair.repair(target);
+    if (index < targets.length - 1) assert.equal(result, undefined);
+    else assert.equal(result?.status, "completed");
+    assert.equal(repair.stopReason, undefined);
+    assert.equal(repair.modelContext().remaining_repairs, 3);
+  }
+});
+
+test("candidate preflight shares publication evidence checks and never modifies candidate text", (t) => {
+  const { context, evidence } = mixedValidationFixture(t);
+  const original = reportFor(context, evidence);
+  const candidate = structuredClone(periodEntry(original, "quarter"));
+  const item = candidate.groups[0]!.items[0]!;
+  const correctId = item.machine_evidence_ids[0]!;
+  item.machine_evidence_ids = [context.losses.quarter.evidence_id];
+  const text = JSON.stringify(candidate);
+  const checked = inspectAnalysisCandidate(text, "quarter", context, evidence.records);
+  assert.equal(checked.status, "needs_repair");
+  assert.equal(checked.issues.length, 1);
+  assert.equal(checked.issues[0]!.code, "RANKING_SOURCE_MISMATCH");
+  assert.ok(checked.corrections[0]!.choices?.includes(correctId));
+  assert.equal(checked.corrections[0]!.argument_path, checked.issues[0]!.path);
+  assert.equal(checked.evidence_actions[0]!.action, "reuse");
+  assert.equal(JSON.stringify(candidate), text);
+  const publication = structuredClone(original);
+  publication.periods[3] = candidate;
+  assert.throws(() => validateAnalysisReport(publication, context, evidence.records), (error: unknown) => {
+    assert.ok(error instanceof AnalysisValidationError);
+    assert.deepEqual(error.issues.map(({ path: _path, ...issue }) => issue),
+      checked.issues.map(({ path: _path, ...issue }) => issue));
+    return true;
+  });
+  item.machine_evidence_ids = [correctId];
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "quarter", context, evidence.records).status, "valid");
+  assert.equal(inspectAnalysisCandidate("调查完成。\n```json\n" + JSON.stringify(candidate) + "\n```", "quarter", context, evidence.records).status, "valid");
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate) + "\n" + JSON.stringify(candidate), "quarter", context, evidence.records).issues[0]!.code, "STRUCTURE_INVALID");
+  item.machine_evidence_ids = [periodEntry(original, "month").groups[0]!.items[0]!.machine_evidence_ids[0]!];
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "quarter", context, evidence.records).issues[0]!.code, "EVIDENCE_PERIOD_MISMATCH");
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "week", context, evidence.records).issues[0]!.code, "PERIOD_COVERAGE");
+  const invalid = inspectAnalysisCandidate("private invalid text", "quarter", context, evidence.records);
+  assert.equal(invalid.issues[0]!.code, "STRUCTURE_INVALID");
+  assert.doesNotMatch(JSON.stringify(invalid), /private invalid text/u);
+  Reflect.deleteProperty(candidate.groups[0]!.items[0]!, "category");
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "quarter", context, evidence.records).issues[0]!.reason, "required");
+  assert.throws(() => parseAnalysisReport({ periods: [periodEntry(original, "quarter")] }), AnalysisValidationError);
 });
 
 test("structure feedback identifies independent fields, escaped paths and exact constraints without echoing prose", (t) => {

@@ -9,6 +9,8 @@ import type { AppLogger } from "./logger.ts";
 import { ArtifactStore } from "./tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "./tool/code-interpreter.ts";
 import { createDashboardRegistry } from "./dashboard/index.ts";
+import { loadUserDashboards } from "./dashboard/user-dashboards.ts";
+import { Authentication, verifyDomainAccount } from "./auth.ts";
 
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -66,7 +68,11 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
   }),
   openSessions: ({ database, artifacts, codeInterpreter, config, logger }) => {
     const dashboards = createDashboardRegistry({ defaultDashboardPath: config.defaultDashboardPath, logger });
+    const dashboardForAccount = loadUserDashboards(config.userDashboardsPath, dashboards);
     return AgentSessionStore.open({
+      dashboardForAccount,
+      loadAccountDashboard: (id) => dashboards.loadInitial(id),
+      sharedDashboardPath: config.defaultDashboardPath,
       database: database as AppDatabase,
       artifacts: artifacts as ArtifactStore,
       codeInterpreter: codeInterpreter as CodeInterpreterRuntime,
@@ -80,6 +86,10 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
     });
   },
   createServer: ({ database, sessions, config, logger }) => createWebServer({
+    authentication: new Authentication({ secureCookie: config.authCookieSecure,
+      verify: (account, password) => verifyDomainAccount(account, password, { url: config.domainVerifyUrl }) }),
+    dashboardForAccount: loadUserDashboards(config.userDashboardsPath,
+      createDashboardRegistry({ defaultDashboardPath: config.defaultDashboardPath, logger })),
     database,
     sessions,
     publicDir: config.publicDir,

@@ -1,4 +1,5 @@
 import type {
+  AuthResponse,
   ChatMessage,
   ChatRole,
   ChatTraceItem,
@@ -11,6 +12,7 @@ import type {
 } from "../shared/contracts.ts";
 import type { DashboardState } from "../shared/dashboard.ts";
 import {
+  decodeAuthResponse,
   decodeAbortResponse,
   decodeDashboardEditResponse,
   decodeDeleteSessionResponse,
@@ -58,6 +60,11 @@ function requiredElement<ElementType extends Element>(
 }
 
 const elements = {
+  loginForm: requiredElement("#loginForm", HTMLFormElement),
+  loginButton: requiredElement("#loginButton", HTMLButtonElement),
+  loginStatus: requiredElement("#loginStatus", HTMLElement),
+  currentAccount: requiredElement("#currentAccount", HTMLElement),
+  logoutButton: requiredElement("#logoutButton", HTMLButtonElement),
   dashboardGrid: requiredElement("#dashboardGrid", HTMLElement),
   dashboardDateRange: requiredElement("#dashboardDateRange", HTMLElement),
   dashboardUpdatedAt: requiredElement("#dashboardUpdatedAt", HTMLElement),
@@ -146,6 +153,56 @@ const state: ClientState = {
 };
 
 const dashboardRenderer = new DashboardRenderer(elements.dashboardGrid);
+let authGeneration = 0;
+let currentLogin: AuthResponse | null = null;
+let authExpiryTimer: number | undefined;
+const pendingRequests = new Set<AbortController>();
+const streamReaders = new Set<ReadableStreamDefaultReader<Uint8Array>>();
+const forkRequests = new Map<string, Promise<SerializedSession>>();
+
+function requireCurrentAccount(generation: number): void {
+  if (generation !== authGeneration) throw new Error("登录账号已切换");
+}
+
+function clearLogin(message = "请使用域账号登录"): void {
+  authGeneration++;
+  currentLogin = null;
+  if (authExpiryTimer !== undefined) window.clearTimeout(authExpiryTimer);
+  for (const controller of pendingRequests) controller.abort();
+  pendingRequests.clear();
+  for (const reader of streamReaders) void reader.cancel().catch(() => {});
+  streamReaders.clear();
+  forkRequests.clear();
+  state.activeStreams = new SessionStreamRegistry<ActiveStream>();
+  state.sessions = [];
+  state.dashboards.clear();
+  state.scrollPositions.clear();
+  state.dashboardSavePromise = null;
+  state.dashboardSaving = false;
+  state.deletingSessionId = null;
+  clearSessionView();
+  elements.messages.replaceChildren();
+  elements.input.value = "";
+  elements.toast.replaceChildren();
+  elements.toast.classList.remove("visible");
+  elements.currentAccount.textContent = "";
+  document.body.classList.add("signed-out");
+  elements.loginStatus.textContent = message;
+  elements.loginButton.disabled = false;
+  const password = document.querySelector<HTMLInputElement>("#loginPassword");
+  if (password) password.value = "";
+  setChatOpen(false);
+  toggleHistory(false);
+}
+
+function acceptLogin(login: AuthResponse): void {
+  clearLogin();
+  currentLogin = login;
+  elements.currentAccount.textContent = `${login.account} · ${login.dashboardId}`;
+  document.body.classList.remove("signed-out");
+  authExpiryTimer = window.setTimeout(() => clearLogin("登录已过期，请重新登录"), Math.max(0, Date.parse(login.expiresAt) - Date.now()));
+  (authExpiryTimer as unknown as { unref?: () => void }).unref?.();
+}
 
 function createSvg(paths: readonly Readonly<Record<string, string>>[]): SVGSVGElement {
   const namespace = "http://www.w3.org/2000/svg";
@@ -203,17 +260,26 @@ async function api<ResponseBody>(
   decode: Decoder<ResponseBody>,
   options: RequestInit = {},
 ): Promise<ResponseBody> {
+  const generation = authGeneration;
+  const controller = new AbortController();
+  pendingRequests.add(controller);
   const headers = new Headers(options.headers);
   if (options.body) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
-  const payload = await responsePayload(response);
-  if (!response.ok) {
-    throw new Error(errorMessageFromResponse(payload) ?? `请求失败 (${response.status})`);
+  try {
+    const response = await fetch(path, {
+      ...options, headers,
+      signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
+    });
+    const payload = await responsePayload(response);
+    if (generation !== authGeneration) throw new Error("登录账号已切换");
+    if (!response.ok) {
+      if (response.status === 401 && path !== "/api/auth/login") clearLogin("登录已过期，请重新登录");
+      throw new Error(errorMessageFromResponse(payload) ?? `请求失败 (${response.status})`);
+    }
+    return decode(payload, `$response(${response.status})`);
+  } finally {
+    pendingRequests.delete(controller);
   }
-  return decode(payload, `$response(${response.status})`);
 }
 
 function setChatOpen(open: boolean, focus = false): void {
@@ -311,6 +377,7 @@ async function saveDashboardEdit(
   sessionId: string,
   buildRequest: (dashboard: DashboardState) => DashboardEditRequest,
 ): Promise<DashboardState> {
+  const generation = authGeneration;
   if (state.dashboardSavePromise) {
     try {
       await state.dashboardSavePromise;
@@ -319,6 +386,7 @@ async function saveDashboardEdit(
     }
   }
   const current = state.dashboards.get(sessionId);
+  if (generation !== authGeneration) throw new Error("登录账号已切换");
   if (!current) throw new Error("当前会话看板尚未加载");
   const request = buildRequest(current);
   state.dashboardSaving = true;
@@ -340,6 +408,7 @@ async function saveDashboardEdit(
     if (state.sessionId === sessionId) renderCurrentDashboard();
     return dashboard;
   } catch (error) {
+    if (generation !== authGeneration) throw error;
     try {
       await reloadDashboardAfterEditFailure(sessionId);
     } catch {
@@ -348,9 +417,11 @@ async function saveDashboardEdit(
     showToast(messageFromUnknown(error, "看板保存失败，已恢复服务端版本"));
     throw error;
   } finally {
-    if (state.dashboardSavePromise === operation) state.dashboardSavePromise = null;
-    state.dashboardSaving = false;
-    syncDashboardEditorState();
+    if (generation === authGeneration) {
+      if (state.dashboardSavePromise === operation) state.dashboardSavePromise = null;
+      state.dashboardSaving = false;
+      syncDashboardEditorState();
+    }
   }
 }
 
@@ -449,6 +520,7 @@ async function persistDashboardEditDraft(draft: DashboardEditDraft): Promise<voi
 }
 
 async function finishDashboardEditing(): Promise<void> {
+  const generation = authGeneration;
   cancelDashboardPointerDrag();
   finalizePendingDashboardRemoval();
   const draft = state.dashboardEditDraft;
@@ -466,6 +538,7 @@ async function finishDashboardEditing(): Promise<void> {
       // saveDashboardEdit already restored and reported the authoritative version.
     }
   }
+  if (generation !== authGeneration) return;
   if (state.dashboardEditDraft === draft) state.dashboardEditDraft = null;
   state.dashboardEditing = false;
   syncDashboardEditorState();
@@ -508,6 +581,12 @@ function renderSessions(): void {
       createSvg([{ d: "M7 17.5 4 20v-4.5a8 8 0 1 1 3 2Z" }]),
       titleElement,
     );
+    if (session.readOnly) {
+      const label = document.createElement("span");
+      label.className = "session-shared";
+      label.textContent = "共享历史";
+      button.append(label);
+    }
     if (streaming) {
       const status = document.createElement("span");
       status.className = "session-streaming-indicator";
@@ -526,7 +605,8 @@ function renderSessions(): void {
       { d: "M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" },
       { d: "M10 11v5M14 11v5" },
     ]));
-    row.append(button, deleteButton);
+    row.append(button);
+    if (!session.readOnly) row.append(deleteButton);
     elements.sessionList.append(row);
   }
 }
@@ -961,7 +1041,8 @@ function syncComposerState(): void {
   const statusLabel = elements.composerStatus.querySelector("span");
   const statusDetail = elements.composerStatus.querySelector("small");
   if (statusLabel) statusLabel.textContent = streaming ? "Agent 正在计算" : "Agent 指标入口";
-  if (statusDetail) statusDetail.textContent = streaming ? "可停止或点击展开查看" : "点击展开会话";
+  if (statusDetail) statusDetail.textContent = streaming ? "可停止或点击展开查看"
+    : state.sessions.find((item) => item.id === state.sessionId)?.readOnly ? "共享历史 · 继续时创建个人副本" : "点击展开会话";
   syncDashboardEditorState();
 }
 
@@ -1006,25 +1087,52 @@ async function refreshSessions(): Promise<void> {
 }
 
 async function createSession(): Promise<SerializedSession> {
+  const generation = authGeneration;
   if (state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval) {
     await finishDashboardEditing();
   }
+  requireCurrentAccount(generation);
   const session = await api("/api/sessions", decodeSerializedSession, {
     method: "POST",
     body: "{}",
   });
   await refreshSessions();
+  requireCurrentAccount(generation);
   applySession(session);
   return session;
 }
 
+async function ensurePrivateSession(): Promise<void> {
+  const generation = authGeneration;
+  const id = state.sessionId;
+  if (!id || !state.sessions.find((item) => item.id === id)?.readOnly) return;
+  let operation = forkRequests.get(id);
+  if (!operation) {
+    operation = api(`/api/sessions/${encodeURIComponent(id)}/fork`, decodeSerializedSession, {
+      method: "POST", body: "{}",
+    }).then(async (session) => {
+      await refreshSessions();
+      requireCurrentAccount(generation);
+      if (state.sessionId === id) applySession(session);
+      return session;
+    });
+    forkRequests.set(id, operation);
+  }
+  try {
+    const session = await operation;
+    if (state.sessionId !== session.id) throw new Error("会话已切换，请重试操作");
+  } finally { if (forkRequests.get(id) === operation) forkRequests.delete(id); }
+}
+
 async function loadSession(id: string): Promise<void> {
+  const generation = authGeneration;
   if (!id) return;
   if (id !== state.sessionId && (
     state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval
   )) {
     await finishDashboardEditing();
   }
+  requireCurrentAccount(generation);
   const activeStream = state.activeStreams.get(id);
   if (activeStream) {
     applyActiveStream(activeStream);
@@ -1062,6 +1170,7 @@ function clearSessionView(): void {
 }
 
 async function deleteSession(id: string): Promise<void> {
+  const generation = authGeneration;
   if (state.deletingSessionId) return;
   if (state.activeStreams.has(id)) {
     showToast("该会话正在回答,请先停止回答再删除");
@@ -1074,6 +1183,7 @@ async function deleteSession(id: string): Promise<void> {
   )) {
     await finishDashboardEditing();
   }
+  requireCurrentAccount(generation);
   if (!window.confirm(`确定删除会话“${session.title || "新会话"}”吗？此操作不可恢复。`)) return;
 
   state.deletingSessionId = id;
@@ -1098,8 +1208,10 @@ async function deleteSession(id: string): Promise<void> {
     }
     showToast("会话已删除");
   } finally {
-    state.deletingSessionId = null;
-    renderSessions();
+    if (generation === authGeneration) {
+      state.deletingSessionId = null;
+      renderSessions();
+    }
   }
 }
 
@@ -1219,47 +1331,63 @@ async function streamQuestion(
   message: string,
   activeStream: ActiveStream,
 ): Promise<SerializedSession | null> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(activeStream.sessionId)}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message } satisfies MessageRequest),
-  });
-  if (!response.ok) {
-    const payload = await responsePayload(response);
-    throw new Error(errorMessageFromResponse(payload) ?? `请求失败 (${response.status})`);
-  }
-  if (!response.body) throw new Error("浏览器不支持流式响应");
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let completedSession: SerializedSession | null = null;
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-    const blocks = buffer.split(/\r?\n\r?\n/u);
-    buffer = blocks.pop() ?? "";
-    for (const block of blocks) {
-      const parsed = parseSseBlock(block);
-      if (!parsed) continue;
-      if (parsed.event === "done") completedSession = parsed.data;
-      else handleStreamEvent(parsed, activeStream);
+  const generation = authGeneration;
+  const controller = new AbortController();
+  pendingRequests.add(controller);
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(activeStream.sessionId)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message } satisfies MessageRequest),
+      signal: controller.signal,
+    });
+    if (generation !== authGeneration) throw new Error("登录账号已切换");
+    if (!response.ok) {
+      if (response.status === 401) clearLogin("登录已过期，请重新登录");
+      const payload = await responsePayload(response);
+      throw new Error(errorMessageFromResponse(payload) ?? `请求失败 (${response.status})`);
     }
-    if (done) break;
-  }
-  return completedSession;
+    if (!response.body) throw new Error("浏览器不支持流式响应");
+
+    const reader = response.body.getReader();
+    streamReaders.add(reader);
+    try {
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completedSession: SerializedSession | null = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (generation !== authGeneration) throw new Error("登录账号已切换");
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const blocks = buffer.split(/\r?\n\r?\n/u);
+        buffer = blocks.pop() ?? "";
+        for (const block of blocks) {
+          const parsed = parseSseBlock(block);
+          if (!parsed) continue;
+          if (parsed.event === "done") completedSession = parsed.data;
+          else handleStreamEvent(parsed, activeStream);
+        }
+        if (done) break;
+      }
+      return completedSession;
+    } finally { streamReaders.delete(reader); reader.releaseLock(); }
+  } finally { pendingRequests.delete(controller); }
 }
 
 async function submitQuestion(question: string): Promise<void> {
+  const generation = authGeneration;
   const message = question.trim();
   if (!message) return;
   if (!state.sessionId) await createSession();
+  await ensurePrivateSession();
+  if (generation !== authGeneration) return;
   const sessionId = state.sessionId;
   if (!sessionId) throw new Error("尚未创建会话");
   if (state.activeStreams.has(sessionId)) return;
   if (state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval) {
     await finishDashboardEditing();
   }
+  if (generation !== authGeneration) return;
   elements.input.value = "";
   appendMessage("user", message);
   const streamNode = appendMessage("assistant", "", true);
@@ -1300,21 +1428,24 @@ async function submitQuestion(question: string): Promise<void> {
       settleStreamNode(streamNode);
     }
   } catch (error) {
+    if (generation !== authGeneration) return;
     handleStreamEvent(
       { event: "error", data: { message: messageFromUnknown(error, "回答失败") } },
       activeStream,
     );
   } finally {
-    state.activeStreams.finish(activeStream);
-    renderSessions();
-    syncComposerState();
-    try {
-      await refreshSessions();
-    } catch (error) {
-      showToast(messageFromUnknown(error, "会话列表刷新失败"));
-    }
-    if (state.sessionId === sessionId && elements.chatDock.classList.contains("open")) {
-      elements.input.focus();
+    if (generation === authGeneration) {
+      state.activeStreams.finish(activeStream);
+      renderSessions();
+      syncComposerState();
+      try {
+        await refreshSessions();
+      } catch (error) {
+        showToast(messageFromUnknown(error, "会话列表刷新失败"));
+      }
+      if (state.sessionId === sessionId && elements.chatDock.classList.contains("open")) {
+        elements.input.focus();
+      }
     }
   }
 }
@@ -1597,6 +1728,7 @@ function reorderedWidgetIds(
 }
 
 async function initialize(): Promise<void> {
+  if (!currentLogin) return;
   try {
     const sessionPayload = await api("/api/sessions", decodeSessionsResponse);
     state.sessions = sessionPayload.sessions;
@@ -1611,12 +1743,15 @@ async function initialize(): Promise<void> {
   }
 }
 
-elements.dashboardEditButton.addEventListener("click", () => {
+async function beginDashboardEditing(): Promise<void> {
+  const generation = authGeneration;
   if (state.dashboardSaving || selectedActiveStream() || !state.sessionId) return;
   if (state.dashboardEditing) {
     void finishDashboardEditing().catch((error) => showToast(messageFromUnknown(error)));
     return;
   }
+  if (state.sessions.find((item) => item.id === state.sessionId)?.readOnly) await ensurePrivateSession();
+  requireCurrentAccount(generation);
   const dashboard = state.dashboards.get(state.sessionId);
   if (!dashboard) return;
   ensureDashboardEditDraft(state.sessionId, dashboard);
@@ -1624,6 +1759,9 @@ elements.dashboardEditButton.addEventListener("click", () => {
   syncDashboardEditorState();
   const firstHandle = elements.dashboardGrid.querySelector("[data-drag-handle]");
   if (firstHandle instanceof HTMLElement) firstHandle.focus();
+}
+elements.dashboardEditButton.addEventListener("click", () => {
+  void beginDashboardEditing().catch((error) => showToast(messageFromUnknown(error)));
 });
 
 elements.dashboardGrid.addEventListener("click", (event) => {
@@ -1826,4 +1964,37 @@ document.addEventListener("keydown", (event) => {
   toggleHistory(false);
 });
 
-void initialize();
+elements.loginForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (elements.loginButton.disabled) return;
+  const account = document.querySelector<HTMLInputElement>("#loginAccount")!.value;
+  const passwordField = document.querySelector<HTMLInputElement>("#loginPassword")!;
+  const password = passwordField.value;
+  passwordField.value = "";
+  elements.loginButton.disabled = true;
+  elements.loginStatus.textContent = "正在验证域账号…";
+  void api("/api/auth/login", decodeAuthResponse, {
+    method: "POST", body: JSON.stringify({ account, password }),
+  }).then(async (login) => {
+    acceptLogin(login);
+    await initialize();
+  }).catch((error) => {
+    elements.loginStatus.textContent = messageFromUnknown(error);
+  }).finally(() => { elements.loginButton.disabled = false; });
+});
+
+elements.logoutButton.addEventListener("click", () => {
+  elements.logoutButton.disabled = true;
+  void api("/api/auth/logout", decodeAbortResponse, { method: "POST", body: "{}" })
+    .then(() => clearLogin("已退出登录"))
+    .catch((error) => showToast(messageFromUnknown(error)))
+    .finally(() => { elements.logoutButton.disabled = false; });
+});
+
+void api("/api/auth/me", decodeAuthResponse).then(async (login) => {
+  // Keep an initial deep link, but never carry it across account changes.
+  const hash = location.hash;
+  acceptLogin(login);
+  if (hash) history.replaceState(null, "", hash);
+  await initialize();
+}).catch(() => clearLogin("请使用域账号登录"));

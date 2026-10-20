@@ -320,6 +320,15 @@ export class SessionDashboardStore {
     this.#loadInitialDashboard = loadInitialDashboard;
   }
 
+  initialize(sessionId: string, baseline: DashboardState): void {
+    const state = parseDashboardState(baseline);
+    if (state.revision !== 0) throw new DashboardInputError("初始看板 revision 必须为 0");
+    writeDocument(dashboardPath(this.#artifacts.rootDir, sessionId), {
+      schemaVersion: DASHBOARD_SCHEMA_VERSION, baseline: state, current: state,
+    });
+    this.forget(sessionId);
+  }
+
   forget(sessionId: string): void {
     this.#previews.delete(sessionId);
   }

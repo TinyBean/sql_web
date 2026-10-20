@@ -35,9 +35,9 @@ export class DashboardRegistry {
   constructor(definitions: readonly DashboardDefinition[]) {
     for (const definition of definitions) {
       if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(definition.id)) {
-        throw new Error("看板 ID 无效：" + definition.id);
+        throw new Error("看板 ID 无效:" + definition.id);
       }
-      if (this.#definitions.has(definition.id)) throw new Error("看板 ID 重复：" + definition.id);
+      if (this.#definitions.has(definition.id)) throw new Error("看板 ID 重复:" + definition.id);
       this.#definitions.set(definition.id, definition);
     }
   }
@@ -48,7 +48,7 @@ export class DashboardRegistry {
 
   loadInitial(id = "default"): DashboardState {
     const definition = this.#definitions.get(id);
-    if (!definition) throw new Error("未知看板 ID：" + id);
+    if (!definition) throw new Error("未知看板 ID:" + id);
     const state = parseDashboardState(definition.loadInitial());
     if (state.revision !== 0) throw new Error("初始看板 revision 必须为 0");
     return state;
@@ -57,7 +57,12 @@ export class DashboardRegistry {
 
 /** The shared registration point used by both the web service and the daily command. */
 export function createDashboardRegistry(options: DefaultDashboardOptions = {}): DashboardRegistry {
+  const defaultDefinition = createDefaultDashboardDefinition(options);
   return new DashboardRegistry([
-    createDefaultDashboardDefinition(options),
+    defaultDefinition,
+    { id: "test", loadInitial: () => {
+      const state = defaultDefinition.loadInitial();
+      return parseDashboardState({ ...state, widgets: state.widgets.slice(0, 4) });
+    } },
   ]);
 }

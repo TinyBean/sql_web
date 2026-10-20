@@ -13,6 +13,7 @@ import {
 } from "../../src/client/api-contracts.ts";
 
 const validSession = {
+  ownerAccount: "test-user", readOnly: false, dashboardId: "default",
   id: "session-12345678",
   title: "测试会话",
   model: { provider: "test-provider", id: "test-model", name: "Test Model" },

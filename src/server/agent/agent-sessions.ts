@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -45,12 +46,19 @@ import {
   type AgentSkillCatalog,
 } from "./skill-catalog.ts";
 import { API_CHAT_AGENT_RULES, buildSystemPrompt, websiteInvestigationPrompt } from "./prompts.ts";
+import { AuthError, normalizeAccount } from "../auth.ts";
+import { OWNER_ENTRY, persistOwnedSession, readSessionFile, sessionBranch, type SessionOwner } from "./session-files.ts";
+import type { ScopedSessionPort } from "../http-server.ts";
+import { sessionDataReadPolicy } from "./session-data-access.ts";
 import { SubagentRunner, SUBAGENT_TOOL_NAME, SUBAGENT_AGENT_RULES } from "./subagent.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 
 export interface AgentSessionStoreOptions {
+  readonly sharedDashboardPath?: string;
+  readonly dashboardForAccount?: (account: string) => string;
+  readonly loadAccountDashboard?: (dashboardId: string) => DashboardState;
   readonly database: AppDatabase;
   readonly cwd: string;
   readonly sessionDir: string;
@@ -455,6 +463,10 @@ function codeInterpreterLogFields(
 }
 
 export class AgentSessionStore {
+  readonly #owners = new Map<string, SessionOwner>();
+  readonly #dashboardForAccount: (account: string) => string;
+  readonly #loadAccountDashboard: ((dashboardId: string) => DashboardState) | undefined;
+  readonly #sharedDashboardPath: string | undefined;
   readonly #database: AppDatabase;
   readonly #cwd: string;
   readonly #sessionDir: string;
@@ -479,18 +491,24 @@ export class AgentSessionStore {
   #disposePromise: Promise<void> | undefined;
 
   private constructor(
-    { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, email, logger }:
+    { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, email, logger, dashboardForAccount, loadAccountDashboard, sharedDashboardPath }:
       AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
     skillCatalog: AgentSkillCatalog,
   ) {
     this.#database = database;
+    this.#dashboardForAccount = dashboardForAccount ?? (() => "default");
+    this.#loadAccountDashboard = loadAccountDashboard;
+    this.#sharedDashboardPath = sharedDashboardPath;
     this.#cwd = cwd;
     this.#sessionDir = sessionDir;
     this.#agentDir = agentDir;
     this.#model = model;
     this.#artifacts = artifacts;
-    this.#dashboard = new SessionDashboardStore(artifacts, loadInitialDashboard);
+    this.#dashboard = new SessionDashboardStore(artifacts, (id) => {
+      const owner = this.#owners.get(id);
+      return owner && this.#loadAccountDashboard ? this.#loadAccountDashboard(owner.dashboardId) : loadInitialDashboard(id);
+    });
     this.#codeInterpreter = codeInterpreter;
     this.#email = email ?? null;
     this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter, true), ...(this.#email ? [EMAIL_TOOL_NAME] : []), SUBAGENT_TOOL_NAME];
@@ -531,12 +549,149 @@ export class AgentSessionStore {
     return store;
   }
 
-  async create(): Promise<SerializedSession> {
-    const manager = SessionManager.create(this.#cwd, this.#sessionDir);
+  forAccount(value: string): ScopedSessionPort {
+    const account = normalizeAccount(value);
+    const readable = (id: string) => this.#authorize(id, account, false);
+    const writable = (id: string) => this.#authorize(id, account, true);
+    return {
+      list: async () => {
+        const items: SessionSummary[] = [];
+        const infos = await this.#listPersistedSessions();
+        const files = new Map<string, string | null>();
+        for (const info of infos) files.set(info.id, files.has(info.id) ? null : info.path);
+        for (const summary of await this.list()) {
+          try {
+            const filePath = files.get(summary.id);
+            if (!filePath) continue;
+            const record = readSessionFile(filePath);
+            if (record.header.id !== summary.id || (record.owner && record.owner.account !== account)) continue;
+            const cachedOwner = this.#owners.get(summary.id);
+            if (cachedOwner && (record.owner?.account !== cachedOwner.account || record.owner.dashboardId !== cachedOwner.dashboardId)) continue;
+            items.push({ ...summary, ownerAccount: record.owner?.account ?? null,
+              readOnly: record.owner === null, dashboardId: record.owner?.dashboardId ?? "default" });
+          } catch { /* Invalid private files must never degrade into shared history. */ }
+        }
+        return items;
+      },
+      create: () => this.create({ account, dashboardId: this.#dashboardForAccount(account) }),
+      get: async (id) => { await writable(id); return this.get(id); },
+      getSerialized: async (id) => {
+        const { record } = await readable(id);
+        if (record.owner) return this.getSerialized(id);
+        const branch = sessionBranch(record.entries);
+        const messages = serializeMessages(branch.flatMap(sessionEntryToContextMessages));
+        const name = record.entries.filter((entry) => entry.type === "session_info").at(-1);
+        return {
+          id, ownerAccount: null, readOnly: true, dashboardId: "default",
+          title: (name?.type === "session_info" ? name.name : messages.find((message) => message.role === "user")?.text.slice(0, 80)) || "新会话",
+          model: null, tools: [...this.#toolNames], streaming: false, messages,
+          dashboard: this.#dashboard.loadOrPreview(id),
+        };
+      },
+      editDashboard: async (id, request) => { await writable(id); return this.editDashboard(id, request); },
+      delete: async (id) => { await writable(id); return this.delete(id); },
+      prompt: async (id, text, requestId) => { await writable(id); return this.prompt(id, text, requestId); },
+      abort: async (id) => { await writable(id); return this.abort(id); },
+      fork: async (id) => {
+        const { info, record } = await readable(id);
+        if (record.owner) throw new AuthError("仅共享历史会话需要复制", 400);
+        const temporary = mkdtempSync(path.join(tmpdir(), "datalens-fork-"));
+        let newId: string | undefined;
+        let newFile: string | undefined;
+        try {
+          const manager = SessionManager.forkFrom(info.path, this.#cwd, temporary);
+          newId = manager.getSessionId();
+          const sourceRoot = path.join(this.#artifacts.rootDir, id);
+          const targetRoot = path.join(this.#artifacts.rootDir, newId);
+          if (existsSync(sourceRoot)) {
+            cpSync(sourceRoot, targetRoot, { recursive: true, filter: (source) => {
+              if (lstatSync(source).isSymbolicLink()) throw new Error("会话产物不能包含符号链接");
+              return true;
+            } });
+            const rewriteManifests = (directory: string): void => {
+              for (const entry of readdirSync(directory, { withFileTypes: true })) {
+                const filename = path.join(directory, entry.name);
+                if (entry.isDirectory()) rewriteManifests(filename);
+                else if (entry.name === "snapshots.json") {
+                  const content = readFileSync(filename, "utf8").replaceAll(`artifact://${id}/`, `artifact://${newId}/`);
+                  JSON.parse(content);
+                  writeFileSync(filename, content, { mode: 0o600 });
+                }
+              }
+            };
+            rewriteManifests(targetRoot);
+          }
+          if (!existsSync(path.join(targetRoot, "dashboard.json"))) {
+            this.#dashboard.initialize(newId, { ...this.#dashboard.loadOrPreview(id), revision: 0 });
+          }
+          this.#dashboard.loadOrPreview(newId); // Validate copied baseline/current before publishing the session.
+          // Rebind historical tool artifact references as well as snapshot manifests.
+          const sourceFile = manager.getSessionFile()!;
+          writeFileSync(sourceFile, readFileSync(sourceFile, "utf8")
+            .replaceAll(`artifact://${id}/`, `artifact://${newId}/`).replaceAll(sourceRoot + "/", targetRoot + "/"));
+          const rebound = SessionManager.open(sourceFile, temporary, this.#cwd);
+          const owner = { account, dashboardId: "default" };
+          this.#ensureDashboardMarker(rebound);
+          rebound.appendCustomEntry(OWNER_ENTRY, owner);
+          newFile = persistOwnedSession(this.#sessionDir, rebound, owner);
+          this.#owners.set(newId, owner);
+          return await this.getSerialized(newId);
+        } catch (error) {
+          if (newId) {
+            this.#owners.delete(newId);
+            await this.#artifacts.deleteSession(newId);
+            this.#dashboard.forget(newId);
+          }
+          if (newFile) rmSync(newFile, { force: true });
+          throw error;
+        } finally { rmSync(temporary, { recursive: true, force: true }); }
+      },
+    };
+  }
+
+  async #authorize(id: string, account: string, write: boolean) {
+    this.#assertValidId(id);
+    const candidates = (await this.#listPersistedSessions()).filter((candidate) => candidate.id === id);
+    const info = candidates[0];
+    if (candidates.length !== 1 || !info) throw new SessionNotFoundError(id);
+    let record;
+    try { record = readSessionFile(info.path); }
+    catch { throw new SessionNotFoundError(id); }
+    if (record.header.id !== id || (record.owner && record.owner.account !== account)) throw new SessionNotFoundError(id);
+    const cachedOwner = this.#owners.get(id);
+    if (cachedOwner && (record.owner?.account !== cachedOwner.account || record.owner.dashboardId !== cachedOwner.dashboardId)) throw new SessionNotFoundError(id);
+    if (write && !record.owner) throw new AuthError("共享历史会话为只读，请先复制为自己的会话", 403);
+    return { info, record };
+  }
+
+  async create(owner?: SessionOwner): Promise<SerializedSession> {
+    let manager = SessionManager.create(this.#cwd, this.#sessionDir);
     this.#ensureDashboardMarker(manager);
-    const session = await this.#createPiSession(manager);
-    // Pi keeps entries in memory until the first assistant message, so naming
-    // and marking an empty session do not create its JSONL file.
+    const id = manager.getSessionId();
+    let privateFile: string | undefined;
+    let session: AgentSession;
+    try {
+      if (owner) {
+        const initial = this.#loadAccountDashboard?.(owner.dashboardId) ?? this.#dashboard.loadOrPreview(id);
+        this.#dashboard.initialize(id, initial);
+        manager.appendCustomEntry(OWNER_ENTRY, owner);
+        manager.appendSessionInfo("新会话");
+        privateFile = persistOwnedSession(this.#sessionDir, manager, owner);
+        manager = SessionManager.open(privateFile, this.#sessionDir, this.#cwd);
+        this.#owners.set(id, owner);
+      }
+      session = await this.#createPiSession(manager);
+    } catch (error) {
+      if (owner) {
+        this.#owners.delete(id);
+        this.#dashboard.forget(id);
+        if (privateFile) rmSync(privateFile, { force: true });
+        await this.#artifacts.deleteSession(id);
+      }
+      throw error;
+    }
+    // Unbound internal sessions retain Pi's lazy persistence; owned web sessions
+    // already have a durable owner and dashboard before they are exposed.
     session.setSessionName("新会话");
     this.#sessions.set(session.sessionId, session);
     const now = new Date();
@@ -549,6 +704,9 @@ export class AgentSessionStore {
     const infos = await this.#listPersistedSessions();
     const listed = new Map<string, SessionSummary>(
       infos.map((info) => [info.id, {
+        ownerAccount: this.#owners.get(info.id)?.account ?? null,
+        readOnly: !this.#owners.has(info.id),
+        dashboardId: this.#owners.get(info.id)?.dashboardId ?? "default",
         id: info.id,
         title: info.name || info.firstMessage || "新会话",
         createdAt: info.created.toISOString(),
@@ -564,6 +722,9 @@ export class AgentSessionStore {
       if (listed.has(id)) continue;
       const times = this.#sessionTimes.get(id) || { created: new Date(), modified: new Date() };
       listed.set(id, {
+        ownerAccount: this.#owners.get(id)?.account ?? null,
+        readOnly: !this.#owners.has(id),
+        dashboardId: this.#owners.get(id)?.dashboardId ?? "default",
         id,
         title: sessionTitle(session),
         createdAt: times.created.toISOString(),
@@ -586,6 +747,8 @@ export class AgentSessionStore {
     const infos = await this.#listPersistedSessions();
     const info = infos.find((candidate) => candidate.id === id);
     if (!info) throw new SessionNotFoundError(id);
+    const owner = readSessionFile(info.path).owner;
+    if (owner) this.#owners.set(id, owner);
     const session = await this.#createPiSession(
       this.#openInitializedManager(info.path),
     );
@@ -646,6 +809,7 @@ export class AgentSessionStore {
     this.#subagents.delete(id);
     this.#unsubscribers.delete(id);
     this.#sessions.delete(id);
+    this.#owners.delete(id);
     this.#sessionTimes.delete(id);
     for (const key of this.#toolStartedAt.keys()) {
       if (key.startsWith(`${id}:`)) this.#toolStartedAt.delete(key);
@@ -800,6 +964,9 @@ export class AgentSessionStore {
     // messages that were summarized out of the model context.
     const messages = serializeSessionTranscript(session);
     return {
+      ownerAccount: this.#owners.get(session.sessionId)?.account ?? null,
+      readOnly: !this.#owners.has(session.sessionId),
+      dashboardId: this.#owners.get(session.sessionId)?.dashboardId ?? "default",
       id: session.sessionId,
       title: sessionTitle(session),
       model: session.model
@@ -859,6 +1026,8 @@ export class AgentSessionStore {
     }
 
     const artifacts = this.#artifacts.forSession(sessionManager.getSessionId());
+    const dataReadPolicy = sessionDataReadPolicy({ cwd: this.#cwd, artifactDir: this.#artifacts.rootDir,
+      sessionId: sessionManager.getSessionId(), ...(this.#sharedDashboardPath ? { defaultDashboardPath: this.#sharedDashboardPath } : {}) });
     let parent: AgentSession;
     const subagents = new SubagentRunner({
       cwd: this.#cwd, agentDir: this.#agentDir, catalog: this.#skillCatalog, parent: () => parent,
@@ -876,7 +1045,7 @@ export class AgentSessionStore {
         return (agentId) => ({
           systemPrompt: websiteInvestigationPrompt(),
           tools: createAgentTools(this.#database, artifacts.scoped(agentId), this.#codeInterpreter),
-          skillOptions: { ...oeeSkillSessionOptions(this.#database, artifacts.scoped(agentId)), readDataDirectory: true },
+          skillOptions: { ...oeeSkillSessionOptions(this.#database, artifacts.scoped(agentId)), readDataDirectory: true, dataReadPolicy },
           context: () => ({ dashboard, snapshots: artifacts.listDataSnapshots() }),
         });
       },
@@ -898,7 +1067,7 @@ export class AgentSessionStore {
         settingsManager,
         this.#logger,
         this.#dashboard,
-        { ...oeeSkillSessionOptions(this.#database, artifacts), readDataDirectory: true },
+        { ...oeeSkillSessionOptions(this.#database, artifacts), readDataDirectory: true, dataReadPolicy },
       );
       ({ session } = await createAgentSession({
         cwd: this.#cwd,

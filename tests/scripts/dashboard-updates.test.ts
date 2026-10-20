@@ -174,7 +174,7 @@ test("daily CLI dry-run reports database requests and registered updates without
   assert.equal(output.dryRun, true);
   assert.equal(output.requests.length, 2);
   assert.equal(output.databasePath, config.databasePath);
-  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }]);
+  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }, { dashboardId: "test", hasUpdate: false }]);
   assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "throughDate", "timezone"]);
   assert.deepEqual(output.requests, [
     { dataset: "availability", date: "2026-01-12" },
@@ -185,7 +185,7 @@ test("daily CLI dry-run reports database requests and registered updates without
 
 test("shared registration loads initial snapshots without requiring an update agent", () => {
   const registry = createDashboardRegistry();
-  assert.deepEqual(registry.list().map((definition) => definition.id), ["default"]);
+  assert.deepEqual(registry.list().map((definition) => definition.id), ["default", "test"]);
   assert.equal(registry.list()[0]?.update, undefined);
   assert.equal(registry.loadInitial().widgets.length, 13);
 });

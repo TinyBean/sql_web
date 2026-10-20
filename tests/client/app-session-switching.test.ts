@@ -23,11 +23,12 @@ function serializedSession(
   title: string,
   messages: readonly ChatMessage[] = [],
 ): SerializedSession {
-  return { id, title, model: null, tools: [], streaming: false, dashboard: EMPTY_DASHBOARD, messages };
+  return { ownerAccount: "test-user", readOnly: false, dashboardId: "default", id, title, model: null, tools: [], streaming: false, dashboard: EMPTY_DASHBOARD, messages };
 }
 
 function sessionSummary(id: string, title: string, messageCount = 0): SessionSummary {
   return {
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     id,
     title,
     createdAt: "2026-09-08T00:00:00.000Z",
@@ -116,6 +117,7 @@ test("switches between independent live session answers without stealing the cur
   expose("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const method = init.method ?? "GET";
+    if (url === "/api/auth/me") return jsonResponse({ account: "test-user", dashboardId: "default", expiresAt: new Date(Date.now() + 3600000).toISOString() });
     if (url === "/api/sessions" && method === "GET") return jsonResponse({ sessions });
     if (url === "/api/sessions" && method === "POST") {
       const createdId = createdSessionIds.shift();

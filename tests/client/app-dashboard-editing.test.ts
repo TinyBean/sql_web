@@ -26,6 +26,7 @@ function kpi(id: string, title: string, value: number): DashboardWidget {
 
 function sessionWithDashboard(dashboard: DashboardState): SerializedSession {
   return {
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     id: "session-edit",
     title: "编辑测试",
     model: null,
@@ -38,6 +39,7 @@ function sessionWithDashboard(dashboard: DashboardState): SerializedSession {
 
 function summary(): SessionSummary {
   return {
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     id: "session-edit",
     title: "编辑测试",
     createdAt: "2026-09-08T00:00:00.000Z",
@@ -124,6 +126,7 @@ test("edits, rolls back, removes, and locks a session dashboard", async (t) => {
   expose("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const method = init.method ?? "GET";
+    if (url === "/api/auth/me") return jsonResponse({ account: "test-user", dashboardId: "default", expiresAt: new Date(Date.now() + 3600000).toISOString() });
     if (url === "/api/sessions" && method === "GET") return jsonResponse({ sessions: [summary()] });
     if (url === "/api/sessions/session-edit" && method === "GET") {
       reloads += 1;

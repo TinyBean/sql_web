@@ -39,6 +39,7 @@ import {
   MAX_DASHBOARD_WIDGETS,
   type DashboardState,
 } from "../shared/dashboard.ts";
+import { Authentication, AuthError } from "./auth.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";
@@ -79,6 +80,7 @@ interface Logger {
 }
 
 export interface WebSessionPort {
+  forAccount(account: string): ScopedSessionPort;
   status(): AgentStatus;
   list(): Promise<SessionSummary[]>;
   create(): Promise<SerializedSession>;
@@ -89,6 +91,10 @@ export interface WebSessionPort {
   prompt(id: string, text: string, requestId?: string): Promise<void>;
   complete(text: string, options?: ChatCompletionOptions): Promise<string>;
   abort(id: string): Promise<void>;
+}
+
+export interface ScopedSessionPort extends Omit<WebSessionPort, "forAccount" | "status" | "complete"> {
+  fork(id: string): Promise<SerializedSession>;
 }
 
 export interface WebDatabasePort {
@@ -102,6 +108,8 @@ export interface StreamableAgentSession {
 }
 
 export interface WebServerOptions {
+  authentication?: Authentication;
+  dashboardForAccount?: (account: string) => string;
   database: WebDatabasePort;
   sessions: WebSessionPort;
   publicDir: string;
@@ -372,6 +380,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 function errorStatus(error: unknown): number {
+  if (error instanceof AuthError) return error.statusCode;
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof SessionNotFoundError) return 404;
   if (error instanceof SessionBusyError) return 409;
@@ -413,6 +422,7 @@ function decodeSessionId(match: RegExpExecArray): string {
 }
 
 function requestRoute(pathname: string): string {
+  if (/^\/api\/sessions\/[^/]+\/fork$/u.test(pathname)) return "/api/sessions/:id/fork";
   if (/^\/api\/sessions\/[^/]+\/dashboard$/u.test(pathname)) return "/api/sessions/:id/dashboard";
   if (/^\/api\/sessions\/[^/]+\/messages$/u.test(pathname)) return "/api/sessions/:id/messages";
   if (/^\/api\/sessions\/[^/]+\/abort$/u.test(pathname)) return "/api/sessions/:id/abort";
@@ -420,7 +430,8 @@ function requestRoute(pathname: string): string {
   return pathname;
 }
 
-export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console }: WebServerOptions): Server {
+export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console,
+  authentication = new Authentication(), dashboardForAccount = () => "default" }: WebServerOptions): Server {
   return http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const requestId = randomUUID();
@@ -454,6 +465,28 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
     }
     try {
       if (request.method === "GET" && (await serveStatic(response, publicDir, vendorDir, url.pathname))) return;
+
+      if (url.pathname.startsWith("/api/") && !["GET", "HEAD"].includes(request.method ?? "")) authentication.requireSameOrigin(request);
+      if (request.method === "POST" && url.pathname === "/api/auth/login") {
+        const login = await authentication.login(await readJson(request), request.socket.remoteAddress ?? "unknown");
+        // Replacing an existing browser login also revokes its previous token.
+        authentication.logout(request);
+        response.setHeader("Set-Cookie", login.cookie);
+        json(response, 200, { account: login.account, expiresAt: login.expiresAt, dashboardId: dashboardForAccount(login.account) });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+        await readJson(request);
+        response.setHeader("Set-Cookie", authentication.logout(request));
+        json(response, 200, { ok: true });
+        return;
+      }
+      const login = url.pathname.startsWith("/api/") && url.pathname !== "/api/health" ? authentication.require(request) : undefined;
+      if (request.method === "GET" && url.pathname === "/api/auth/me") {
+        json(response, 200, { ...login!, dashboardId: dashboardForAccount(login!.account) });
+        return;
+      }
+      const accountSessions = login ? sessions.forAccount(login.account) : undefined;
 
       if (request.method === "POST" && url.pathname === "/chat/compeletion") {
         const controller = new AbortController();
@@ -492,24 +525,31 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       }
 
       if (request.method === "GET" && url.pathname === "/api/sessions") {
-        const body = { sessions: await sessions.list() } satisfies SessionsResponse;
+        const body = { sessions: await accountSessions!.list() } satisfies SessionsResponse;
         json(response, 200, body);
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/sessions") {
         await readJson(request);
-        json(response, 201, await sessions.create());
+        json(response, 201, await accountSessions!.create());
+        return;
+      }
+
+      const forkMatch = /^\/api\/sessions\/([^/]+)\/fork$/u.exec(url.pathname);
+      if (request.method === "POST" && forkMatch) {
+        await readJson(request);
+        json(response, 201, await accountSessions!.fork(decodeSessionId(forkMatch)));
         return;
       }
 
       const sessionMatch = /^\/api\/sessions\/([^/]+)$/u.exec(url.pathname);
       if (request.method === "GET" && sessionMatch) {
-        json(response, 200, await sessions.getSerialized(decodeSessionId(sessionMatch)));
+        json(response, 200, await accountSessions!.getSerialized(decodeSessionId(sessionMatch)));
         return;
       }
       if (request.method === "DELETE" && sessionMatch) {
-        await sessions.delete(decodeSessionId(sessionMatch));
+        await accountSessions!.delete(decodeSessionId(sessionMatch));
         json(response, 200, { ok: true } satisfies DeleteSessionResponse);
         return;
       }
@@ -518,7 +558,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       if (request.method === "PATCH" && dashboardMatch) {
         const id = decodeSessionId(dashboardMatch);
         const body = requireDashboardEditRequest(await readJson(request));
-        const dashboard = await sessions.editDashboard(id, body);
+        const dashboard = await accountSessions!.editDashboard(id, body);
         json(response, 200, { dashboard } satisfies DashboardEditResponse);
         return;
       }
@@ -527,7 +567,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       if (request.method === "POST" && messageMatch) {
         const id = decodeSessionId(messageMatch);
         const body = requireMessageRequest(await readJson(request));
-        const session = await sessions.get(id);
+        const session = await accountSessions!.get(id);
         if (session.isStreaming) throw new SessionBusyError();
 
         response.writeHead(200, {
@@ -538,8 +578,8 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         response.flushHeaders();
         const unsubscribe = session.subscribe(createAgentEventStreamer(response));
         try {
-          await sessions.prompt(id, body.message, requestId);
-          writeSse(response, "done", await sessions.getSerialized(id));
+          await accountSessions!.prompt(id, body.message, requestId);
+          writeSse(response, "done", await accountSessions!.getSerialized(id));
         } catch (error) {
           requestLogger.error("http.agent_prompt.failed", error, { sessionId: id });
           writeSse(response, "error", {
@@ -556,13 +596,14 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       const abortMatch = /^\/api\/sessions\/([^/]+)\/abort$/u.exec(url.pathname);
       if (request.method === "POST" && abortMatch) {
         await readJson(request);
-        await sessions.abort(decodeSessionId(abortMatch));
+        await accountSessions!.abort(decodeSessionId(abortMatch));
         json(response, 200, { ok: true } satisfies AbortResponse);
         return;
       }
 
       json(response, 404, { error: "接口不存在", requestId } satisfies ErrorResponse);
     } catch (error) {
+      if (error instanceof AuthError && error.statusCode === 429) response.setHeader("Retry-After", "300");
       requestLogger.error("http.request.failed", error, {
         method: request.method ?? "UNKNOWN",
         pathname: url.pathname,

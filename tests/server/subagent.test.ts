@@ -262,13 +262,13 @@ test("website child reads daily data with the parent permission while leaving Sk
     }
     if (!results.length) {
       assert.ok(!body.tools.some((tool) => tool.function.name.startsWith("test_oee_calculator__")));
-      return call("read", { path: ".data/run.json", json_pointer: "/status" });
+      return call("read", { path: ".data/daily-analysis/fixture/run.json", json_pointer: "/status" });
     }
     assert.equal(JSON.parse(results.at(-1)!.content), "completed");
     return "运行记录：completed";
   });
-  mkdirSync(path.join(env.directory, ".data"));
-  writeFileSync(path.join(env.directory, ".data", "run.json"), JSON.stringify({ status: "completed" }));
+  mkdirSync(path.join(env.directory, ".data", "daily-analysis", "fixture"), { recursive: true });
+  writeFileSync(path.join(env.directory, ".data", "daily-analysis", "fixture", "run.json"), JSON.stringify({ status: "completed" }));
   await env.store.prompt(env.created.id, "委派查询每日运行记录");
   assert.equal(returned[0]?.status, "completed");
   assert.equal(returned[0]?.text, "运行记录：completed");

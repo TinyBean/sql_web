@@ -75,6 +75,22 @@ test("requires both model fields", () => {
   );
 });
 
+test("domain login has HTTP defaults, configurable routing and explicit Secure cookie validation", () => {
+  const env = { SQL_WEB_PROVIDER: "test", SQL_WEB_MODEL: "test" };
+  const defaults = loadConfig(env);
+  assert.match(defaults.domainVerifyUrl, /^http:\/\/.*\/DomainAccountVerify$/u);
+  assert.equal(defaults.authCookieSecure, false);
+  assert.equal(defaults.userDashboardsPath, path.join(defaults.projectRoot, ".data/user-dashboards.json"));
+  const configured = loadConfig({ ...env, SQL_WEB_DOMAIN_VERIFY_URL: "https://company.example/verify", SQL_WEB_AUTH_COOKIE_SECURE: "true", SQL_WEB_USER_DASHBOARDS_PATH: "custom/users.json" });
+  assert.equal(configured.authCookieSecure, true);
+  assert.equal(configured.domainVerifyUrl, "https://company.example/verify");
+  assert.equal(configured.userDashboardsPath, path.join(configured.projectRoot, "custom/users.json"));
+  assert.throws(() => loadConfig({ ...env, SQL_WEB_AUTH_COOKIE_SECURE: "yes" }), /COOKIE_SECURE/u);
+  for (const url of ["file:///tmp/verify", "https://user:password@company.example/verify"]) {
+    assert.throws(() => loadConfig({ ...env, SQL_WEB_DOMAIN_VERIFY_URL: url }));
+  }
+});
+
 test("does not inherit the selected model from the shell", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));
   const envPath = path.join(directory, ".env");

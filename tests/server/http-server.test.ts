@@ -17,6 +17,7 @@ import {
   parseJson,
   type Decoder,
 } from "../../src/client/api-contracts.ts";
+import { Authentication } from "../../src/server/auth.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
 import { SessionBusyError } from "../../src/server/agent/agent-sessions.ts";
 import {
@@ -56,6 +57,7 @@ async function createFixture(
   initializeOeeDatabase(filePath);
   const database = AppDatabase.open({ filePath });
   const sessions: WebSessionPort = sessionsOverride ?? {
+    forAccount() { return { ...this, fork: async () => this.create() }; },
     status: () => ({
       tools: ["execute_sql", "get_current_time"],
       codeInterpreter: { available: false, reason: "test sandbox unavailable" },
@@ -69,6 +71,7 @@ async function createFixture(
       title: "新会话",
       model: null,
       tools: ["execute_sql", "get_current_time"],
+      ownerAccount: "test-user", readOnly: false, dashboardId: "default",
       streaming: false,
       dashboard: EMPTY_DASHBOARD,
       messages: [],
@@ -82,7 +85,10 @@ async function createFixture(
     abort: async () => {},
   };
   const logger = loggerOverride ?? { error() {} };
+  const authentication = new Authentication();
+  authentication.require = () => ({ account: "test-user", expiresAt: new Date(Date.now() + 3600000).toISOString() });
   const server = createWebServer({
+    authentication,
     database,
     sessions,
     publicDir: path.join(projectRoot, "public"),
@@ -275,11 +281,13 @@ test("validates and persists manual dashboard edits", async (t) => {
     title: "测试会话",
     model: null,
     tools: [],
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     streaming: false,
     dashboard: updated,
     messages: [],
   };
   const sessions: WebSessionPort = {
+    forAccount() { return { ...this, fork: async () => this.create() }; },
     status: () => ({
       tools: [],
       codeInterpreter: { available: false, reason: "unavailable" },
@@ -355,6 +363,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     title: "统计销售额",
     model: null,
     tools: ["execute_sql", "get_current_time"],
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     streaming: false,
     dashboard: EMPTY_DASHBOARD,
     messages: [
@@ -401,6 +410,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     stopReason: "stop",
   };
   const sessions: WebSessionPort = {
+    forAccount() { return { ...this, fork: async () => this.create() }; },
     status: () => ({
       tools: ["execute_sql", "get_current_time"],
       codeInterpreter: { available: false, reason: "test sandbox unavailable" },
@@ -515,6 +525,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
     title: "更新看板",
     model: null,
     tools: ["get_dashboard", "update_dashboard"],
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     streaming: false,
     dashboard,
     messages: [],
@@ -531,6 +542,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
     for (const listener of listeners) listener(event);
   };
   const sessions: WebSessionPort = {
+    forAccount() { return { ...this, fork: async () => this.create() }; },
     status: () => ({
       tools: ["get_dashboard", "update_dashboard"],
       codeInterpreter: { available: false, reason: "test" },
@@ -600,6 +612,7 @@ test("does not stream legacy images from any tool result", async (t) => {
     title: "非法图片事件测试",
     model: null,
     tools: ["code_interpreter", "execute_sql"],
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     streaming: false,
     dashboard: EMPTY_DASHBOARD,
     messages: [],
@@ -620,6 +633,7 @@ test("does not stream legacy images from any tool result", async (t) => {
     images: [{ mimeType: "image/png", data: imageData, alt: "不得发送" }],
   };
   const sessions: WebSessionPort = {
+    forAccount() { return { ...this, fork: async () => this.create() }; },
     status: () => ({
       tools: ["code_interpreter", "execute_sql"],
       codeInterpreter: { available: true, reason: null },
@@ -702,6 +716,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
     title: "自动压缩测试",
     model: null,
     tools: [],
+    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
     streaming: false,
     dashboard: EMPTY_DASHBOARD,
     messages: [],
@@ -734,6 +749,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
     details: { privateDetails: "PRIVATE_DETAILS" },
   };
   const sessions: WebSessionPort = {
+    forAccount() { return { ...this, fork: async () => this.create() }; },
     status: () => ({
       tools: [],
       codeInterpreter: { available: false, reason: "test sandbox unavailable" },

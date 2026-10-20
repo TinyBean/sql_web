@@ -8,7 +8,20 @@
     <title>DataLens · OEE 指标驾驶舱</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body>
+  <body class="signed-out">
+    <section class="login-panel" id="loginPanel" aria-label="域账号登录">
+      <form class="login-card" id="loginForm">
+        <span class="welcome-kicker">DATALENS · OEE INTELLIGENCE</span>
+        <h1>域账号登录</h1>
+        <p>登录后查看你的会话与看板。</p>
+        <label for="loginAccount">工号</label>
+        <input id="loginAccount" name="account" autocomplete="username" required maxlength="64" placeholder="例如 3000100562" />
+        <label for="loginPassword">密码</label>
+        <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="1024" />
+        <p class="login-status" id="loginStatus" role="status" aria-live="polite">正在确认登录状态…</p>
+        <button class="topbar-button primary" id="loginButton" type="submit" disabled>登录</button>
+      </form>
+    </section>
     <div class="app-shell">
       <header class="topbar">
         <div class="brand" aria-label="DataLens">
@@ -22,6 +35,8 @@
           <p><span id="dashboardDateRange">读取数据范围…</span><span class="heading-separator">/</span><span id="dashboardUpdatedAt">准备快照…</span></p>
         </div>
         <div class="topbar-actions">
+          <span class="account-label" id="currentAccount"></span>
+          <button class="topbar-button" id="logoutButton" type="button">退出</button>
           <button class="topbar-button" id="dashboardEditButton" type="button" aria-pressed="false" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.9-10.9a2.1 2.1 0 0 0-3-3L5.2 16 4 20ZM14.8 6.2l3 3"/></svg><span>编辑看板</span>
           </button>

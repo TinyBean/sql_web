@@ -44,7 +44,19 @@ export interface ModelDescriptor {
   readonly name: string;
 }
 
-export interface SerializedSession {
+export interface SessionAccess {
+  readonly ownerAccount: string | null;
+  readonly readOnly: boolean;
+  readonly dashboardId: string;
+}
+
+export interface AuthResponse {
+  readonly account: string;
+  readonly dashboardId: string;
+  readonly expiresAt: string;
+}
+
+export interface SerializedSession extends SessionAccess {
   readonly id: string;
   readonly title: string;
   readonly model: ModelDescriptor | null;
@@ -54,7 +66,7 @@ export interface SerializedSession {
   readonly messages: readonly ChatMessage[];
 }
 
-export interface SessionSummary {
+export interface SessionSummary extends SessionAccess {
   readonly id: string;
   readonly title: string;
   readonly createdAt: string;
@@ -173,6 +185,7 @@ export type ParsedSseEvent = {
 }[keyof SseEventMap];
 
 export type JsonResponseBody =
+  | AuthResponse
   | AbortResponse
   | ChatCompletionResponse
   | DashboardEditResponse

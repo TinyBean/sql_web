@@ -49,6 +49,8 @@ class MemoryLogger implements AppLogger {
 
 function fixtureConfig(directory: string): AppConfig {
   return {
+    domainVerifyUrl: "http://127.0.0.1:1/verify", authCookieSecure: false,
+    userDashboardsPath: path.join(directory, "user-dashboards.json"),
     projectRoot: directory,
     host: "127.0.0.1",
     port: 0,
@@ -82,6 +84,7 @@ function fakeDependencies(events: string[]): ServiceRuntimeDependencies {
       dispose: () => events.push("interpreter.dispose"),
     }),
     openSessions: async () => ({
+      forAccount() { throw new Error("not used"); },
       status: () => ({
         tools: [],
         codeInterpreter: { available: true, reason: null },

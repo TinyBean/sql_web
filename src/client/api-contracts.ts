@@ -1,4 +1,6 @@
 import type {
+  AuthResponse,
+  SessionAccess,
   AbortResponse,
   AutomaticCompactionReason,
   ChatMessage,
@@ -215,6 +217,7 @@ function publicSchemaObject(value: unknown, path: string): PublicSchemaObject {
 function sessionSummary(value: unknown, path: string): SessionSummary {
   const item = record(value, path);
   return {
+    ...sessionAccess(item, path),
     id: string(item["id"], `${path}.id`),
     title: string(item["title"], `${path}.title`),
     createdAt: string(item["createdAt"], `${path}.createdAt`),
@@ -228,6 +231,7 @@ export const decodeSerializedSession: Decoder<SerializedSession> = (value, path 
   const item = record(value, path);
   const model = item["model"];
   return {
+    ...sessionAccess(item, path),
     id: string(item["id"], `${path}.id`),
     title: string(item["title"], `${path}.title`),
     model: model === null ? null : modelDescriptor(model, `${path}.model`),
@@ -236,6 +240,22 @@ export const decodeSerializedSession: Decoder<SerializedSession> = (value, path 
     dashboard: dashboardState(item["dashboard"], `${path}.dashboard`),
     messages: array(item["messages"], `${path}.messages`, chatMessage),
   };
+};
+
+function sessionAccess(item: Record<string, unknown>, path: string): SessionAccess {
+  return {
+    ownerAccount: item["ownerAccount"] === null ? null : nonEmptyString(item["ownerAccount"], `${path}.ownerAccount`),
+    readOnly: boolean(item["readOnly"], `${path}.readOnly`),
+    dashboardId: nonEmptyString(item["dashboardId"], `${path}.dashboardId`),
+  };
+}
+
+export const decodeAuthResponse: Decoder<AuthResponse> = (value, path = "$auth") => {
+  const item = record(value, path);
+  const expiresAt = nonEmptyString(item["expiresAt"], `${path}.expiresAt`);
+  if (!Number.isFinite(Date.parse(expiresAt))) invalid(`${path}.expiresAt`, "有效时间");
+  return { account: nonEmptyString(item["account"], `${path}.account`),
+    dashboardId: nonEmptyString(item["dashboardId"], `${path}.dashboardId`), expiresAt };
 };
 
 export const decodeSessionsResponse: Decoder<SessionsResponse> = (value, path = "$sessions") => {

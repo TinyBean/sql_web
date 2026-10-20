@@ -4,8 +4,12 @@ import { parseEnv } from "node:util";
 import { fileURLToPath } from "node:url";
 import type { ModelSelection } from "../shared/contracts.ts";
 import { validateEmailConfig, type EmailConfig } from "./email.ts";
+import { DEFAULT_DOMAIN_VERIFY_URL } from "./auth.ts";
 
 export interface AppEnvironment {
+  readonly SQL_WEB_DOMAIN_VERIFY_URL?: string | undefined;
+  readonly SQL_WEB_AUTH_COOKIE_SECURE?: string | undefined;
+  readonly SQL_WEB_USER_DASHBOARDS_PATH?: string | undefined;
   readonly HOST?: string | undefined;
   readonly PORT?: string | undefined;
   readonly SQL_WEB_DB_PATH?: string | undefined;
@@ -24,6 +28,9 @@ export interface AppEnvironment {
 }
 
 export interface AppConfig {
+  readonly domainVerifyUrl: string;
+  readonly authCookieSecure: boolean;
+  readonly userDashboardsPath: string;
   readonly projectRoot: string;
   readonly host: string;
   readonly port: number;
@@ -69,6 +76,9 @@ export function loadProjectEnvironment(
     const values = parseEnv(readFileSync(envFilePath, "utf8"));
     Object.assign(target, values);
     return {
+      SQL_WEB_DOMAIN_VERIFY_URL: target["SQL_WEB_DOMAIN_VERIFY_URL"],
+      SQL_WEB_AUTH_COOKIE_SECURE: target["SQL_WEB_AUTH_COOKIE_SECURE"],
+      SQL_WEB_USER_DASHBOARDS_PATH: target["SQL_WEB_USER_DASHBOARDS_PATH"],
       HOST: target["HOST"],
       PORT: target["PORT"],
       SQL_WEB_DB_PATH: target["SQL_WEB_DB_PATH"],
@@ -102,8 +112,19 @@ export function loadConfig(env: AppEnvironment): AppConfig {
   if (!provider || !model) {
     throw new Error("必须在 .env 中同时设置 SQL_WEB_PROVIDER 和 SQL_WEB_MODEL");
   }
+  const domainVerifyUrl = env.SQL_WEB_DOMAIN_VERIFY_URL?.trim() || DEFAULT_DOMAIN_VERIFY_URL;
+  const verificationUrl = new URL(domainVerifyUrl);
+  if (!["http:", "https:"].includes(verificationUrl.protocol) || verificationUrl.username || verificationUrl.password) {
+    throw new Error("域验证地址必须是无内嵌凭据的 HTTP 或 HTTPS URL");
+  }
+  if (env.SQL_WEB_AUTH_COOKIE_SECURE && !["true", "false"].includes(env.SQL_WEB_AUTH_COOKIE_SECURE)) {
+    throw new Error("SQL_WEB_AUTH_COOKIE_SECURE 必须是 true 或 false");
+  }
 
   return {
+    domainVerifyUrl,
+    authCookieSecure: env.SQL_WEB_AUTH_COOKIE_SECURE === "true",
+    userDashboardsPath: resolveProjectPath(env.SQL_WEB_USER_DASHBOARDS_PATH, ".data/user-dashboards.json"),
     projectRoot: PROJECT_ROOT,
     host: env.HOST?.trim() || "127.0.0.1",
     port: parsePort(env.PORT),

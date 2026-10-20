@@ -6,6 +6,7 @@ import test, { type TestContext } from "node:test";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadAgentSkillCatalog } from "../../src/server/agent/skill-catalog.ts";
 import { MAX_DATA_READ_BYTES, type DataReadParameters } from "../../src/server/agent/data-file-reader.ts";
+import { sessionDataReadPolicy } from "../../src/server/agent/session-data-access.ts";
 
 async function fixture(t: TestContext) {
   const root = mkdtempSync(path.join(tmpdir(), "sql-web-data-read-"));
@@ -17,10 +18,10 @@ async function fixture(t: TestContext) {
   writeFileSync(path.join(skill, "SKILL.md"), "---\nname: fixture\ndescription: Read fixture for data access and activation tests.\n---\n\n# Fixture\n");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const catalog = await loadAgentSkillCatalog({ directory: skills });
-  const session = async (enabled = false) => {
+  const session = async (enabled = false, dataReadPolicy?: (filename: string) => boolean) => {
     const tools = new Map<string, ToolDefinition>();
     const entries: unknown[] = [];
-    const extension = catalog.createSessionExtension(root, { readDataDirectory: enabled });
+    const extension = catalog.createSessionExtension(root, { readDataDirectory: enabled, ...(dataReadPolicy ? { dataReadPolicy } : {}) });
     await (typeof extension === "function" ? extension : extension.factory)({
       registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool), on() {},
       getActiveTools: () => ["read"], setActiveTools() {}, appendEntry: (...entry: unknown[]) => entries.push(entry),
@@ -46,6 +47,31 @@ test("data access is opt-in and data SKILL.md does not activate tools", async (t
   const websiteChild = await session(true);
   assert.deepEqual((await websiteChild.read(filename)).content, [{ type: "text", text: "data is not a skill" }]);
   assert.equal(websiteChild.entries.length, 0);
+});
+
+test("session policies allow shared evidence and current artifacts while denying private archives, credentials and symlink aliases", async (t) => {
+  const { root, data, session, skill } = await fixture(t);
+  const files = ["daily-analysis/run-1/run.json", "logs/oee-daily-2026-10-19.log", "default-dashboard.json",
+    "artifacts/session-owner/data.json", "artifacts/session-other/data.json", "sessions/private.jsonl",
+    "session-exports/private.html", "agent/auth.json", "logs/website-2026-10-19.log", "backups/private.json"];
+  for (const filename of files) {
+    mkdirSync(path.dirname(path.join(data, filename)), { recursive: true });
+    writeFileSync(path.join(data, filename), '{"value":"fixture"}');
+  }
+  const policy = sessionDataReadPolicy({ cwd: root, artifactDir: path.join(data, "artifacts"), sessionId: "session-owner" });
+  const scoped = await session(true, policy);
+  for (const filename of files.slice(0, 4)) assert.match(((await scoped.read(path.join(data, filename))).content[0] as { text: string }).text, /fixture/u);
+  for (const filename of files.slice(4)) await assert.rejects(scoped.read(path.join(data, filename)), /拒绝|仅允许/u);
+  symlinkSync(path.join(data, "agent/auth.json"), path.join(data, "artifacts/session-owner/alias.json"));
+  await assert.rejects(scoped.read(path.join(data, "artifacts/session-owner/alias.json")), /拒绝/u);
+  assert.ok((await scoped.read(path.join(skill, "SKILL.md"))).content.length);
+  const anonymous = await session(true, sessionDataReadPolicy({ cwd: root, artifactDir: path.join(data, "artifacts"), sessionId: "session-anonymous" }));
+  await assert.rejects(anonymous.read(path.join(data, "artifacts/session-owner/data.json")), /拒绝/u);
+  const externalArtifacts = path.join(root, "custom-artifacts");
+  mkdirSync(path.join(externalArtifacts, "session-owner"), { recursive: true });
+  writeFileSync(path.join(externalArtifacts, "session-owner", "data.json"), "own custom artifact");
+  const custom = await session(true, sessionDataReadPolicy({ cwd: root, artifactDir: externalArtifacts, sessionId: "session-owner" }));
+  assert.equal(((await custom.read(path.join(externalArtifacts, "session-owner", "data.json"))).content[0] as { text: string }).text, "own custom artifact");
 });
 
 test("read rejects directories, outside files, sibling-prefix paths and symlink escapes", async (t) => {

@@ -159,9 +159,9 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.doesNotMatch(databaseReference, /CREATE TABLE oee_import_/u);
   const readTool = piSession.getToolDefinition("read");
   assert.ok(readTool);
-  mkdirSync(path.join(directory, ".data"));
-  writeFileSync(path.join(directory, ".data", "run.json"), JSON.stringify({ status: "running" }));
-  const dailyArtifact = await readTool.execute("read-daily", { path: ".data/run.json", json_pointer: "/status" },
+  mkdirSync(path.join(directory, ".data", "daily-analysis", "fixture"), { recursive: true });
+  writeFileSync(path.join(directory, ".data", "daily-analysis", "fixture", "run.json"), JSON.stringify({ status: "running" }));
+  const dailyArtifact = await readTool.execute("read-daily", { path: ".data/daily-analysis/fixture/run.json", json_pointer: "/status" },
     undefined, undefined, undefined as never);
   assert.deepEqual(dailyArtifact.content, [{ type: "text", text: '"running"' }]);
   assert.equal(piSession.getToolDefinition("test_oee_calculator__rank_machines"), undefined);

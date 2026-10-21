@@ -321,7 +321,7 @@ for (const scenario of ["completed", "missing", "running", "sync-failed", "timed
           path: ".data/daily-analysis/attempt-1/report.json", json_pointer: "/periods/0/comparison",
         }, verify: (text) => assert.equal(JSON.parse(text), "冻结日报结论，来自本轮已有证据") });
         if (scenario === "stale-session") steps.push({ name: "get_dashboard", args: {},
-          verify: (text) => assert.equal(JSON.parse(text).dateRange.end, "2026-01-02") });
+          verify: (text) => assert.equal(JSON.parse(text).dashboards[0].dateRange.end, "2026-01-02") });
       } else steps[step - 1]!.verify?.(results.at(-1)!.content);
       if (step < steps.length) {
         const request = steps[step++]!;
@@ -370,7 +370,7 @@ for (const scenario of ["completed", "missing", "running", "sync-failed", "timed
     const actions = env.requests.flatMap((request) => request.messages.filter((message) => message.role === "assistant")
       .flatMap((message) => message.tool_calls ?? []));
     assert.doesNotMatch(JSON.stringify(actions), /execute_sql|update_dashboard|send_email|rank_machines/u);
-    assert.equal(serialized.dashboard.dateRange.end, "2026-01-02");
+    assert.equal(serialized.dashboards[0]!.state.dateRange.end, "2026-01-02");
   });
 }
 

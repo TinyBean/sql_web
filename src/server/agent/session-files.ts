@@ -3,9 +3,15 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { migrateSessionEntries, type FileEntry, type SessionEntry, type SessionHeader, type SessionManager } from "@earendil-works/pi-coding-agent";
 import { normalizeAccount } from "../auth.ts";
+import { DASHBOARD_ID_PATTERN } from "../../shared/dashboard.ts";
 
-export const OWNER_ENTRY = "datalens_owner_v1";
-export interface SessionOwner { readonly account: string; readonly dashboardId: string }
+export const OWNER_ENTRY = "datalens_owner_v2";
+export const LEGACY_OWNER_ENTRY = "datalens_owner_v1";
+export interface SessionOwner { readonly account: string; readonly dashboardIds: readonly string[] }
+export function sameSessionOwner(left: SessionOwner | null | undefined, right: SessionOwner): boolean {
+  return left?.account === right.account && left.dashboardIds.length === right.dashboardIds.length &&
+    left.dashboardIds.every((id, index) => id === right.dashboardIds[index]);
+}
 export interface SessionFile {
   readonly header: SessionHeader;
   readonly entries: SessionEntry[];
@@ -32,7 +38,7 @@ export function readSessionFile(filePath: string): SessionFile {
   const header = entries[0];
   if (!header || header.type !== "session" || !/^[A-Za-z0-9-]{8,100}$/u.test(header.id)) throw new Error("会话 header 无效");
   migrateSessionEntries(entries); // Migration is deliberately in memory only.
-  const records = entries.filter((item) => item.type === "custom" && item.customType === OWNER_ENTRY);
+  const records = entries.filter((item) => item.type === "custom" && (item.customType === OWNER_ENTRY || item.customType === LEGACY_OWNER_ENTRY));
   const parts = path.basename(filePath).split("__");
   const watermarked = parts.length > 1;
   let owner: SessionOwner | null = null;
@@ -43,11 +49,13 @@ export function readSessionFile(filePath: string): SessionFile {
     }
     const data = record.data as Record<string, unknown>;
     const account = normalizeAccount(data["account"]);
-    if (data["account"] !== account || typeof data["dashboardId"] !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(data["dashboardId"]) ||
+    const ids: unknown = record.customType === LEGACY_OWNER_ENTRY ? [data["dashboardId"]] : data["dashboardIds"];
+    if (data["account"] !== account || !Array.isArray(ids) || !ids.length ||
+        ids.some((id) => typeof id !== "string" || !DASHBOARD_ID_PATTERN.test(id)) || new Set(ids).size !== ids.length ||
         parts.length !== 3 || parts[0] !== account || parts[2] !== `${header.id}.jsonl`) {
       throw new Error("会话归属与文件水印不一致");
     }
-    owner = { account, dashboardId: data["dashboardId"] };
+    owner = { account, dashboardIds: ids as string[] };
   }
   return { header, entries: entries.filter((item): item is SessionEntry => item.type !== "session"), owner };
 }

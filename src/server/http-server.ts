@@ -12,8 +12,6 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
   CompactionOutcome,
-  DashboardEditRequest,
-  DashboardEditResponse,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -33,12 +31,8 @@ import {
 } from "./agent/agent-sessions.ts";
 import { DatabaseInputError } from "./database/database.ts";
 import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
-import { DashboardConflictError, DashboardInputError } from "./agent/session-dashboard.ts";
-import {
-  DASHBOARD_WIDGET_ID_PATTERN,
-  MAX_DASHBOARD_WIDGETS,
-  type DashboardState,
-} from "../shared/dashboard.ts";
+import { DashboardInputError } from "./agent/session-dashboard.ts";
+import { DASHBOARD_ID_PATTERN } from "../shared/dashboard.ts";
 import { Authentication, AuthError } from "./auth.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -55,7 +49,6 @@ const STATIC_FILES = new Map<string, StaticFile>([
   ["/app.js", { root: "public", filename: "generated/client/app.js", contentType: "text/javascript; charset=utf-8" }],
   ["/api-contracts.js", { root: "public", filename: "generated/client/api-contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/dashboard.js", { root: "public", filename: "generated/client/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
-  ["/dashboard-drag.js", { root: "public", filename: "generated/client/dashboard-drag.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/contracts.js", { root: "public", filename: "generated/shared/contracts.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/dashboard.js", { root: "public", filename: "generated/shared/dashboard.js", contentType: "text/javascript; charset=utf-8" }],
   ["/shared/number-format.js", { root: "public", filename: "generated/shared/number-format.js", contentType: "text/javascript; charset=utf-8" }],
@@ -86,9 +79,8 @@ export interface WebSessionPort {
   create(): Promise<SerializedSession>;
   get(id: string): Promise<StreamableAgentSession>;
   getSerialized(id: string): Promise<SerializedSession>;
-  editDashboard(id: string, request: DashboardEditRequest): Promise<DashboardState>;
   delete(id: string): Promise<void>;
-  prompt(id: string, text: string, requestId?: string): Promise<void>;
+  prompt(id: string, text: string, requestId?: string, dashboardId?: string): Promise<void>;
   complete(text: string, options?: ChatCompletionOptions): Promise<string>;
   abort(id: string): Promise<void>;
 }
@@ -109,7 +101,7 @@ export interface StreamableAgentSession {
 
 export interface WebServerOptions {
   authentication?: Authentication;
-  dashboardForAccount?: (account: string) => string;
+  dashboardForAccount?: (account: string) => readonly string[];
   database: WebDatabasePort;
   sessions: WebSessionPort;
   publicDir: string;
@@ -177,7 +169,10 @@ function requireMessageRequest(value: unknown): MessageRequest {
   ) {
     throw new HttpError("请求体必须包含字符串类型的 message", 400);
   }
-  return { message: value.message };
+  if (!("dashboardId" in value) || typeof value.dashboardId !== "string" || !DASHBOARD_ID_PATTERN.test(value.dashboardId)) {
+    throw new HttpError("dashboardId 必须是合法的看板 ID", 400);
+  }
+  return { message: value.message, dashboardId: value.dashboardId };
 }
 
 function requireChatCompletionRequest(value: unknown): ChatCompletionRequest {
@@ -189,44 +184,6 @@ function requireChatCompletionRequest(value: unknown): ChatCompletionRequest {
   }
   validatePromptText(value.text);
   return { text: value.text };
-}
-
-function requireDashboardEditRequest(value: unknown): DashboardEditRequest {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new HttpError("看板编辑请求必须是对象", 400);
-  }
-  const body = value as Record<string, unknown>;
-  const baseRevision = body["baseRevision"];
-  if (!Number.isSafeInteger(baseRevision) || (baseRevision as number) < 0) {
-    throw new HttpError("baseRevision 必须是非负安全整数", 400);
-  }
-  if (body["action"] === "remove") {
-    const widgetId = body["widgetId"];
-    if (typeof widgetId !== "string" || !DASHBOARD_WIDGET_ID_PATTERN.test(widgetId)) {
-      throw new HttpError("widgetId 必须是合法的组件 ID", 400);
-    }
-    return { action: "remove", baseRevision: baseRevision as number, widgetId };
-  }
-  if (body["action"] === "reorder") {
-    const widgetIds = body["widgetIds"];
-    if (
-      !Array.isArray(widgetIds) || widgetIds.length < 1 ||
-      widgetIds.length > MAX_DASHBOARD_WIDGETS ||
-      widgetIds.some((id) => typeof id !== "string" || !DASHBOARD_WIDGET_ID_PATTERN.test(id)) ||
-      new Set(widgetIds).size !== widgetIds.length
-    ) {
-      throw new HttpError(
-        `widgetIds 必须是 1 到 ${MAX_DASHBOARD_WIDGETS} 个不重复组件 ID`,
-        400,
-      );
-    }
-    return {
-      action: "reorder",
-      baseRevision: baseRevision as number,
-      widgetIds: widgetIds as string[],
-    };
-  }
-  throw new HttpError("action 必须是 remove 或 reorder", 400);
 }
 
 function writeSse<EventName extends keyof SseEventMap>(
@@ -341,6 +298,7 @@ function createAgentEventStreamer(response: ServerResponse): (event: AgentSessio
         writeSse(response, "dashboard_update", {
           turn,
           toolCallId: event.toolCallId,
+          dashboardId: details.dashboardId,
           dashboard: details.dashboard,
         });
       }
@@ -384,7 +342,6 @@ function errorStatus(error: unknown): number {
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof SessionNotFoundError) return 404;
   if (error instanceof SessionBusyError) return 409;
-  if (error instanceof DashboardConflictError) return 409;
   if (
     error instanceof TypeError || error instanceof DatabaseInputError ||
     error instanceof DashboardInputError
@@ -423,7 +380,6 @@ function decodeSessionId(match: RegExpExecArray): string {
 
 function requestRoute(pathname: string): string {
   if (/^\/api\/sessions\/[^/]+\/fork$/u.test(pathname)) return "/api/sessions/:id/fork";
-  if (/^\/api\/sessions\/[^/]+\/dashboard$/u.test(pathname)) return "/api/sessions/:id/dashboard";
   if (/^\/api\/sessions\/[^/]+\/messages$/u.test(pathname)) return "/api/sessions/:id/messages";
   if (/^\/api\/sessions\/[^/]+\/abort$/u.test(pathname)) return "/api/sessions/:id/abort";
   if (/^\/api\/sessions\/[^/]+$/u.test(pathname)) return "/api/sessions/:id";
@@ -431,7 +387,7 @@ function requestRoute(pathname: string): string {
 }
 
 export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console,
-  authentication = new Authentication(), dashboardForAccount = () => "default" }: WebServerOptions): Server {
+  authentication = new Authentication(), dashboardForAccount = () => ["default"] }: WebServerOptions): Server {
   return http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const requestId = randomUUID();
@@ -472,7 +428,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         // Replacing an existing browser login also revokes its previous token.
         authentication.logout(request);
         response.setHeader("Set-Cookie", login.cookie);
-        json(response, 200, { account: login.account, expiresAt: login.expiresAt, dashboardId: dashboardForAccount(login.account) });
+        json(response, 200, { account: login.account, expiresAt: login.expiresAt, dashboardIds: dashboardForAccount(login.account) });
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/auth/logout") {
@@ -483,7 +439,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       }
       const login = url.pathname.startsWith("/api/") && url.pathname !== "/api/health" ? authentication.require(request) : undefined;
       if (request.method === "GET" && url.pathname === "/api/auth/me") {
-        json(response, 200, { ...login!, dashboardId: dashboardForAccount(login!.account) });
+        json(response, 200, { ...login!, dashboardIds: dashboardForAccount(login!.account) });
         return;
       }
       const accountSessions = login ? sessions.forAccount(login.account) : undefined;
@@ -554,21 +510,14 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         return;
       }
 
-      const dashboardMatch = /^\/api\/sessions\/([^/]+)\/dashboard$/u.exec(url.pathname);
-      if (request.method === "PATCH" && dashboardMatch) {
-        const id = decodeSessionId(dashboardMatch);
-        const body = requireDashboardEditRequest(await readJson(request));
-        const dashboard = await accountSessions!.editDashboard(id, body);
-        json(response, 200, { dashboard } satisfies DashboardEditResponse);
-        return;
-      }
-
       const messageMatch = /^\/api\/sessions\/([^/]+)\/messages$/u.exec(url.pathname);
       if (request.method === "POST" && messageMatch) {
         const id = decodeSessionId(messageMatch);
         const body = requireMessageRequest(await readJson(request));
         const session = await accountSessions!.get(id);
         if (session.isStreaming) throw new SessionBusyError();
+        const snapshot = await accountSessions!.getSerialized(id);
+        if (!snapshot.dashboards.some((item) => item.id === body.dashboardId)) throw new HttpError("会话中不存在该看板", 400);
 
         response.writeHead(200, {
           ...securityHeaders("text/event-stream; charset=utf-8"),
@@ -578,7 +527,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         response.flushHeaders();
         const unsubscribe = session.subscribe(createAgentEventStreamer(response));
         try {
-          await accountSessions!.prompt(id, body.message, requestId);
+          await accountSessions!.prompt(id, body.message, requestId, body.dashboardId);
           writeSse(response, "done", await accountSessions!.getSerialized(id));
         } catch (error) {
           requestLogger.error("http.agent_prompt.failed", error, { sessionId: id });

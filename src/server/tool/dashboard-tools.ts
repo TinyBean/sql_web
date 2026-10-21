@@ -3,6 +3,7 @@ import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import {
+  DASHBOARD_ID_PATTERN,
   MAX_DASHBOARD_SERIES,
   MAX_DASHBOARD_TABLE_COLUMNS,
   MAX_DASHBOARD_WIDGETS,
@@ -19,11 +20,13 @@ export const DASHBOARD_AGENT_TOOL_NAMES = ["get_dashboard", "update_dashboard"] 
 
 export interface DashboardUpdateDetails {
   readonly kind: "dashboard_update";
+  readonly dashboardId: string;
   readonly dashboard: DashboardState;
 }
 
 interface DashboardSummaryDetails {
   readonly kind: "dashboard_summary";
+  readonly dashboardId: string;
   readonly revision: number;
   readonly changedWidgetIds: readonly string[];
   readonly pointCount: number;
@@ -33,8 +36,11 @@ type DashboardToolDetails = DashboardUpdateDetails | DashboardSummaryDetails;
 
 export function isDashboardUpdateDetails(value: unknown): value is DashboardUpdateDetails {
   return typeof value === "object" && value !== null &&
-    "kind" in value && value.kind === "dashboard_update" && "dashboard" in value;
+    "kind" in value && value.kind === "dashboard_update" && "dashboard" in value &&
+    "dashboardId" in value && typeof value.dashboardId === "string";
 }
+
+const dashboardId = Type.String({ pattern: DASHBOARD_ID_PATTERN.source, description: "ID of a dashboard bound to this session." });
 
 const widgetId = Type.String({
   description: "Stable semantic widget id. Reuse an existing id when replacing the same subject.",
@@ -140,6 +146,7 @@ const revision = Type.Union([
 ]);
 const widgetIds = Type.Array(widgetId, { minItems: 1, maxItems: MAX_DASHBOARD_WIDGETS });
 const updateParameters = Type.Object({
+  dashboard_id: dashboardId,
   action: Type.Union([
     Type.Literal("upsert"),
     Type.Literal("remove"),
@@ -244,41 +251,39 @@ function widgetRequest(value: {
 export function createDashboardTools(dashboard: SessionDashboardStore, sessionId: string) {
   const getDashboard = defineTool({
     name: "get_dashboard",
-    label: "读取当前看板",
+    label: "读取会话看板",
     description:
-      "Return the current dashboard revision, date range, and compact widget metadata. Call this before changing a dashboard. It intentionally omits chart rows.",
-    promptSnippet: "读取当前会话的看板 revision 和组件摘要",
+      "Return dashboards bound to this session, their revisions, date ranges, and widget metadata. Omit dashboard_ids to read all dashboards. Set include_data=true to include complete widget data. Read the target dashboard before editing it.",
+    promptSnippet: "读取当前会话多个看板的 revision、卡片摘要或完整数据",
     executionMode: "sequential",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal): Promise<AgentToolResult<DashboardSummaryDetails>> {
+    parameters: Type.Object({
+      dashboard_ids: Type.Optional(Type.Array(dashboardId, { minItems: 1, uniqueItems: true })),
+      include_data: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted();
-      const state = dashboard.loadOrInitialize(sessionId);
-      const summary = {
-        revision: state.revision,
-        dateRange: state.dateRange,
-        dataAsOf: state.dataAsOf,
-        widgets: state.widgets.map((item) => ({
-          id: item.id,
-          kind: item.kind,
-          title: item.title,
-          size: item.size,
-          ...(item.kind === "overview"
-            ? {
-                label: item.encoding.label ?? item.title,
-                description: item.encoding.description ?? item.metricDefinition,
-              }
-            : {}),
-          warnings: item.warnings,
-        })),
-      };
+      const states = dashboard.listOrPreview(sessionId);
+      const ids = params.dashboard_ids ?? states.map((item) => item.id);
+      if (!ids.length || new Set(ids).size !== ids.length) throw new DashboardInputError("看板 ID 列表必须非空且不重复");
+      const summaries = ids.map((id) => {
+        const item = states.find((item) => item.id === id);
+        if (!item) throw new DashboardInputError("会话中不存在看板：" + id);
+        const state = item.state;
+        return {
+          id, title: item.title, revision: state.revision, dateRange: state.dateRange, dataAsOf: state.dataAsOf,
+          widgets: state.widgets.map((widget) => params.include_data ? widget : ({
+            id: widget.id, kind: widget.kind, title: widget.title, size: widget.size,
+            ...(widget.kind === "overview" ? {
+              label: widget.encoding.label ?? widget.title,
+              description: widget.encoding.description ?? widget.metricDefinition,
+            } : {}), warnings: widget.warnings,
+          })),
+        };
+      });
+      dashboard.listOrInitialize(sessionId);
       return {
-        content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
-        details: {
-          kind: "dashboard_summary",
-          revision: state.revision,
-          changedWidgetIds: [],
-          pointCount: 0,
-        },
+        content: [{ type: "text" as const, text: JSON.stringify({ dashboards: summaries }, null, 2) }],
+        details: { kind: "dashboard_read", dashboardIds: ids },
       };
     },
   });
@@ -287,12 +292,14 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
     name: "update_dashboard",
     label: "更新指标看板",
     description:
-      "Atomically update the current session dashboard. For upsert, reference one complete session snapshot created by execute_sql.save_as or measure_loss and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. For an overview, set encoding.label and encoding.description to match its actual metric, period, and aggregation; never assume seven days or OEE. Use SQL or the standard loss query to aggregate and sort the snapshot first. format.unit is a suffix only and never rescales values: with %, the snapshot must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
-    promptSnippet: "按快照名和列映射原子更新当前会话看板",
+      "Atomically update exactly one bound dashboard selected by required dashboard_id. Revisions and widget IDs are local to that dashboard. For multiple dashboards, call this tool sequentially for each target. For upsert, reference one complete session snapshot created by execute_sql.save_as or measure_loss and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. For an overview, set encoding.label and encoding.description to match its actual metric, period, and aggregation; never assume seven days or OEE. Use SQL or the standard loss query to aggregate and sort the snapshot first. format.unit is a suffix only and never rescales values: with %, the snapshot must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
+    promptSnippet: "按 dashboard_id、快照名和列映射原子更新指定会话看板",
     executionMode: "sequential",
     parameters: updateParameters,
     async execute(_toolCallId, params, signal, onUpdate): Promise<AgentToolResult<DashboardToolDetails>> {
       signal?.throwIfAborted();
+      const targetId = checked(dashboardId, params.dashboard_id, "dashboard_id");
+      dashboard.loadOrPreview(sessionId, targetId);
       const revisionNumber = baseRevision(params.base_revision);
       let command: DashboardCommand;
       if (params.action === "upsert") {
@@ -307,7 +314,7 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
           decodedJson(required(params.widget, "widget"), "widget"),
           "widget",
         );
-        const existingSize = dashboard.loadOrInitialize(sessionId).widgets.find(
+        const existingSize = dashboard.loadOrPreview(sessionId, targetId).widgets.find(
           (item) => item.id === decodedWidget.id,
         )?.size;
         command = {
@@ -336,13 +343,14 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
       } else {
         command = { action: "reset", baseRevision: revisionNumber };
       }
-      const result = dashboard.apply(sessionId, command);
+      const result = dashboard.apply(sessionId, command, targetId);
       onUpdate?.({
         content: [{ type: "text", text: `看板已保存为 revision ${result.dashboard.revision}` }],
-        details: { kind: "dashboard_update", dashboard: result.dashboard },
+        details: { kind: "dashboard_update", dashboardId: targetId, dashboard: result.dashboard },
       });
       const summary: DashboardSummaryDetails = {
         kind: "dashboard_summary",
+        dashboardId: targetId,
         revision: result.dashboard.revision,
         changedWidgetIds: result.changedWidgetIds,
         pointCount: result.pointCount,
@@ -351,6 +359,7 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
         content: [{
           type: "text",
           text: JSON.stringify({
+            dashboardId: targetId,
             revision: summary.revision,
             changedWidgetIds: summary.changedWidgetIds,
             pointCount: summary.pointCount,
@@ -361,5 +370,5 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
     },
   });
 
-  return [getDashboard, updateDashboard];
+  return [getDashboard, updateDashboard] as const;
 }

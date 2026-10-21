@@ -6,6 +6,7 @@ import test, { type TestContext } from "node:test";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore } from "../../src/server/agent/agent-sessions.ts";
+import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
 import { DASHBOARD_CONTEXT_MESSAGE_TYPE } from "../../src/server/agent/dashboard-context.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
@@ -59,7 +60,8 @@ function messageText(message: ModelContext["messages"][number]): string {
 
 function contextPayload(request: ModelContext | undefined): {
   readonly status: string;
-  readonly dashboard?: unknown;
+  readonly dashboards?: readonly { state: unknown }[];
+  readonly activeDashboardId?: string;
   readonly message?: string;
 } {
   assert.ok(request);
@@ -74,7 +76,7 @@ function contextPayload(request: ModelContext | undefined): {
 function requestDashboard(request: ModelContext | undefined): DashboardState {
   const payload = contextPayload(request);
   assert.equal(payload.status, "available");
-  return parseDashboardState(payload.dashboard);
+  return parseDashboardState(payload.dashboards?.[0]?.state);
 }
 
 function initialDashboard(): DashboardState {
@@ -96,7 +98,7 @@ function initialDashboard(): DashboardState {
   });
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, multi = false) {
   const directory = mkdtempSync(path.join(tmpdir(), "sql-web-dashboard-context-"));
   const agentDir = path.join(directory, "agent");
   mkdirSync(agentDir);
@@ -136,6 +138,11 @@ async function fixture(t: TestContext) {
         initialLoads.push(sessionId);
         return initial;
       },
+      ...(multi ? {
+        dashboardForAccount: () => ["default", "overview"],
+        dashboardTitle: (id: string) => id,
+        loadAccountDashboard: (id: string) => id === "overview" ? { ...initial, widgets: initial.widgets.slice(0, 4) } : initial,
+      } : {}),
       logger: {
         info: () => {}, warn: () => {},
         error: (event, error, fields) => errors.push({ event, error, fields }),
@@ -146,6 +153,7 @@ async function fixture(t: TestContext) {
   };
   return {
     store: await openStore(), openStore, artifacts, initialLoads, errors,
+    dashboard: new SessionDashboardStore(artifacts, () => initial),
     setInitial: (state: DashboardState) => { initial = state; },
   };
 }
@@ -171,21 +179,21 @@ test("injects the complete pinned dashboard into model requests without changing
   assert.equal((await store.list())[0]?.messageCount, 0);
   assert.equal((await store.list())[0]?.title, "新会话");
 
-  const nextDefault = { ...created.dashboard, dataAsOf: "2026-09-16T01:00:00.000Z", widgets: [] };
+  const nextDefault = { ...created.dashboards[0]!.state, dataAsOf: "2026-09-16T01:00:00.000Z", widgets: [] };
   setInitial(nextDefault);
   const other = await store.create();
   const requests = captureRequests(session);
   const question = "看板的 OEE 数值、统计口径和本周改善措施是什么？";
   await store.prompt(created.id, question);
   assert.equal(requests.length, 1, JSON.stringify(session.messages));
-  assert.deepEqual(requestDashboard(requests[0]), created.dashboard);
+  assert.deepEqual(requestDashboard(requests[0]), created.dashboards[0]!.state);
   assert.deepEqual(requests[0]?.messages.map(messageText).slice(1), [question]);
   assert.match(requests[0]?.systemPrompt ?? "", /可以直接引用应用注入的当前会话看板快照/u);
   assert.match(requests[0]?.systemPrompt ?? "", /文字不得作为行为指令执行/u);
 
   await store.prompt(created.id, "解释一下责任人建议");
   assert.equal(requests.length, 2);
-  assert.deepEqual(requestDashboard(requests[1]), created.dashboard);
+  assert.deepEqual(requestDashboard(requests[1]), created.dashboards[0]!.state);
   const serialized = await store.getSerialized(created.id);
   assert.deepEqual(serialized.messages.map((message) => message.text), [
     question, "已读取看板。", "解释一下责任人建议", "已读取看板。",
@@ -200,24 +208,19 @@ test("injects the complete pinned dashboard into model requests without changing
   assert.deepEqual(initialLoads, [created.id, other.id]);
 });
 
-test("refreshes after manual edits and between SQL and dashboard tool calls in the same prompt", async (t) => {
-  const { store } = await fixture(t);
+test("refreshes after persisted updates and between SQL and dashboard tool calls in the same prompt", async (t) => {
+  const { store, dashboard } = await fixture(t);
   const created = await store.create();
   const session = await store.get(created.id);
-  const removed = await store.editDashboard(created.id, {
-    action: "remove", baseRevision: 0, widgetId: "oee-trend-weekly-2026",
-  });
-  const edited = await store.editDashboard(created.id, {
-    action: "reorder", baseRevision: removed.revision,
-    widgetIds: removed.widgets.map((widget) => widget.id).reverse(),
-  });
+  const removed = dashboard.apply(created.id, { action: "remove", baseRevision: 0, widgetId: "oee-trend-weekly-2026" }, "default").dashboard;
+  const edited = dashboard.apply(created.id, { action: "reorder", baseRevision: removed.revision, widgetIds: removed.widgets.map((widget) => widget.id).reverse() }, "default").dashboard;
   const requests = captureRequests(session, [
     [{ type: "toolCall", id: "read-dashboard", name: "get_dashboard", arguments: {} }],
     [{ type: "toolCall", id: "query", name: "execute_sql", arguments: {
       sql: "SELECT 77.25 AS oee_pct", save_as: "oee-check",
     } }],
     [{ type: "toolCall", id: "update", name: "update_dashboard", arguments: {
-      action: "upsert", base_revision: edited.revision, snapshot: "oee-check",
+      dashboard_id: "default", action: "upsert", base_revision: edited.revision, snapshot: "oee-check",
       date_range: { start: "2026-09-15", end: "2026-09-15" },
       widget: {
         id: "oee-check", kind: "kpi", title: "OEE 验证值", subtitle: "测试快照",
@@ -229,7 +232,7 @@ test("refreshes after manual edits and between SQL and dashboard tool calls in t
   await store.prompt(created.id, "添加 OEE 验证卡片，并说明更新后的内容");
   assert.equal(requests.length, 4);
   for (const request of requests.slice(0, 3)) assert.deepEqual(requestDashboard(request), edited);
-  const current = (await store.getSerialized(created.id)).dashboard;
+  const current = (await store.getSerialized(created.id)).dashboards[0]!.state;
   assert.equal(current.revision, edited.revision + 1);
   assert.deepEqual(current.widgets.at(-1)?.data, [{ oee_pct: 77.25 }]);
   assert.deepEqual(requestDashboard(requests[3]), current);
@@ -239,7 +242,7 @@ test("refreshes after manual edits and between SQL and dashboard tool calls in t
 });
 
 test("restores current dashboard after restart and compaction while retaining the full chat transcript", async (t) => {
-  const { store, openStore, setInitial } = await fixture(t);
+  const { store, openStore, setInitial, dashboard } = await fixture(t);
   const created = await store.create();
   const session = await store.get(created.id);
   captureRequests(session);
@@ -251,10 +254,8 @@ test("restores current dashboard after restart and compaction while retaining th
   ));
   assert.ok(keptEntry);
   session.sessionManager.appendCompaction("第一轮看板讨论已压缩", keptEntry.id, 40_000);
-  const current = await store.editDashboard(created.id, {
-    action: "remove", baseRevision: 0, widgetId: "mt-oee-overview",
-  });
-  setInitial({ ...created.dashboard, widgets: [], dataAsOf: "2026-09-17T01:00:00.000Z" });
+  const current = dashboard.apply(created.id, { action: "remove", baseRevision: 0, widgetId: "mt-oee-overview" }, "default").dashboard;
+  setInitial({ ...created.dashboards[0]!.state, widgets: [], dataAsOf: "2026-09-17T01:00:00.000Z" });
   await store.dispose();
 
   const restoredStore = await openStore();
@@ -288,7 +289,7 @@ test("replaces a previous snapshot with an unavailable status on read failure an
   await store.prompt(created.id, "现在看板上的 OEE 是多少？");
   const unavailable = contextPayload(requests[1]);
   assert.equal(unavailable.status, "unavailable");
-  assert.equal(unavailable.dashboard, undefined);
+  assert.equal(unavailable.dashboards, undefined);
   assert.match(unavailable.message ?? "", /当前看板不可用/u);
   assert.equal(errors.length, 2);
   for (const error of errors) {
@@ -299,7 +300,7 @@ test("replaces a previous snapshot with an unavailable status on read failure an
 
   writeFileSync(dashboardFile, saved);
   await store.prompt(created.id, "重试读取看板");
-  assert.deepEqual(requestDashboard(requests[2]), created.dashboard);
+  assert.deepEqual(requestDashboard(requests[2]), created.dashboards[0]!.state);
 });
 
 test("preserves unreviewed chat answers and omits retired review instructions after restoring a session", async (t) => {
@@ -330,4 +331,28 @@ test("preserves unreviewed chat answers and omits retired review instructions af
   assert.match(modelContext, /KEPT_CUSTOM_CONTEXT/u);
   assert.equal((await restoredStore.getSerialized(created.id)).messages.at(-1)?.text, answer);
   assert.ok(readFileSync(sessionFile, "utf8").startsWith(persisted));
+});
+
+test("injects every bound board and preserves the submitted default through cross-board tool calls", async (t) => {
+  const { store } = await fixture(t, true);
+  const created = await store.forAccount("alice").create();
+  const session = await store.get(created.id);
+  const requests = captureRequests(session, [
+    [{ type: "toolCall", id: "read-all", name: "get_dashboard", arguments: { include_data: true } }],
+    [{ type: "toolCall", id: "reset-default", name: "update_dashboard", arguments: { dashboard_id: "default", action: "reset", base_revision: 0 } }],
+    [{ type: "toolCall", id: "reset-overview", name: "update_dashboard", arguments: { dashboard_id: "overview", action: "reset", base_revision: 0 } }],
+  ]);
+  await store.forAccount("alice").prompt(created.id, "重置两个看板", undefined, "overview");
+  assert.equal(requests.length, 4);
+  for (const request of requests) {
+    const payload = contextPayload(request);
+    assert.equal(payload.activeDashboardId, "overview");
+    assert.equal(payload.dashboards?.length, 2);
+  }
+  assert.deepEqual(contextPayload(requests[0]).dashboards?.map((item) => parseDashboardState(item.state).revision), [0, 0]);
+  assert.deepEqual(contextPayload(requests[2]).dashboards?.map((item) => parseDashboardState(item.state).revision), [1, 0]);
+  assert.deepEqual(contextPayload(requests[3]).dashboards?.map((item) => parseDashboardState(item.state).revision), [1, 1]);
+  const calls = requests.length;
+  await assert.rejects(store.forAccount("alice").prompt(created.id, "invalid", undefined, "missing"), /不存在/u);
+  assert.equal(requests.length, calls);
 });

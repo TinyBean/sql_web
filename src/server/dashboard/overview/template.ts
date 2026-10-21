@@ -8,7 +8,7 @@ const CARD_TEMPLATES = [
   createOverviewTemplate("ST", false),
 ];
 
-export function createTestDashboard(now = new Date()): DashboardState {
+export function createOverviewDashboard(now = new Date()): DashboardState {
   return parseDashboardState({ schemaVersion: 1, revision: 0, dataAsOf: now.toISOString(),
     dateRange: { start: null, end: null }, widgets: CARD_TEMPLATES });
 }

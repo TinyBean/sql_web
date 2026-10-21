@@ -99,5 +99,6 @@ test("sessions pin their selected initial snapshot and independently persist, re
   assert.deepEqual(restarted.apply("session-alpha", { action: "reset", baseRevision: 1 }).dashboard, { ...first, revision: 2 });
   assert.deepEqual(restarted.apply("session-beta", { action: "reset", baseRevision: 1 }).dashboard, { ...second, revision: 2 });
   const document = JSON.parse(readFileSync(path.join(artifacts.rootDir, "session-alpha", "dashboard.json"), "utf8"));
-  assert.deepEqual(Object.keys(document).sort(), ["baseline", "current", "schemaVersion"]);
+  assert.equal(document.schemaVersion, 2);
+  assert.deepEqual(Object.keys(document.dashboards[0]).sort(), ["baseline", "current", "id", "title"]);
 });

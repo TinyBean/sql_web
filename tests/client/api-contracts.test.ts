@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ContractValidationError,
-  decodeDashboardEditResponse,
   decodeDeleteSessionResponse,
   decodeErrorResponse,
   decodeHealthResponse,
@@ -13,7 +12,7 @@ import {
 } from "../../src/client/api-contracts.ts";
 
 const validSession = {
-  ownerAccount: "test-user", readOnly: false, dashboardId: "default",
+  ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
   id: "session-12345678",
   title: "测试会话",
   model: { provider: "test-provider", id: "test-model", name: "Test Model" },
@@ -24,13 +23,13 @@ const validSession = {
     "example_skill__calculate",
   ],
   streaming: false,
-  dashboard: {
+  dashboards: [{ id: "default", title: "Test OEE 综合看板", state: {
     schemaVersion: 1,
     revision: 0,
     dataAsOf: "2026-09-08T00:00:00.000Z",
     dateRange: { start: "2026-08-26", end: "2026-09-08" },
     widgets: [],
-  },
+  } }],
   messages: [{ id: "user-1", role: "user", text: "你好", timestamp: 1 }],
 };
 
@@ -45,17 +44,6 @@ test("decodes a complete session without type assertions", () => {
 test("decodes a successful session deletion", () => {
   assert.deepEqual(decodeDeleteSessionResponse({ ok: true }), { ok: true });
   assert.throws(() => decodeDeleteSessionResponse({ ok: false }), /ok/u);
-});
-
-test("decodes a persisted dashboard edit", () => {
-  assert.deepEqual(
-    decodeDashboardEditResponse({ dashboard: validSession.dashboard }),
-    { dashboard: validSession.dashboard },
-  );
-  assert.throws(
-    () => decodeDashboardEditResponse({ dashboard: { ...validSession.dashboard, revision: -1 } }),
-    /revision/u,
-  );
 });
 
 test("decodes request correlation IDs from JSON and SSE errors", () => {
@@ -191,14 +179,14 @@ test("decodes a complete dashboard update event", () => {
     decodeSseEvent("dashboard_update", {
       turn: 1,
       toolCallId: "dashboard-call",
-      dashboard: validSession.dashboard,
+      dashboardId: "default", dashboard: validSession.dashboards[0]!.state,
     }),
     {
       event: "dashboard_update",
       data: {
         turn: 1,
         toolCallId: "dashboard-call",
-        dashboard: validSession.dashboard,
+        dashboardId: "default", dashboard: validSession.dashboards[0]!.state,
       },
     },
   );
@@ -206,7 +194,7 @@ test("decodes a complete dashboard update event", () => {
     () => decodeSseEvent("dashboard_update", {
       turn: 1,
       toolCallId: "dashboard-call",
-      dashboard: { ...validSession.dashboard, revision: -1 },
+      dashboardId: "default", dashboard: { ...validSession.dashboards[0]!.state, revision: -1 },
     }),
     ContractValidationError,
   );
@@ -273,4 +261,13 @@ test("rejects nullable model state and private schema SQL", () => {
     }),
     /不得包含建表 SQL/u,
   );
+});
+
+test("rejects empty, duplicate or inconsistent multi-dashboard contracts", () => {
+  assert.throws(() => decodeSerializedSession({ ...validSession, dashboardIds: [] }), /dashboardIds/u);
+  assert.throws(() => decodeSerializedSession({ ...validSession, dashboardIds: ["default", "default"] }), /dashboardIds/u);
+  assert.throws(() => decodeSerializedSession({ ...validSession, dashboardIds: ["overview"] }), /dashboards/u);
+  assert.throws(() => decodeSerializedSession({ ...validSession, dashboards: [] }), /dashboards/u);
+  assert.throws(() => decodeSerializedSession({ ...validSession, dashboards: [...validSession.dashboards, ...validSession.dashboards] }), /dashboards/u);
+  assert.throws(() => decodeSseEvent("dashboard_update", { turn: 0, toolCallId: "call", dashboard: validSession.dashboards[0]!.state }), /dashboardId/u);
 });

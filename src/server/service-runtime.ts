@@ -71,6 +71,7 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
     const dashboardForAccount = loadUserDashboards(config.userDashboardsPath, dashboards);
     return AgentSessionStore.open({
       dashboardForAccount,
+      dashboardTitle: (id) => dashboards.title(id),
       loadAccountDashboard: (id) => dashboards.loadInitial(id),
       sharedDashboardPath: config.defaultDashboardPath,
       database: database as AppDatabase,

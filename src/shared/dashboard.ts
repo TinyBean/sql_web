@@ -7,6 +7,7 @@ export const MAX_DASHBOARD_SERIES = 6;
 export const MAX_DASHBOARD_TABLE_COLUMNS = 9;
 export const MAX_DASHBOARD_FILE_BYTES = 2 * 1024 * 1024;
 export const DASHBOARD_WIDGET_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+export const DASHBOARD_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/u;
 
 export type DashboardWidgetKind =
   | "kpi"
@@ -125,6 +126,12 @@ export interface DashboardState {
   readonly dataAsOf: string;
   readonly dateRange: { readonly start: string | null; readonly end: string | null };
   readonly widgets: readonly DashboardWidget[];
+}
+
+export interface SessionDashboard {
+  readonly id: string;
+  readonly title: string;
+  readonly state: DashboardState;
 }
 
 export class DashboardValidationError extends Error {

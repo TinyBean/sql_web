@@ -111,87 +111,17 @@ test("reuses, replaces, resizes, and disposes ECharts instances by widget", asyn
     ],
   };
   renderer.render(twoWidgets);
-  let animated = 0;
-  const visualOffsets = new Map<HTMLElement, number>();
-  const animationFrames: Keyframe[][] = [];
-  for (const card of grid.querySelectorAll<HTMLElement>("[data-widget-id]")) {
-    Object.defineProperties(card, {
-      offsetLeft: { get: () => [...grid.children].indexOf(card) * 100 },
-      offsetTop: { get: () => 0 },
-      offsetWidth: { get: () => 90 },
-      offsetHeight: { get: () => 90 },
-    });
-    Object.defineProperty(card, "getBoundingClientRect", {
-      configurable: true,
-      value(): DOMRect {
-        const cards = [...grid.querySelectorAll("[data-widget-id]")];
-        const left = cards.indexOf(card) * 100 + (visualOffsets.get(card) ?? 0);
-        return {
-          x: left,
-          y: 0,
-          left,
-          right: left + 90,
-          top: 0,
-          bottom: 90,
-          width: 90,
-          height: 90,
-          toJSON: () => ({}),
-        };
-      },
-    });
-    Object.defineProperty(card, "animate", {
-      configurable: true,
-      value(frames: Keyframe[]): Animation {
-        animated += 1;
-        animationFrames.push(frames);
-        return {
-          cancel() { visualOffsets.delete(card); },
-          addEventListener() {},
-        } as unknown as Animation;
-      },
-    });
-  }
-  renderer.previewOrder(["secondary", "trend"]);
+  renderer.render({ ...twoWidgets, widgets: [...twoWidgets.widgets].reverse() });
   assert.deepEqual(
     [...grid.querySelectorAll("[data-widget-id]")].map((card) => (card as HTMLElement).dataset["widgetId"]),
     ["secondary", "trend"],
   );
-  assert.equal(animated, 2, "both displaced cards should receive FLIP animations");
-  renderer.previewOrder(["secondary", "trend"]);
-  assert.equal(animated, 2, "the same order must not restart animations");
-  const trend = grid.querySelector<HTMLElement>("[data-widget-id='trend']") as HTMLElement;
-  const secondary = grid.querySelector<HTMLElement>("[data-widget-id='secondary']") as HTMLElement;
-  visualOffsets.set(secondary, 40);
-  assert.equal(renderer.readLayout().widgets.get("secondary")?.left, 0,
-    "hit testing must ignore the in-flight visual transform");
-  assert.equal(secondary.getBoundingClientRect().left, 40);
-  trend.classList.add("dragging-source");
-  renderer.previewOrder(["trend", "secondary"]);
-  assert.equal(animated, 3, "the invisible source must not animate");
-  assert.equal(animationFrames.at(-1)?.[0]?.["transform"], "translate(-60px, 0px)",
-    "a retargeted animation must start at the current visual position");
-  trend.classList.remove("dragging-source");
-  assert.equal(initialized, 1, "reordering must retain the original chart");
+  assert.equal(initialized, 1, "Agent-driven reordering must retain the original chart");
   renderer.render(dashboard(1));
   renderer.render(dashboard(1), { pendingWidgetIds: new Set(["trend"]) });
   assert.equal(initialized, 1, "unchanged widget should reuse its chart");
   assert.equal(grid.querySelector("[data-widget-id='trend']")?.classList.contains("pending"), true);
-  const dragHandle = grid.querySelector("[data-drag-handle='trend']") as HTMLButtonElement;
-  const closeButton = grid.querySelector("[data-close-widget-id='trend']") as HTMLButtonElement;
-  assert.equal(dragHandle.disabled, true);
-  assert.equal(closeButton.getAttribute("aria-label"), "关闭“趋势”");
-  renderer.setEditing(true);
-  assert.equal(grid.classList.contains("dashboard-editing"), true);
-  assert.equal(dragHandle.disabled, false);
-  assert.equal(dragHandle.draggable, false, "pointer dragging must not start native HTML drag");
-  renderer.setEditing(true, true);
-  assert.equal(dragHandle.disabled, true);
-  assert.equal(dragHandle.draggable, false);
-  renderer.setEditing(false);
-  renderer.render(dashboard(1), { hiddenWidgetIds: new Set(["trend"]) });
-  assert.equal(grid.querySelector("[data-widget-id='trend']")?.hasAttribute("hidden"), true);
-  assert.match(grid.querySelector(".dashboard-empty")?.textContent ?? "", /当前看板为空/u);
-  assert.equal(initialized, 1, "hiding a widget must preserve its chart");
+  assert.equal(grid.querySelector("[data-drag-handle], [data-close-widget-id]"), null);
   resizeCallback?.(
     [...observed].map((target) => ({ target, contentRect: target.getBoundingClientRect() } as ResizeObserverEntry)),
     {} as ResizeObserver,

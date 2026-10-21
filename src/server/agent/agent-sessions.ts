@@ -22,7 +22,6 @@ import {
   type AgentStatus,
   type ChatMessage,
   type ChatTraceItem,
-  type DashboardEditRequest,
   type JsonObject,
   type ModelSelection,
   type SerializedSession,
@@ -47,7 +46,7 @@ import {
 } from "./skill-catalog.ts";
 import { API_CHAT_AGENT_RULES, buildSystemPrompt, websiteInvestigationPrompt } from "./prompts.ts";
 import { AuthError, normalizeAccount } from "../auth.ts";
-import { OWNER_ENTRY, persistOwnedSession, readSessionFile, sessionBranch, type SessionOwner } from "./session-files.ts";
+import { OWNER_ENTRY, persistOwnedSession, readSessionFile, sessionBranch, sameSessionOwner, type SessionOwner } from "./session-files.ts";
 import type { ScopedSessionPort } from "../http-server.ts";
 import { sessionDataReadPolicy } from "./session-data-access.ts";
 import { SubagentRunner, SUBAGENT_TOOL_NAME, SUBAGENT_AGENT_RULES } from "./subagent.ts";
@@ -57,7 +56,8 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 
 export interface AgentSessionStoreOptions {
   readonly sharedDashboardPath?: string;
-  readonly dashboardForAccount?: (account: string) => string;
+  readonly dashboardForAccount?: (account: string) => readonly string[];
+  readonly dashboardTitle?: (dashboardId: string) => string;
   readonly loadAccountDashboard?: (dashboardId: string) => DashboardState;
   readonly database: AppDatabase;
   readonly cwd: string;
@@ -464,7 +464,8 @@ function codeInterpreterLogFields(
 
 export class AgentSessionStore {
   readonly #owners = new Map<string, SessionOwner>();
-  readonly #dashboardForAccount: (account: string) => string;
+  readonly #dashboardForAccount: (account: string) => readonly string[];
+  readonly #dashboardTitle: (dashboardId: string) => string;
   readonly #loadAccountDashboard: ((dashboardId: string) => DashboardState) | undefined;
   readonly #sharedDashboardPath: string | undefined;
   readonly #database: AppDatabase;
@@ -491,14 +492,15 @@ export class AgentSessionStore {
   #disposePromise: Promise<void> | undefined;
 
   private constructor(
-    { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, email, logger, dashboardForAccount, loadAccountDashboard, sharedDashboardPath }:
+    { database, cwd, sessionDir, agentDir, model, artifacts, loadInitialDashboard, codeInterpreter, email, logger, dashboardForAccount, dashboardTitle, loadAccountDashboard, sharedDashboardPath }:
       AgentSessionStoreOptions,
     modelRuntime: ModelRuntime,
     skillCatalog: AgentSkillCatalog,
   ) {
     this.#database = database;
-    this.#dashboardForAccount = dashboardForAccount ?? (() => "default");
+    this.#dashboardForAccount = dashboardForAccount ?? (() => ["default"]);
     this.#loadAccountDashboard = loadAccountDashboard;
+    this.#dashboardTitle = dashboardTitle ?? ((id) => id);
     this.#sharedDashboardPath = sharedDashboardPath;
     this.#cwd = cwd;
     this.#sessionDir = sessionDir;
@@ -507,8 +509,12 @@ export class AgentSessionStore {
     this.#artifacts = artifacts;
     this.#dashboard = new SessionDashboardStore(artifacts, (id) => {
       const owner = this.#owners.get(id);
-      return owner && this.#loadAccountDashboard ? this.#loadAccountDashboard(owner.dashboardId) : loadInitialDashboard(id);
-    });
+      return owner && this.#loadAccountDashboard ? owner.dashboardIds.map((dashboardId) => ({
+        id: dashboardId, title: this.#dashboardTitle(dashboardId), state: this.#loadAccountDashboard!(dashboardId),
+      })) : loadInitialDashboard(id);
+    }, (id) => this.#owners.get(id)?.dashboardIds.map((dashboardId) => ({
+      id: dashboardId, title: this.#dashboardTitle(dashboardId),
+    })));
     this.#codeInterpreter = codeInterpreter;
     this.#email = email ?? null;
     this.#toolNames = [SKILL_READ_TOOL_NAME, ...activeAgentToolNames(codeInterpreter, true), ...(this.#email ? [EMAIL_TOOL_NAME] : []), SUBAGENT_TOOL_NAME];
@@ -566,14 +572,14 @@ export class AgentSessionStore {
             const record = readSessionFile(filePath);
             if (record.header.id !== summary.id || (record.owner && record.owner.account !== account)) continue;
             const cachedOwner = this.#owners.get(summary.id);
-            if (cachedOwner && (record.owner?.account !== cachedOwner.account || record.owner.dashboardId !== cachedOwner.dashboardId)) continue;
+            if (cachedOwner && !sameSessionOwner(record.owner, cachedOwner)) continue;
             items.push({ ...summary, ownerAccount: record.owner?.account ?? null,
-              readOnly: record.owner === null, dashboardId: record.owner?.dashboardId ?? "default" });
+              readOnly: record.owner === null, dashboardIds: record.owner?.dashboardIds ?? this.#dashboard.listOrPreview(summary.id).map((item) => item.id) });
           } catch { /* Invalid private files must never degrade into shared history. */ }
         }
         return items;
       },
-      create: () => this.create({ account, dashboardId: this.#dashboardForAccount(account) }),
+      create: () => this.create({ account, dashboardIds: this.#dashboardForAccount(account) }),
       get: async (id) => { await writable(id); return this.get(id); },
       getSerialized: async (id) => {
         const { record } = await readable(id);
@@ -581,16 +587,16 @@ export class AgentSessionStore {
         const branch = sessionBranch(record.entries);
         const messages = serializeMessages(branch.flatMap(sessionEntryToContextMessages));
         const name = record.entries.filter((entry) => entry.type === "session_info").at(-1);
+        const dashboards = this.#dashboard.listOrPreview(id);
         return {
-          id, ownerAccount: null, readOnly: true, dashboardId: "default",
+          id, ownerAccount: null, readOnly: true, dashboardIds: dashboards.map((item) => item.id),
           title: (name?.type === "session_info" ? name.name : messages.find((message) => message.role === "user")?.text.slice(0, 80)) || "新会话",
           model: null, tools: [...this.#toolNames], streaming: false, messages,
-          dashboard: this.#dashboard.loadOrPreview(id),
+          dashboards,
         };
       },
-      editDashboard: async (id, request) => { await writable(id); return this.editDashboard(id, request); },
       delete: async (id) => { await writable(id); return this.delete(id); },
-      prompt: async (id, text, requestId) => { await writable(id); return this.prompt(id, text, requestId); },
+      prompt: async (id, text, requestId, dashboardId) => { await writable(id); return this.prompt(id, text, requestId, dashboardId); },
       abort: async (id) => { await writable(id); return this.abort(id); },
       fork: async (id) => {
         const { info, record } = await readable(id);
@@ -621,16 +627,19 @@ export class AgentSessionStore {
             };
             rewriteManifests(targetRoot);
           }
+          const owner = { account, dashboardIds: this.#dashboard.listOrPreview(id).map((item) => item.id) };
+          this.#owners.set(newId, owner);
           if (!existsSync(path.join(targetRoot, "dashboard.json"))) {
-            this.#dashboard.initialize(newId, { ...this.#dashboard.loadOrPreview(id), revision: 0 });
+            this.#dashboard.initialize(newId, this.#dashboard.listOrPreview(id).map((item) => ({
+              ...item, state: { ...item.state, revision: 0 },
+            })));
           }
-          this.#dashboard.loadOrPreview(newId); // Validate copied baseline/current before publishing the session.
+          this.#dashboard.listOrPreview(newId); // Validate copied baseline/current before publishing the session.
           // Rebind historical tool artifact references as well as snapshot manifests.
           const sourceFile = manager.getSessionFile()!;
           writeFileSync(sourceFile, readFileSync(sourceFile, "utf8")
             .replaceAll(`artifact://${id}/`, `artifact://${newId}/`).replaceAll(sourceRoot + "/", targetRoot + "/"));
           const rebound = SessionManager.open(sourceFile, temporary, this.#cwd);
-          const owner = { account, dashboardId: "default" };
           this.#ensureDashboardMarker(rebound);
           rebound.appendCustomEntry(OWNER_ENTRY, owner);
           newFile = persistOwnedSession(this.#sessionDir, rebound, owner);
@@ -659,7 +668,7 @@ export class AgentSessionStore {
     catch { throw new SessionNotFoundError(id); }
     if (record.header.id !== id || (record.owner && record.owner.account !== account)) throw new SessionNotFoundError(id);
     const cachedOwner = this.#owners.get(id);
-    if (cachedOwner && (record.owner?.account !== cachedOwner.account || record.owner.dashboardId !== cachedOwner.dashboardId)) throw new SessionNotFoundError(id);
+    if (cachedOwner && !sameSessionOwner(record.owner, cachedOwner)) throw new SessionNotFoundError(id);
     if (write && !record.owner) throw new AuthError("共享历史会话为只读，请先复制为自己的会话", 403);
     return { info, record };
   }
@@ -672,7 +681,10 @@ export class AgentSessionStore {
     let session: AgentSession;
     try {
       if (owner) {
-        const initial = this.#loadAccountDashboard?.(owner.dashboardId) ?? this.#dashboard.loadOrPreview(id);
+        this.#owners.set(id, owner);
+        const initial = this.#loadAccountDashboard ? owner.dashboardIds.map((dashboardId) => ({
+          id: dashboardId, title: this.#dashboardTitle(dashboardId), state: this.#loadAccountDashboard!(dashboardId),
+        })) : this.#dashboard.listOrPreview(id);
         this.#dashboard.initialize(id, initial);
         manager.appendCustomEntry(OWNER_ENTRY, owner);
         manager.appendSessionInfo("新会话");
@@ -706,7 +718,7 @@ export class AgentSessionStore {
       infos.map((info) => [info.id, {
         ownerAccount: this.#owners.get(info.id)?.account ?? null,
         readOnly: !this.#owners.has(info.id),
-        dashboardId: this.#owners.get(info.id)?.dashboardId ?? "default",
+        dashboardIds: this.#owners.get(info.id)?.dashboardIds ?? ["default"],
         id: info.id,
         title: info.name || info.firstMessage || "新会话",
         createdAt: info.created.toISOString(),
@@ -724,7 +736,7 @@ export class AgentSessionStore {
       listed.set(id, {
         ownerAccount: this.#owners.get(id)?.account ?? null,
         readOnly: !this.#owners.has(id),
-        dashboardId: this.#owners.get(id)?.dashboardId ?? "default",
+        dashboardIds: this.#owners.get(id)?.dashboardIds ?? ["default"],
         id,
         title: sessionTitle(session),
         createdAt: times.created.toISOString(),
@@ -760,28 +772,6 @@ export class AgentSessionStore {
 
   async getSerialized(id: string): Promise<SerializedSession> {
     return this.serialize(await this.get(id));
-  }
-
-  async editDashboard(id: string, request: DashboardEditRequest): Promise<DashboardState> {
-    const session = await this.get(id);
-    if (session.isStreaming) throw new SessionBusyError();
-    const result = this.#dashboard.apply(id, request.action === "remove"
-      ? {
-          action: "remove",
-          baseRevision: request.baseRevision,
-          widgetId: request.widgetId,
-        }
-      : {
-          action: "reorder",
-          baseRevision: request.baseRevision,
-          widgetIds: request.widgetIds,
-        });
-    this.#logger.info("dashboard.edited", {
-      sessionId: id,
-      action: request.action,
-      revision: result.dashboard.revision,
-    });
-    return result.dashboard;
   }
 
   async delete(id: string): Promise<void> {
@@ -830,14 +820,17 @@ export class AgentSessionStore {
     });
   }
 
-  async prompt(id: string, text: string, requestId?: string): Promise<void> {
+  async prompt(id: string, text: string, requestId?: string, dashboardId?: string): Promise<void> {
     validatePromptText(text);
     const session = await this.get(id);
     if (session.isStreaming) throw new SessionBusyError();
     if (!session.sessionName || session.sessionName === "新会话") {
       session.setSessionName(shortTitle(text));
     }
-    await this.#promptSession(session, text, requestId);
+    const selected = dashboardId ?? this.#dashboard.activeDashboardId(id);
+    this.#dashboard.setActiveDashboard(id, selected);
+    try { await this.#promptSession(session, text, requestId); }
+    finally { this.#dashboard.clearActiveDashboard(id); }
   }
 
   async complete(text: string, options: ChatCompletionOptions = {}): Promise<string> {
@@ -966,7 +959,7 @@ export class AgentSessionStore {
     return {
       ownerAccount: this.#owners.get(session.sessionId)?.account ?? null,
       readOnly: !this.#owners.has(session.sessionId),
-      dashboardId: this.#owners.get(session.sessionId)?.dashboardId ?? "default",
+      dashboardIds: this.#owners.get(session.sessionId)?.dashboardIds ?? ["default"],
       id: session.sessionId,
       title: sessionTitle(session),
       model: session.model
@@ -975,9 +968,9 @@ export class AgentSessionStore {
       tools: validatedAgentToolNames(session),
       streaming: session.isStreaming,
       messages,
-      dashboard: messages.length === 0
-        ? this.#dashboard.loadOrPreview(session.sessionId)
-        : this.#dashboard.loadOrInitialize(session.sessionId),
+      dashboards: messages.length === 0
+        ? this.#dashboard.listOrPreview(session.sessionId)
+        : this.#dashboard.listOrInitialize(session.sessionId),
     };
   }
 
@@ -1037,7 +1030,7 @@ export class AgentSessionStore {
       }),
       prepareBatch: () => {
         let dashboard: unknown;
-        try { dashboard = { status: "available", dashboard: this.#dashboard.loadOrPreview(sessionManager.getSessionId()) }; }
+        try { dashboard = { status: "available", activeDashboardId: this.#dashboard.activeDashboardId(sessionManager.getSessionId()), dashboards: this.#dashboard.listOrPreview(sessionManager.getSessionId()) }; }
         catch (error) {
           this.#logger.error("agent.subagent.dashboard.failed", error, { sessionId: sessionManager.getSessionId() });
           dashboard = { status: "unavailable", message: "当前看板不可用，不得猜测展示内容" };

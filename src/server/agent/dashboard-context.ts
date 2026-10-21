@@ -11,7 +11,7 @@ const RETIRED_REVIEW_MESSAGE_TYPES = new Set([
 ]);
 
 export function createDashboardContextExtension(
-  dashboard: Pick<SessionDashboardStore, "loadOrPreview">,
+  dashboard: Pick<SessionDashboardStore, "listOrPreview" | "activeDashboardId">,
   logger: Pick<AppLogger, "error">,
 ): InlineExtension {
   return {
@@ -25,7 +25,8 @@ export function createDashboardContextExtension(
           content = JSON.stringify({
             type: DASHBOARD_CONTEXT_MESSAGE_TYPE,
             status: "available",
-            dashboard: dashboard.loadOrPreview(sessionId),
+            activeDashboardId: dashboard.activeDashboardId(sessionId),
+            dashboards: dashboard.listOrPreview(sessionId),
           });
         } catch (error) {
           logger.error("agent.dashboard.context.failed", error, { sessionId });

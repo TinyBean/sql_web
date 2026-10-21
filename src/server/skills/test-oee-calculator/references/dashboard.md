@@ -2,6 +2,14 @@
 
 使用 `get_default_sql(view: "overview" | "trends")`，将 SQL 原样交给 `execute_sql.save_as` 后再更新看板。聚合公式见 [业务规则](business-rules.md)。所有 `_percent` 列已乘 100，`unit: "%"` 只追加单位。
 
+### 多看板读写
+
+当前会话看板以应用上下文中的 `dashboards` 列表为准，每项包含 `id`、`title` 和完整 `state`。`activeDashboardId` 是发送本次问题时选中的看板；用户未指定名称时，以它为默认目标，回答期间页面切换标签不会改变此值。
+
+先调用 `get_dashboard` 读取目标 revision 和卡片。省略 `dashboard_ids` 返回全部绑定看板摘要；传 `dashboard_ids: ["overview", "default"]` 可筛选多个看板，`include_data: true` 返回完整卡片数据。概览看板 ID 为 `overview`，操作必须使用该会话实际返回的 ID。
+
+每次 `update_dashboard` 必须传入一个 `dashboard_id`，并使用该看板最近读取的 `base_revision`；同时修改多个看板须分别调用。各看板的卡片、revision 和重置基线彼此独立，同名卡片不会联动。只能修改当前会话已有看板，不得创建未绑定看板。同一会话保存的完整查询快照可被多个看板引用。
+
 ### 概览字段映射与核对
 
 `get_default_sql(view: "overview")` 返回一行，可保存为一个快照供多张概览卡片引用。该行同时包含合并指标和分类指标，按以下映射选择字段：

@@ -8,7 +8,6 @@ import type {
   ChatTraceItem,
   CompactionOutcome,
   AgentToolName,
-  DashboardEditResponse,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -29,6 +28,8 @@ import {
   DashboardValidationError,
   parseDashboardState,
   type DashboardState,
+  type SessionDashboard,
+  DASHBOARD_ID_PATTERN,
 } from "../shared/dashboard.ts";
 
 export type Decoder<Value> = (value: unknown, path?: string) => Value;
@@ -111,6 +112,26 @@ function dashboardState(value: unknown, path: string): DashboardState {
     }
     throw error;
   }
+}
+
+function dashboardId(value: unknown, path: string): string {
+  const id = nonEmptyString(value, path);
+  return DASHBOARD_ID_PATTERN.test(id) ? id : invalid(path, "合法的看板 ID");
+}
+
+function dashboardIds(value: unknown, path: string): string[] {
+  const ids = array(value, path, dashboardId);
+  return ids.length && new Set(ids).size === ids.length ? ids : invalid(path, "非空且不重复的看板 ID 列表");
+}
+
+function sessionDashboards(value: unknown, path: string): SessionDashboard[] {
+  const dashboards = array(value, path, (value, itemPath) => {
+    const item = record(value, itemPath);
+    return { id: dashboardId(item["id"], `${itemPath}.id`), title: nonEmptyString(item["title"], `${itemPath}.title`),
+      state: dashboardState(item["state"], `${itemPath}.state`) };
+  });
+  dashboardIds(dashboards.map((item) => item.id), path);
+  return dashboards;
 }
 
 function chatRole(value: unknown, path: string): ChatRole {
@@ -230,14 +251,19 @@ function sessionSummary(value: unknown, path: string): SessionSummary {
 export const decodeSerializedSession: Decoder<SerializedSession> = (value, path = "$session") => {
   const item = record(value, path);
   const model = item["model"];
+  const access = sessionAccess(item, path);
+  const dashboards = sessionDashboards(item["dashboards"], `${path}.dashboards`);
+  if (dashboards.length !== access.dashboardIds.length || dashboards.some((item, index) => item.id !== access.dashboardIds[index])) {
+    invalid(`${path}.dashboards`, "与 dashboardIds 顺序一致的看板列表");
+  }
   return {
-    ...sessionAccess(item, path),
+    ...access,
     id: string(item["id"], `${path}.id`),
     title: string(item["title"], `${path}.title`),
     model: model === null ? null : modelDescriptor(model, `${path}.model`),
     tools: array(item["tools"], `${path}.tools`, agentToolName),
     streaming: boolean(item["streaming"], `${path}.streaming`),
-    dashboard: dashboardState(item["dashboard"], `${path}.dashboard`),
+    dashboards,
     messages: array(item["messages"], `${path}.messages`, chatMessage),
   };
 };
@@ -246,7 +272,7 @@ function sessionAccess(item: Record<string, unknown>, path: string): SessionAcce
   return {
     ownerAccount: item["ownerAccount"] === null ? null : nonEmptyString(item["ownerAccount"], `${path}.ownerAccount`),
     readOnly: boolean(item["readOnly"], `${path}.readOnly`),
-    dashboardId: nonEmptyString(item["dashboardId"], `${path}.dashboardId`),
+    dashboardIds: dashboardIds(item["dashboardIds"], `${path}.dashboardIds`),
   };
 }
 
@@ -255,7 +281,7 @@ export const decodeAuthResponse: Decoder<AuthResponse> = (value, path = "$auth")
   const expiresAt = nonEmptyString(item["expiresAt"], `${path}.expiresAt`);
   if (!Number.isFinite(Date.parse(expiresAt))) invalid(`${path}.expiresAt`, "有效时间");
   return { account: nonEmptyString(item["account"], `${path}.account`),
-    dashboardId: nonEmptyString(item["dashboardId"], `${path}.dashboardId`), expiresAt };
+    dashboardIds: dashboardIds(item["dashboardIds"], `${path}.dashboardIds`), expiresAt };
 };
 
 export const decodeSessionsResponse: Decoder<SessionsResponse> = (value, path = "$sessions") => {
@@ -310,14 +336,6 @@ export const decodeAbortResponse: Decoder<AbortResponse> = (value, path = "$abor
   const item = record(value, path);
   if (item["ok"] !== true) invalid(`${path}.ok`, "true");
   return { ok: true };
-};
-
-export const decodeDashboardEditResponse: Decoder<DashboardEditResponse> = (
-  value,
-  path = "$dashboardEdit",
-) => {
-  const item = record(value, path);
-  return { dashboard: dashboardState(item["dashboard"], `${path}.dashboard`) };
 };
 
 export const decodeDeleteSessionResponse: Decoder<DeleteSessionResponse> = (
@@ -401,6 +419,7 @@ export function decodeSseEvent(event: string, value: unknown): ParsedSseEvent | 
       data: {
         turn: nonNegativeInteger(item["turn"], `${path}.turn`),
         toolCallId: nonEmptyString(item["toolCallId"], `${path}.toolCallId`),
+        dashboardId: dashboardId(item["dashboardId"], `${path}.dashboardId`),
         dashboard: dashboardState(item["dashboard"], `${path}.dashboard`),
       },
     };

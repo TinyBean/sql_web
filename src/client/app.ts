@@ -3,18 +3,16 @@ import type {
   ChatMessage,
   ChatRole,
   ChatTraceItem,
-  DashboardEditRequest,
   JsonObject,
   MessageRequest,
   ParsedSseEvent,
   SerializedSession,
   SessionSummary,
 } from "../shared/contracts.ts";
-import type { DashboardState } from "../shared/dashboard.ts";
+import type { DashboardState, SessionDashboard } from "../shared/dashboard.ts";
 import {
   decodeAuthResponse,
   decodeAbortResponse,
-  decodeDashboardEditResponse,
   decodeDeleteSessionResponse,
   decodeSerializedSession,
   decodeSessionsResponse,
@@ -37,11 +35,6 @@ import {
 } from "./stream-state.ts";
 import { renderMarkdownInto } from "./markdown.ts";
 import { DashboardRenderer } from "./dashboard.ts";
-import {
-  dashboardDropTarget,
-  type DashboardDragPoint,
-  type DashboardOrderMove,
-} from "./dashboard-drag.ts";
 
 interface ElementConstructor<ElementType extends Element> {
   readonly prototype: ElementType;
@@ -65,10 +58,11 @@ const elements = {
   loginStatus: requiredElement("#loginStatus", HTMLElement),
   currentAccount: requiredElement("#currentAccount", HTMLElement),
   logoutButton: requiredElement("#logoutButton", HTMLButtonElement),
+  dashboardTabs: requiredElement("#dashboardTabs", HTMLElement),
+  dashboardTitle: requiredElement("#dashboardTitle", HTMLElement),
   dashboardGrid: requiredElement("#dashboardGrid", HTMLElement),
   dashboardDateRange: requiredElement("#dashboardDateRange", HTMLElement),
   dashboardUpdatedAt: requiredElement("#dashboardUpdatedAt", HTMLElement),
-  dashboardEditButton: requiredElement("#dashboardEditButton", HTMLButtonElement),
   chatDock: requiredElement("#chatDock", HTMLElement),
   chatTitle: requiredElement("#chatTitle", HTMLElement),
   chatCollapseButton: requiredElement("#chatCollapseButton", HTMLButtonElement),
@@ -102,38 +96,22 @@ interface ClientState {
   sessions: readonly SessionSummary[];
   activeStreams: SessionStreamRegistry<ActiveStream>;
   scrollPositions: Map<string, number>;
-  dashboards: Map<string, DashboardState>;
-  dashboardEditing: boolean;
-  dashboardSaving: boolean;
-  dashboardSavePromise: Promise<DashboardState> | null;
-  dashboardEditDraft: DashboardEditDraft | null;
-  pendingDashboardRemoval: PendingDashboardRemoval | null;
+  dashboardScrollPositions: Map<string, Map<string, { readonly left: number; readonly top: number }>>;
+  dashboards: Map<string, Map<string, DashboardState>>;
+  dashboardOptions: Map<string, readonly Pick<SessionDashboard, "id" | "title">[]>;
+  selectedDashboardIds: Map<string, string>;
   deletingSessionId: string | null;
   toastTimer: number | null;
-}
-
-interface PendingDashboardRemoval {
-  readonly sessionId: string;
-  readonly widgetId: string;
-  readonly widgetTitle: string;
-  readonly orderIndex: number;
-  readonly timerId: number;
-}
-
-interface DashboardEditDraft {
-  readonly sessionId: string;
-  readonly originalWidgetIds: readonly string[];
-  readonly removedWidgetIds: Set<string>;
-  widgetIds: string[];
 }
 
 interface ActiveStream {
   readonly sessionId: string;
   readonly transcript: HTMLElement;
   readonly node: StreamNode;
-  dashboard: DashboardState;
+  dashboards: Map<string, DashboardState>;
+  readonly requestDashboardId: string;
   readonly pendingDashboardWidgetIds: Set<string>;
-  readonly pendingDashboardToolIds: Map<string, readonly string[]>;
+  readonly pendingDashboardToolIds: Map<string, { dashboardId: string; widgetIds: readonly string[] }>;
   aborting: boolean;
 }
 
@@ -142,12 +120,10 @@ const state: ClientState = {
   sessions: [],
   activeStreams: new SessionStreamRegistry<ActiveStream>(),
   scrollPositions: new Map<string, number>(),
-  dashboards: new Map<string, DashboardState>(),
-  dashboardEditing: false,
-  dashboardSaving: false,
-  dashboardSavePromise: null,
-  dashboardEditDraft: null,
-  pendingDashboardRemoval: null,
+  dashboardScrollPositions: new Map(),
+  dashboards: new Map(),
+  dashboardOptions: new Map(),
+  selectedDashboardIds: new Map(),
   deletingSessionId: null,
   toastTimer: null,
 };
@@ -176,9 +152,10 @@ function clearLogin(message = "请使用域账号登录"): void {
   state.activeStreams = new SessionStreamRegistry<ActiveStream>();
   state.sessions = [];
   state.dashboards.clear();
+  state.dashboardOptions.clear();
+  state.selectedDashboardIds.clear();
   state.scrollPositions.clear();
-  state.dashboardSavePromise = null;
-  state.dashboardSaving = false;
+  state.dashboardScrollPositions.clear();
   state.deletingSessionId = null;
   clearSessionView();
   elements.messages.replaceChildren();
@@ -198,7 +175,7 @@ function clearLogin(message = "请使用域账号登录"): void {
 function acceptLogin(login: AuthResponse): void {
   clearLogin();
   currentLogin = login;
-  elements.currentAccount.textContent = `${login.account} · ${login.dashboardId}`;
+  elements.currentAccount.textContent = login.account;
   document.body.classList.remove("signed-out");
   authExpiryTimer = window.setTimeout(() => clearLogin("登录已过期，请重新登录"), Math.max(0, Date.parse(login.expiresAt) - Date.now()));
   (authExpiryTimer as unknown as { unref?: () => void }).unref?.();
@@ -217,33 +194,16 @@ function createSvg(paths: readonly Readonly<Record<string, string>>[]): SVGSVGEl
   return svg;
 }
 
-function showToast(
-  message: string,
-  action?: { readonly label: string; readonly run: () => void },
-  duration = 4_500,
-): void {
+function showToast(message: string): void {
   if (state.toastTimer !== null) clearTimeout(state.toastTimer);
   const copy = document.createElement("span");
   copy.textContent = message;
   elements.toast.replaceChildren(copy);
-  elements.toast.classList.toggle("actionable", Boolean(action));
-  if (action) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = action.label;
-    button.addEventListener("click", () => {
-      if (state.toastTimer !== null) clearTimeout(state.toastTimer);
-      state.toastTimer = null;
-      elements.toast.classList.remove("visible");
-      action.run();
-    }, { once: true });
-    elements.toast.append(button);
-  }
   elements.toast.classList.add("visible");
   state.toastTimer = window.setTimeout(() => {
     elements.toast.classList.remove("visible");
     state.toastTimer = null;
-  }, duration);
+  }, 4_500);
 }
 
 function messageFromUnknown(error: unknown, fallback = "请求失败"): string {
@@ -296,6 +256,90 @@ function toggleHistory(force?: boolean): void {
   elements.historyButton.setAttribute("aria-expanded", String(open));
 }
 
+function selectedDashboardId(sessionId: string | null = state.sessionId): string | undefined {
+  return sessionId ? state.selectedDashboardIds.get(sessionId) ?? state.dashboardOptions.get(sessionId)?.[0]?.id : undefined;
+}
+
+function getDashboard(sessionId: string | null, dashboardId = selectedDashboardId(sessionId)): DashboardState | undefined {
+  return sessionId && dashboardId ? state.dashboards.get(sessionId)?.get(dashboardId) : undefined;
+}
+
+function cacheSessionDashboards(sessionId: string, dashboards: readonly SessionDashboard[]): void {
+  state.dashboardOptions.set(sessionId, dashboards.map(({ id, title }) => ({ id, title })));
+  const selected = selectedDashboardId(sessionId);
+  if (!dashboards.some((item) => item.id === selected)) state.selectedDashboardIds.set(sessionId, dashboards[0]!.id);
+  for (const item of dashboards) cacheDashboard(sessionId, item.state, item.id);
+}
+
+function renderDashboardTabs(): void {
+  const options = state.dashboardOptions.get(state.sessionId ?? "") ?? [];
+  const selected = selectedDashboardId();
+  elements.dashboardTabs.hidden = options.length < 2;
+  const buttons = options.map((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "dashboard-tab";
+    button.id = `dashboard-tab-${item.id}`;
+    button.dataset["dashboardId"] = item.id;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", "dashboardGrid");
+    button.setAttribute("aria-selected", String(item.id === selected));
+    button.tabIndex = item.id === selected ? 0 : -1;
+    button.textContent = item.title;
+    button.title = item.title;
+    return button;
+  });
+  elements.dashboardTabs.replaceChildren(...buttons);
+  elements.dashboardTitle.textContent = options.find((item) => item.id === selected)?.title ?? "指标看板";
+  if (options.length > 1 && selected) elements.dashboardGrid.setAttribute("aria-labelledby", `dashboard-tab-${selected}`);
+  else elements.dashboardGrid.removeAttribute("aria-labelledby");
+}
+
+function rememberDashboardScrollPosition(): void {
+  const sessionId = state.sessionId;
+  const dashboardId = selectedDashboardId();
+  if (!sessionId || !dashboardId || !getDashboard(sessionId, dashboardId)) return;
+  let positions = state.dashboardScrollPositions.get(sessionId);
+  if (!positions) { positions = new Map(); state.dashboardScrollPositions.set(sessionId, positions); }
+  positions.set(dashboardId, {
+    left: Math.max(0, window.scrollX ?? document.documentElement.scrollLeft ?? 0),
+    top: Math.max(0, window.scrollY ?? document.documentElement.scrollTop ?? 0),
+  });
+}
+
+function restoreDashboardScrollPosition(): void {
+  const sessionId = state.sessionId;
+  const dashboardId = selectedDashboardId();
+  const position = sessionId && dashboardId ? state.dashboardScrollPositions.get(sessionId)?.get(dashboardId) : undefined;
+  window.scrollTo?.({ left: position?.left ?? 0, top: position?.top ?? 0, behavior: "instant" });
+}
+
+async function switchDashboard(dashboardId: string): Promise<void> {
+  const sessionId = state.sessionId;
+  if (!sessionId || dashboardId === selectedDashboardId() || !getDashboard(sessionId, dashboardId)) return;
+  rememberDashboardScrollPosition();
+  state.selectedDashboardIds.set(sessionId, dashboardId);
+  renderCurrentDashboard();
+  elements.dashboardTabs.querySelector<HTMLElement>("[aria-selected='true']")?.focus({ preventScroll: true });
+  restoreDashboardScrollPosition();
+}
+
+elements.dashboardTabs.addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-dashboard-id]") : null;
+  const id = button?.dataset["dashboardId"];
+  if (id) void switchDashboard(id).catch((error) => showToast(messageFromUnknown(error)));
+});
+elements.dashboardTabs.addEventListener("keydown", (event) => {
+  const options = state.dashboardOptions.get(state.sessionId ?? "") ?? [];
+  const index = options.findIndex((item) => item.id === selectedDashboardId());
+  const target = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 :
+    event.key === "ArrowRight" ? (index + 1) % options.length :
+    event.key === "ArrowLeft" ? (index - 1 + options.length) % options.length : -1;
+  if (target < 0 || !options[target]) return;
+  event.preventDefault();
+  void switchDashboard(options[target].id).catch((error) => showToast(messageFromUnknown(error)));
+});
+
 function formatDashboardDateRange(dashboard: DashboardState): string {
   const { start, end } = dashboard.dateRange;
   return start && end ? `${start} — ${end}` : "数据范围不可用";
@@ -308,242 +352,33 @@ function formatDataAsOf(value: string): string {
     : `快照 ${date.toLocaleString("zh-CN", { hour12: false })}`;
 }
 
-function hiddenWidgetIdsForCurrentSession(): ReadonlySet<string> {
-  const draft = state.dashboardEditDraft;
-  return draft && draft.sessionId === state.sessionId
-    ? draft.removedWidgetIds
-    : new Set();
-}
-
-function dashboardViewForCurrentSession(dashboard: DashboardState): DashboardState {
-  const draft = state.dashboardEditDraft;
-  if (!draft || draft.sessionId !== state.sessionId) return dashboard;
-  const widgetsById = new Map(dashboard.widgets.map((widget) => [widget.id, widget]));
-  const orderedIds = [
-    ...draft.widgetIds,
-    ...dashboard.widgets.map((widget) => widget.id).filter((id) => !draft.widgetIds.includes(id)),
-  ];
-  return {
-    ...dashboard,
-    widgets: orderedIds.flatMap((id) => {
-      const widget = widgetsById.get(id);
-      return widget ? [widget] : [];
-    }),
-  };
-}
-
 function renderDashboard(dashboard: DashboardState, pending: ReadonlySet<string> = new Set()): void {
-  dashboardRenderer.render(dashboardViewForCurrentSession(dashboard), {
-    pendingWidgetIds: pending,
-    hiddenWidgetIds: hiddenWidgetIdsForCurrentSession(),
-  });
+  dashboardRenderer.render(dashboard, { pendingWidgetIds: pending });
   elements.dashboardDateRange.textContent = formatDashboardDateRange(dashboard);
   elements.dashboardUpdatedAt.textContent = `${formatDataAsOf(dashboard.dataAsOf)} · r${dashboard.revision}`;
-  syncDashboardEditorState();
 }
 
-function cacheDashboard(sessionId: string, dashboard: DashboardState): boolean {
-  const current = state.dashboards.get(sessionId);
+function cacheDashboard(sessionId: string, dashboard: DashboardState, dashboardId = selectedDashboardId(sessionId)): boolean {
+  if (!dashboardId || !state.dashboardOptions.get(sessionId)?.some((item) => item.id === dashboardId)) return false;
+  let dashboards = state.dashboards.get(sessionId);
+  if (!dashboards) { dashboards = new Map(); state.dashboards.set(sessionId, dashboards); }
+  const current = dashboards.get(dashboardId);
   if (current && current.revision > dashboard.revision) return false;
-  state.dashboards.set(sessionId, dashboard);
+  dashboards.set(dashboardId, dashboard);
   return true;
 }
 
 function pendingWidgetIdsForCurrentSession(): ReadonlySet<string> {
-  return selectedActiveStream()?.pendingDashboardWidgetIds ?? new Set();
+  const pending = selectedActiveStream()?.pendingDashboardWidgetIds ?? new Set<string>();
+  const prefix = `${selectedDashboardId()}:`;
+  return new Set([...pending].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)));
 }
 
 function renderCurrentDashboard(): void {
-  if (!state.sessionId) {
-    syncDashboardEditorState();
-    return;
-  }
-  const dashboard = state.dashboards.get(state.sessionId);
+  renderDashboardTabs();
+  if (!state.sessionId) return;
+  const dashboard = getDashboard(state.sessionId);
   if (dashboard) renderDashboard(dashboard, pendingWidgetIdsForCurrentSession());
-}
-
-async function reloadDashboardAfterEditFailure(sessionId: string): Promise<void> {
-  const session = await api(
-    `/api/sessions/${encodeURIComponent(sessionId)}`,
-    decodeSerializedSession,
-  );
-  state.dashboards.set(sessionId, session.dashboard);
-  const activeStream = state.activeStreams.get(sessionId);
-  if (activeStream) activeStream.dashboard = session.dashboard;
-  if (state.sessionId === sessionId) renderCurrentDashboard();
-}
-
-async function saveDashboardEdit(
-  sessionId: string,
-  buildRequest: (dashboard: DashboardState) => DashboardEditRequest,
-): Promise<DashboardState> {
-  const generation = authGeneration;
-  if (state.dashboardSavePromise) {
-    try {
-      await state.dashboardSavePromise;
-    } catch {
-      // The preceding operation already refreshed and reported its failure.
-    }
-  }
-  const current = state.dashboards.get(sessionId);
-  if (generation !== authGeneration) throw new Error("登录账号已切换");
-  if (!current) throw new Error("当前会话看板尚未加载");
-  const request = buildRequest(current);
-  state.dashboardSaving = true;
-  syncDashboardEditorState();
-  const operation = api(
-    `/api/sessions/${encodeURIComponent(sessionId)}/dashboard`,
-    decodeDashboardEditResponse,
-    {
-      method: "PATCH",
-      body: JSON.stringify(request),
-    },
-  ).then((response) => response.dashboard);
-  state.dashboardSavePromise = operation;
-  try {
-    const dashboard = await operation;
-    cacheDashboard(sessionId, dashboard);
-    const activeStream = state.activeStreams.get(sessionId);
-    if (activeStream) activeStream.dashboard = dashboard;
-    if (state.sessionId === sessionId) renderCurrentDashboard();
-    return dashboard;
-  } catch (error) {
-    if (generation !== authGeneration) throw error;
-    try {
-      await reloadDashboardAfterEditFailure(sessionId);
-    } catch {
-      // Keep the original mutation error because it is the actionable failure.
-    }
-    showToast(messageFromUnknown(error, "看板保存失败，已恢复服务端版本"));
-    throw error;
-  } finally {
-    if (generation === authGeneration) {
-      if (state.dashboardSavePromise === operation) state.dashboardSavePromise = null;
-      state.dashboardSaving = false;
-      syncDashboardEditorState();
-    }
-  }
-}
-
-function undoPendingDashboardRemoval(): void {
-  const pending = state.pendingDashboardRemoval;
-  if (!pending || state.dashboardSaving) return;
-  clearTimeout(pending.timerId);
-  const draft = state.dashboardEditDraft;
-  if (draft?.sessionId === pending.sessionId && draft.removedWidgetIds.delete(pending.widgetId)) {
-    draft.widgetIds.splice(Math.min(pending.orderIndex, draft.widgetIds.length), 0, pending.widgetId);
-  }
-  state.pendingDashboardRemoval = null;
-  if (state.sessionId === pending.sessionId) renderCurrentDashboard();
-  showToast(`已恢复“${pending.widgetTitle}”`);
-}
-
-function finalizePendingDashboardRemoval(): void {
-  const pending = state.pendingDashboardRemoval;
-  if (!pending) return;
-  clearTimeout(pending.timerId);
-  state.pendingDashboardRemoval = null;
-  if (state.toastTimer !== null) clearTimeout(state.toastTimer);
-  state.toastTimer = null;
-  elements.toast.classList.remove("visible", "actionable");
-}
-
-async function scheduleDashboardRemoval(widgetId: string): Promise<void> {
-  if (!state.dashboardEditing || state.dashboardSaving || !state.sessionId) return;
-  finalizePendingDashboardRemoval();
-  const dashboard = state.dashboards.get(state.sessionId);
-  const widget = dashboard?.widgets.find((candidate) => candidate.id === widgetId);
-  const draft = dashboard ? ensureDashboardEditDraft(state.sessionId, dashboard) : null;
-  const orderIndex = draft?.widgetIds.indexOf(widgetId) ?? -1;
-  if (!widget || !draft || orderIndex < 0) return;
-  const sessionId = state.sessionId;
-  draft.widgetIds.splice(orderIndex, 1);
-  draft.removedWidgetIds.add(widgetId);
-  let pending: PendingDashboardRemoval;
-  const timerId = window.setTimeout(() => {
-    if (state.pendingDashboardRemoval === pending) state.pendingDashboardRemoval = null;
-  }, 5_000);
-  pending = {
-    sessionId,
-    widgetId,
-    widgetTitle: widget.title,
-    orderIndex,
-    timerId,
-  };
-  state.pendingDashboardRemoval = pending;
-  renderCurrentDashboard();
-  showToast(
-    `已关闭“${widget.title}”`,
-    { label: "撤销", run: undoPendingDashboardRemoval },
-    5_000,
-  );
-}
-
-function ensureDashboardEditDraft(
-  sessionId: string,
-  dashboard: DashboardState,
-): DashboardEditDraft {
-  const current = state.dashboardEditDraft;
-  if (current?.sessionId === sessionId) return current;
-  const widgetIds = dashboard.widgets.map((widget) => widget.id);
-  const draft: DashboardEditDraft = {
-    sessionId,
-    originalWidgetIds: widgetIds,
-    removedWidgetIds: new Set(),
-    widgetIds: [...widgetIds],
-  };
-  state.dashboardEditDraft = draft;
-  return draft;
-}
-
-async function persistDashboardEditDraft(draft: DashboardEditDraft): Promise<void> {
-  for (const widgetId of draft.removedWidgetIds) {
-    const dashboard = state.dashboards.get(draft.sessionId);
-    if (!dashboard?.widgets.some((widget) => widget.id === widgetId)) continue;
-    await saveDashboardEdit(draft.sessionId, (latest) => ({
-      action: "remove",
-      baseRevision: latest.revision,
-      widgetId,
-    }));
-  }
-  const dashboard = state.dashboards.get(draft.sessionId);
-  if (!dashboard) throw new Error("当前会话看板尚未加载");
-  const remainingIds = new Set(dashboard.widgets.map((widget) => widget.id));
-  const widgetIds = draft.widgetIds.filter((id) => remainingIds.has(id));
-  const currentIds = dashboard.widgets.map((widget) => widget.id);
-  if (currentIds.every((id, index) => id === widgetIds[index])) return;
-  await saveDashboardEdit(draft.sessionId, (latest) => ({
-    action: "reorder",
-    baseRevision: latest.revision,
-    widgetIds,
-  }));
-}
-
-async function finishDashboardEditing(): Promise<void> {
-  const generation = authGeneration;
-  cancelDashboardPointerDrag();
-  finalizePendingDashboardRemoval();
-  const draft = state.dashboardEditDraft;
-  const changed = Boolean(draft && (
-    draft.removedWidgetIds.size > 0 ||
-    draft.originalWidgetIds.length !== draft.widgetIds.length ||
-    draft.originalWidgetIds.some((id, index) => id !== draft.widgetIds[index])
-  ));
-  let failed = false;
-  if (draft) {
-    try {
-      await persistDashboardEditDraft(draft);
-    } catch {
-      failed = true;
-      // saveDashboardEdit already restored and reported the authoritative version.
-    }
-  }
-  if (generation !== authGeneration) return;
-  if (state.dashboardEditDraft === draft) state.dashboardEditDraft = null;
-  state.dashboardEditing = false;
-  syncDashboardEditorState();
-  if (failed && state.sessionId === draft?.sessionId) renderCurrentDashboard();
-  else if (changed) showToast("看板已保存");
 }
 
 
@@ -1011,24 +846,6 @@ function selectedActiveStream(): ActiveStream | undefined {
   return state.activeStreams.get(state.sessionId);
 }
 
-function syncDashboardEditorState(): void {
-  const streaming = selectedActiveStream() !== undefined;
-  if (streaming) state.dashboardEditing = false;
-  const enabled = state.sessionId !== null && !streaming && !state.dashboardSaving;
-  elements.dashboardEditButton.disabled = !enabled;
-  elements.dashboardEditButton.setAttribute("aria-pressed", String(state.dashboardEditing));
-  elements.dashboardEditButton.title = streaming
-    ? "Agent 正在更新当前会话，暂时无法编辑看板"
-    : state.dashboardEditing ? "完成看板编辑" : "编辑当前会话看板";
-  const label = elements.dashboardEditButton.querySelector("span");
-  if (label) {
-    label.textContent = state.dashboardSaving
-      ? "保存中…"
-      : state.dashboardEditing ? "完成" : "编辑看板";
-  }
-  dashboardRenderer.setEditing(state.dashboardEditing && !streaming, state.dashboardSaving);
-}
-
 function syncComposerState(): void {
   const activeStream = selectedActiveStream();
   const streaming = activeStream !== undefined;
@@ -1043,7 +860,6 @@ function syncComposerState(): void {
   if (statusLabel) statusLabel.textContent = streaming ? "Agent 正在计算" : "Agent 指标入口";
   if (statusDetail) statusDetail.textContent = streaming ? "可停止或点击展开查看"
     : state.sessions.find((item) => item.id === state.sessionId)?.readOnly ? "共享历史 · 继续时创建个人副本" : "点击展开会话";
-  syncDashboardEditorState();
 }
 
 function selectSession(sessionId: string): void {
@@ -1053,12 +869,14 @@ function selectSession(sessionId: string): void {
 
 function applyActiveStream(activeStream: ActiveStream): void {
   rememberSelectedScrollPosition();
+  rememberDashboardScrollPosition();
   selectSession(activeStream.sessionId);
-  cacheDashboard(activeStream.sessionId, activeStream.dashboard);
+  for (const [id, dashboard] of activeStream.dashboards) cacheDashboard(activeStream.sessionId, dashboard, id);
   elements.messages.replaceChildren(activeStream.transcript);
   restoreScrollPosition(activeStream.sessionId);
   elements.chatTitle.textContent = activeStreamTitle(activeStream);
   renderCurrentDashboard();
+  restoreDashboardScrollPosition();
   renderSessions();
   syncComposerState();
 }
@@ -1070,12 +888,14 @@ function applySession(session: SerializedSession): void {
     return;
   }
   rememberSelectedScrollPosition();
+  rememberDashboardScrollPosition();
   selectSession(session.id);
-  cacheDashboard(session.id, session.dashboard);
+  cacheSessionDashboards(session.id, session.dashboards);
   renderTranscript(session.messages);
   restoreScrollPosition(session.id);
   elements.chatTitle.textContent = session.title || "新会话";
   renderCurrentDashboard();
+  restoreDashboardScrollPosition();
   renderSessions();
   syncComposerState();
 }
@@ -1088,9 +908,6 @@ async function refreshSessions(): Promise<void> {
 
 async function createSession(): Promise<SerializedSession> {
   const generation = authGeneration;
-  if (state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval) {
-    await finishDashboardEditing();
-  }
   requireCurrentAccount(generation);
   const session = await api("/api/sessions", decodeSerializedSession, {
     method: "POST",
@@ -1113,7 +930,14 @@ async function ensurePrivateSession(): Promise<void> {
     }).then(async (session) => {
       await refreshSessions();
       requireCurrentAccount(generation);
-      if (state.sessionId === id) applySession(session);
+      if (state.sessionId === id) {
+        rememberDashboardScrollPosition();
+        const positions = state.dashboardScrollPositions.get(id);
+        if (positions) state.dashboardScrollPositions.set(session.id, new Map(positions));
+        const selected = selectedDashboardId(id);
+        if (selected && session.dashboards.some((item) => item.id === selected)) state.selectedDashboardIds.set(session.id, selected);
+        applySession(session);
+      }
       return session;
     });
     forkRequests.set(id, operation);
@@ -1127,11 +951,6 @@ async function ensurePrivateSession(): Promise<void> {
 async function loadSession(id: string): Promise<void> {
   const generation = authGeneration;
   if (!id) return;
-  if (id !== state.sessionId && (
-    state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval
-  )) {
-    await finishDashboardEditing();
-  }
   requireCurrentAccount(generation);
   const activeStream = state.activeStreams.get(id);
   if (activeStream) {
@@ -1148,11 +967,8 @@ async function loadSession(id: string): Promise<void> {
 }
 
 function clearSessionView(): void {
-  cancelDashboardPointerDrag();
-  finalizePendingDashboardRemoval();
-  state.dashboardEditDraft = null;
-  state.dashboardEditing = false;
   state.sessionId = null;
+  renderDashboardTabs();
   history.replaceState(null, "", `${location.pathname}${location.search}`);
   renderTranscript([]);
   dashboardRenderer.render({
@@ -1162,6 +978,7 @@ function clearSessionView(): void {
     dateRange: { start: null, end: null },
     widgets: [],
   });
+  restoreDashboardScrollPosition();
   elements.dashboardDateRange.textContent = "尚未选择会话";
   elements.dashboardUpdatedAt.textContent = "无快照";
   elements.chatTitle.textContent = "新会话";
@@ -1178,11 +995,6 @@ async function deleteSession(id: string): Promise<void> {
   }
   const session = state.sessions.find((item) => item.id === id);
   if (!session) return;
-  if (state.sessionId === id && (
-    state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval
-  )) {
-    await finishDashboardEditing();
-  }
   requireCurrentAccount(generation);
   if (!window.confirm(`确定删除会话“${session.title || "新会话"}”吗？此操作不可恢复。`)) return;
 
@@ -1197,7 +1009,10 @@ async function deleteSession(id: string): Promise<void> {
     const deletedCurrentSession = state.sessionId === id;
     state.sessions = state.sessions.filter((item) => item.id !== id);
     state.scrollPositions.delete(id);
+    state.dashboardScrollPositions.delete(id);
     state.dashboards.delete(id);
+    state.dashboardOptions.delete(id);
+    state.selectedDashboardIds.delete(id);
     if (deletedCurrentSession) {
       clearSessionView();
       const nextSession = state.sessions[0];
@@ -1265,9 +1080,9 @@ function dashboardTargets(arguments_: JsonObject, dashboard: DashboardState): re
 }
 
 function clearPendingDashboardTool(activeStream: ActiveStream, toolCallId: string): void {
-  const widgetIds = activeStream.pendingDashboardToolIds.get(toolCallId) ?? [];
+  const pending = activeStream.pendingDashboardToolIds.get(toolCallId);
   activeStream.pendingDashboardToolIds.delete(toolCallId);
-  for (const id of widgetIds) activeStream.pendingDashboardWidgetIds.delete(id);
+  if (pending) for (const id of pending.widgetIds) activeStream.pendingDashboardWidgetIds.delete(`${pending.dashboardId}:${id}`);
 }
 
 function handleStreamEvent(
@@ -1279,17 +1094,23 @@ function handleStreamEvent(
   const followLatest = visible && elements.chatDock.classList.contains("open") && messagesAreNearBottom();
   if (parsed.event === "dashboard_update") {
     clearPendingDashboardTool(activeStream, parsed.data.toolCallId);
-    if (parsed.data.dashboard.revision >= activeStream.dashboard.revision) {
-      activeStream.dashboard = parsed.data.dashboard;
-      cacheDashboard(activeStream.sessionId, parsed.data.dashboard);
+    const id = parsed.data.dashboardId;
+    const current = activeStream.dashboards.get(id);
+    if (current && parsed.data.dashboard.revision >= current.revision) {
+      activeStream.dashboards.set(id, parsed.data.dashboard);
+      cacheDashboard(activeStream.sessionId, parsed.data.dashboard, id);
     }
     if (visible) renderCurrentDashboard();
     return;
   }
   if (parsed.event === "tool_call" && parsed.data.name === "update_dashboard") {
-    const targets = dashboardTargets(parsed.data.arguments, activeStream.dashboard);
-    activeStream.pendingDashboardToolIds.set(parsed.data.id, targets);
-    for (const id of targets) activeStream.pendingDashboardWidgetIds.add(id);
+    const id = parsed.data.arguments["dashboard_id"];
+    const dashboard = typeof id === "string" ? activeStream.dashboards.get(id) : undefined;
+    if (dashboard && typeof id === "string") {
+      const targets = dashboardTargets(parsed.data.arguments, dashboard);
+      activeStream.pendingDashboardToolIds.set(parsed.data.id, { dashboardId: id, widgetIds: targets });
+      for (const target of targets) activeStream.pendingDashboardWidgetIds.add(`${id}:${target}`);
+    }
     if (visible) renderCurrentDashboard();
   }
   if (parsed.event === "tool_end" && parsed.data.name === "update_dashboard" && parsed.data.isError) {
@@ -1338,7 +1159,7 @@ async function streamQuestion(
     const response = await fetch(`/api/sessions/${encodeURIComponent(activeStream.sessionId)}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message } satisfies MessageRequest),
+      body: JSON.stringify({ message, dashboardId: activeStream.requestDashboardId } satisfies MessageRequest),
       signal: controller.signal,
     });
     if (generation !== authGeneration) throw new Error("登录账号已切换");
@@ -1384,22 +1205,20 @@ async function submitQuestion(question: string): Promise<void> {
   const sessionId = state.sessionId;
   if (!sessionId) throw new Error("尚未创建会话");
   if (state.activeStreams.has(sessionId)) return;
-  if (state.dashboardEditing || state.dashboardEditDraft || state.pendingDashboardRemoval) {
-    await finishDashboardEditing();
-  }
   if (generation !== authGeneration) return;
   elements.input.value = "";
   appendMessage("user", message);
   const streamNode = appendMessage("assistant", "", true);
-  const dashboard = state.dashboards.get(sessionId);
+  const dashboard = getDashboard(sessionId);
   if (!dashboard) throw new Error("当前会话看板尚未加载");
   const activeStream: ActiveStream = {
     sessionId,
     transcript: ensureMessageStream(),
     node: streamNode,
-    dashboard,
+    dashboards: new Map(state.dashboards.get(sessionId)),
+    requestDashboardId: selectedDashboardId(sessionId)!,
     pendingDashboardWidgetIds: new Set<string>(),
-    pendingDashboardToolIds: new Map<string, readonly string[]>(),
+    pendingDashboardToolIds: new Map(),
     aborting: false,
   };
   if (!state.activeStreams.start(activeStream)) {
@@ -1411,11 +1230,14 @@ async function submitQuestion(question: string): Promise<void> {
   try {
     const completed = await streamQuestion(message, activeStream);
     if (completed) {
-      if (completed.dashboard.revision >= activeStream.dashboard.revision) {
-        activeStream.dashboard = completed.dashboard;
-        cacheDashboard(sessionId, completed.dashboard);
-        if (activeStreamIsVisible(activeStream)) renderCurrentDashboard();
+      for (const item of completed.dashboards) {
+        const previous = activeStream.dashboards.get(item.id);
+        if (previous && item.state.revision >= previous.revision) {
+          activeStream.dashboards.set(item.id, item.state);
+          cacheDashboard(sessionId, item.state, item.id);
+        }
       }
+      if (activeStreamIsVisible(activeStream)) renderCurrentDashboard();
       const finalMessage = latestAssistantAfterLastUser(completed.messages);
       renderMarkdownInto(
         streamNode.text,
@@ -1469,264 +1291,6 @@ async function abortAnswer(): Promise<void> {
   }
 }
 
-interface DashboardPointerDrag {
-  readonly pointerId: number;
-  readonly sessionId: string;
-  readonly widgetId: string;
-  readonly handle: HTMLButtonElement;
-  readonly card: HTMLElement;
-  readonly startClientX: number;
-  readonly startClientY: number;
-  readonly grabOffsetX: number;
-  readonly grabOffsetY: number;
-  readonly originalOrder: string[];
-  currentOrder: string[];
-  lastClientX: number;
-  lastClientY: number;
-  lastOrderPoint: DashboardDragPoint | null;
-  previousMove: DashboardOrderMove | null;
-  active: boolean;
-  ghost: HTMLElement | null;
-}
-
-let dashboardPointerDrag: DashboardPointerDrag | null = null;
-let cancelDashboardDragFrame: (() => void) | null = null;
-let finishDashboardDropAnimation: (() => void) | null = null;
-
-function clearDashboardDropMarkers(): void {
-  for (const card of elements.dashboardGrid.querySelectorAll(".drop-before, .drop-after")) {
-    card.classList.remove("drop-before", "drop-after");
-  }
-}
-
-function releaseDashboardPointer(drag: DashboardPointerDrag): void {
-  const owner = elements.dashboardGrid;
-  if (typeof owner.releasePointerCapture !== "function") return;
-  try {
-    if (
-      typeof owner.hasPointerCapture !== "function" ||
-      owner.hasPointerCapture(drag.pointerId)
-    ) {
-      owner.releasePointerCapture(drag.pointerId);
-    }
-  } catch {
-    // Pointer capture may already have been released by the browser.
-  }
-}
-
-function copyDragGhostCanvases(source: HTMLElement, ghost: HTMLElement): void {
-  const sourceCanvases = source.querySelectorAll<HTMLCanvasElement>("canvas");
-  const ghostCanvases = ghost.querySelectorAll<HTMLCanvasElement>("canvas");
-  sourceCanvases.forEach((canvas, index) => {
-    const copy = ghostCanvases.item(index);
-    if (!copy) return;
-    try {
-      copy.width = canvas.width;
-      copy.height = canvas.height;
-      copy.getContext("2d")?.drawImage(canvas, 0, 0);
-    } catch {
-      // A chart canvas can still be represented by the surrounding card if copying is unavailable.
-    }
-  });
-}
-
-function createDashboardDragGhost(
-  card: HTMLElement,
-  rect: DOMRect,
-  clientX: number,
-  clientY: number,
-  offsetX: number,
-  offsetY: number,
-): HTMLElement {
-  const ghost = card.cloneNode(true) as HTMLElement;
-  ghost.classList.remove("dragging-source", "drop-before", "drop-after");
-  ghost.classList.add("dashboard-drag-ghost");
-  ghost.removeAttribute("data-widget-id");
-  ghost.setAttribute("aria-hidden", "true");
-  for (const identified of ghost.querySelectorAll("[id]")) identified.removeAttribute("id");
-  for (const control of ghost.querySelectorAll<HTMLElement>(
-    "[data-drag-handle], [data-close-widget-id]",
-  )) {
-    control.removeAttribute("data-drag-handle");
-    control.removeAttribute("data-close-widget-id");
-    control.tabIndex = -1;
-  }
-  ghost.style.width = `${rect.width}px`;
-  ghost.style.height = `${rect.height}px`;
-  ghost.style.transform = `translate3d(${clientX - offsetX}px, ${clientY - offsetY}px, 0)`;
-  copyDragGhostCanvases(card, ghost);
-  document.body.append(ghost);
-  return ghost;
-}
-
-function moveDashboardDragGhost(drag: DashboardPointerDrag): void {
-  if (!drag.ghost) return;
-  drag.ghost.style.transform = `translate3d(${drag.lastClientX - drag.grabOffsetX}px, ${drag.lastClientY - drag.grabOffsetY}px, 0)`;
-}
-
-function updateDashboardPointerOrder(drag: DashboardPointerDrag): void {
-  if (!drag.active || dashboardPointerDrag !== drag || state.sessionId !== drag.sessionId) return;
-  const layout = dashboardRenderer.readLayout();
-  const point = {
-    x: drag.lastClientX - layout.bounds.left,
-    y: drag.lastClientY - layout.bounds.top,
-  };
-  // Grid-relative coordinates include real scrolling, but not card reflow or FLIP.
-  if (point.x === drag.lastOrderPoint?.x && point.y === drag.lastOrderPoint.y) return;
-  drag.lastOrderPoint = point;
-  const target = dashboardDropTarget(
-    layout, drag.currentOrder, drag.widgetId, point, drag.previousMove,
-  );
-  clearDashboardDropMarkers();
-  if (!target) return;
-  const nextOrder = reorderedWidgetIds(drag.currentOrder, drag.widgetId, target.widgetId, target.after);
-  drag.previousMove = target;
-  drag.currentOrder = nextOrder;
-  elements.dashboardGrid.querySelector(`[data-widget-id="${target.widgetId}"]`)
-    ?.classList.add(target.after ? "drop-after" : "drop-before");
-  renderOptimisticDashboardOrder(drag.sessionId, nextOrder);
-}
-
-function startDashboardPointerDrag(drag: DashboardPointerDrag): void {
-  if (drag.ghost) return;
-  const rect = drag.card.getBoundingClientRect();
-  drag.ghost = createDashboardDragGhost(
-    drag.card,
-    rect,
-    drag.lastClientX,
-    drag.lastClientY,
-    drag.grabOffsetX,
-    drag.grabOffsetY,
-  );
-  drag.card.classList.add("dragging-source");
-  drag.handle.setAttribute("aria-grabbed", "true");
-  elements.dashboardGrid.classList.add("dashboard-drag-active");
-  document.body.classList.add("dashboard-pointer-dragging");
-}
-
-function revealDashboardDragSource(drag: DashboardPointerDrag): void {
-  drag.ghost?.remove();
-  drag.ghost = null;
-  drag.card.classList.remove("dragging-source");
-  drag.handle.removeAttribute("aria-grabbed");
-  elements.dashboardGrid.classList.remove("dashboard-drag-active");
-}
-
-function settleDashboardDragGhost(drag: DashboardPointerDrag): void {
-  const ghost = drag.ghost;
-  if (!ghost || typeof ghost.animate !== "function" ||
-    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-    revealDashboardDragSource(drag);
-    return;
-  }
-  const layout = dashboardRenderer.readLayout();
-  const targetRect = layout.widgets.get(drag.widgetId);
-  if (!targetRect) {
-    revealDashboardDragSource(drag);
-    return;
-  }
-  const targetTransform = `translate3d(${layout.bounds.left + targetRect.left}px, ${layout.bounds.top + targetRect.top}px, 0)`;
-  let settled = false;
-  let timerId: number | null = null;
-  const reveal = (): void => {
-    if (settled) return;
-    settled = true;
-    if (timerId !== null) window.clearTimeout(timerId);
-    if (finishDashboardDropAnimation === reveal) finishDashboardDropAnimation = null;
-    animation.cancel();
-    revealDashboardDragSource(drag);
-  };
-  const animation = ghost.animate([
-    { transform: ghost.style.transform, opacity: 0.96 },
-    { transform: targetTransform, opacity: 0.72 },
-  ], {
-    duration: 160,
-    easing: "cubic-bezier(.2, .75, .25, 1)",
-  });
-  animation.addEventListener("finish", reveal, { once: true });
-  animation.addEventListener("cancel", reveal, { once: true });
-  finishDashboardDropAnimation = reveal;
-  timerId = window.setTimeout(reveal, 200);
-}
-
-function finishDashboardPointerDrag(commit: boolean): void {
-  const drag = dashboardPointerDrag;
-  if (!drag) return;
-  cancelDashboardDragFrame?.();
-  cancelDashboardDragFrame = null;
-  if (commit && drag.active) refreshDashboardPointerDrag(drag);
-  dashboardPointerDrag = null;
-  releaseDashboardPointer(drag);
-  clearDashboardDropMarkers();
-  document.body.classList.remove("dashboard-pointer-dragging");
-  if (!drag.active) return;
-  if (!commit) {
-    drag.currentOrder = [...drag.originalOrder];
-    renderOptimisticDashboardOrder(drag.sessionId, drag.originalOrder);
-    dashboardRenderer.finishPositionAnimations();
-    revealDashboardDragSource(drag);
-    return;
-  }
-  settleDashboardDragGhost(drag);
-}
-
-function cancelDashboardPointerDrag(): void {
-  finishDashboardPointerDrag(false);
-  finishDashboardDropAnimation?.();
-  dashboardRenderer.finishPositionAnimations();
-}
-
-function refreshDashboardPointerDrag(drag: DashboardPointerDrag): void {
-  startDashboardPointerDrag(drag);
-  updateDashboardPointerOrder(drag);
-  moveDashboardDragGhost(drag);
-}
-
-function scheduleDashboardDragRefresh(): void {
-  if (!dashboardPointerDrag?.active || cancelDashboardDragFrame) return;
-  const refresh = (): void => {
-    cancelDashboardDragFrame = null;
-    const drag = dashboardPointerDrag;
-    if (drag?.active) refreshDashboardPointerDrag(drag);
-  };
-  if (typeof window.requestAnimationFrame === "function" &&
-    typeof window.cancelAnimationFrame === "function") {
-    const frame = window.requestAnimationFrame(refresh);
-    cancelDashboardDragFrame = () => window.cancelAnimationFrame(frame);
-  } else {
-    const timer = window.setTimeout(refresh, 0);
-    cancelDashboardDragFrame = () => window.clearTimeout(timer);
-  }
-}
-
-function visibleDashboardWidgetIds(dashboard: DashboardState): string[] {
-  const draft = state.dashboardEditDraft;
-  if (draft?.sessionId === state.sessionId) return [...draft.widgetIds];
-  return dashboard.widgets.map((widget) => widget.id);
-}
-
-function renderOptimisticDashboardOrder(sessionId: string, widgetIds: readonly string[]): void {
-  if (state.sessionId !== sessionId) return;
-  const draft = state.dashboardEditDraft;
-  if (draft?.sessionId === sessionId) draft.widgetIds = [...widgetIds];
-  dashboardRenderer.previewOrder(widgetIds);
-}
-
-function reorderedWidgetIds(
-  widgetIds: readonly string[],
-  draggedId: string,
-  targetId: string,
-  after: boolean,
-): string[] {
-  if (draggedId === targetId || !widgetIds.includes(draggedId) || !widgetIds.includes(targetId)) {
-    return [...widgetIds];
-  }
-  const reordered = widgetIds.filter((id) => id !== draggedId);
-  const targetIndex = reordered.indexOf(targetId);
-  reordered.splice(targetIndex + (after ? 1 : 0), 0, draggedId);
-  return reordered;
-}
-
 async function initialize(): Promise<void> {
   if (!currentLogin) return;
   try {
@@ -1742,162 +1306,6 @@ async function initialize(): Promise<void> {
     showToast(`初始化失败:${messageFromUnknown(error)}`);
   }
 }
-
-async function beginDashboardEditing(): Promise<void> {
-  const generation = authGeneration;
-  if (state.dashboardSaving || selectedActiveStream() || !state.sessionId) return;
-  if (state.dashboardEditing) {
-    void finishDashboardEditing().catch((error) => showToast(messageFromUnknown(error)));
-    return;
-  }
-  if (state.sessions.find((item) => item.id === state.sessionId)?.readOnly) await ensurePrivateSession();
-  requireCurrentAccount(generation);
-  const dashboard = state.dashboards.get(state.sessionId);
-  if (!dashboard) return;
-  ensureDashboardEditDraft(state.sessionId, dashboard);
-  state.dashboardEditing = true;
-  syncDashboardEditorState();
-  const firstHandle = elements.dashboardGrid.querySelector("[data-drag-handle]");
-  if (firstHandle instanceof HTMLElement) firstHandle.focus();
-}
-elements.dashboardEditButton.addEventListener("click", () => {
-  void beginDashboardEditing().catch((error) => showToast(messageFromUnknown(error)));
-});
-
-elements.dashboardGrid.addEventListener("click", (event) => {
-  if (!(event.target instanceof Element)) return;
-  const close = event.target.closest("[data-close-widget-id]");
-  if (!(close instanceof HTMLButtonElement)) return;
-  const widgetId = close.dataset["closeWidgetId"];
-  if (widgetId) {
-    void scheduleDashboardRemoval(widgetId).catch((error) => showToast(messageFromUnknown(error)));
-  }
-});
-
-elements.dashboardGrid.addEventListener("keydown", (event) => {
-  if (
-    !state.dashboardEditing || state.dashboardSaving || dashboardPointerDrag ||
-    !(event.target instanceof Element)
-  ) return;
-  const handle = event.target.closest("[data-drag-handle]");
-  if (!(handle instanceof HTMLButtonElement)) return;
-  const direction = event.key === "ArrowLeft" || event.key === "ArrowUp"
-    ? -1
-    : event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : 0;
-  if (!direction || !state.sessionId) return;
-  const dashboard = state.dashboards.get(state.sessionId);
-  const widgetId = handle.dataset["dragHandle"];
-  if (!dashboard || !widgetId) return;
-  const widgetIds = visibleDashboardWidgetIds(dashboard);
-  const currentIndex = widgetIds.indexOf(widgetId);
-  const nextIndex = currentIndex + direction;
-  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= widgetIds.length) return;
-  event.preventDefault();
-  finalizePendingDashboardRemoval();
-  [widgetIds[currentIndex], widgetIds[nextIndex]] = [
-    widgetIds[nextIndex] as string,
-    widgetIds[currentIndex] as string,
-  ];
-  renderOptimisticDashboardOrder(state.sessionId, widgetIds);
-  const restored = elements.dashboardGrid.querySelector(`[data-drag-handle="${widgetId}"]`);
-  if (restored instanceof HTMLElement) restored.focus();
-});
-
-elements.dashboardGrid.addEventListener("pointerdown", (event) => {
-  if (
-    !state.dashboardEditing || state.dashboardSaving || event.button !== 0 ||
-    event.isPrimary === false || !(event.target instanceof Element) || !state.sessionId
-  ) return;
-  const handle = event.target.closest("[data-drag-handle]");
-  if (!(handle instanceof HTMLButtonElement)) return;
-  const widgetId = handle.dataset["dragHandle"];
-  const card = handle.closest("[data-widget-id]");
-  const dashboard = state.dashboards.get(state.sessionId);
-  if (!widgetId || !(card instanceof HTMLElement) || !dashboard) return;
-  cancelDashboardPointerDrag();
-  finalizePendingDashboardRemoval();
-  event.preventDefault();
-  handle.focus();
-  const rect = card.getBoundingClientRect();
-  dashboardPointerDrag = {
-    pointerId: event.pointerId,
-    sessionId: state.sessionId,
-    widgetId,
-    handle,
-    card,
-    startClientX: event.clientX,
-    startClientY: event.clientY,
-    grabOffsetX: event.clientX - rect.left,
-    grabOffsetY: event.clientY - rect.top,
-    originalOrder: visibleDashboardWidgetIds(dashboard),
-    currentOrder: visibleDashboardWidgetIds(dashboard),
-    lastClientX: event.clientX,
-    lastClientY: event.clientY,
-    lastOrderPoint: null,
-    previousMove: null,
-    active: false,
-    ghost: null,
-  };
-  if (typeof elements.dashboardGrid.setPointerCapture === "function") {
-    try {
-      elements.dashboardGrid.setPointerCapture(event.pointerId);
-    } catch {
-      // Window-level listeners still keep mouse dragging functional without capture.
-    }
-  }
-});
-
-window.addEventListener("pointermove", (event) => {
-  const drag = dashboardPointerDrag;
-  if (!drag || event.pointerId !== drag.pointerId) return;
-  drag.lastClientX = event.clientX;
-  drag.lastClientY = event.clientY;
-  if (!drag.active) {
-    const distance = Math.hypot(
-      event.clientX - drag.startClientX,
-      event.clientY - drag.startClientY,
-    );
-    if (distance < 5) return;
-    drag.active = true;
-  }
-  event.preventDefault();
-  scheduleDashboardDragRefresh();
-});
-
-window.addEventListener("pointerup", (event) => {
-  const drag = dashboardPointerDrag;
-  if (!drag || event.pointerId !== drag.pointerId) return;
-  drag.lastClientX = event.clientX;
-  drag.lastClientY = event.clientY;
-  if (drag.active) event.preventDefault();
-  finishDashboardPointerDrag(true);
-});
-
-window.addEventListener("pointercancel", (event) => {
-  if (dashboardPointerDrag && event.pointerId === dashboardPointerDrag.pointerId) {
-    cancelDashboardPointerDrag();
-  }
-});
-
-elements.dashboardGrid.addEventListener("lostpointercapture", (event) => {
-  if (dashboardPointerDrag?.pointerId === event.pointerId) cancelDashboardPointerDrag();
-});
-window.addEventListener("scroll", () => {
-  finishDashboardDropAnimation?.();
-  scheduleDashboardDragRefresh();
-}, { passive: true });
-window.addEventListener("resize", () => {
-  finishDashboardDropAnimation?.();
-  scheduleDashboardDragRefresh();
-}, { passive: true });
-window.addEventListener("blur", cancelDashboardPointerDrag);
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && (dashboardPointerDrag || finishDashboardDropAnimation)) {
-    event.preventDefault();
-    cancelDashboardPointerDrag();
-  }
-});
-
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   if (selectedActiveStream()) void abortAnswer();

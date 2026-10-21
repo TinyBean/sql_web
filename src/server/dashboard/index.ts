@@ -2,7 +2,7 @@ import type { JsonObject } from "../../shared/contracts.ts";
 import { parseDashboardState, type DashboardState } from "../../shared/dashboard.ts";
 import type { AppLogger } from "../logger.ts";
 import { createDefaultDashboardDefinition, type DefaultDashboardOptions } from "./default/index.ts";
-import { createTestDashboardDefinition } from "./test/index.ts";
+import { createOverviewDashboardDefinition } from "./overview/index.ts";
 
 export interface DashboardUpdateContext {
   /** Updates may only open this database read-only. Database ingestion runs separately. */
@@ -24,6 +24,7 @@ export interface DashboardUpdateOutcome {
 
 export interface DashboardDefinition {
   readonly id: string;
+  readonly title?: string;
   /** Return a complete revision-0 snapshot; never start an update here. */
   loadInitial(): DashboardState;
   /** Decide whether to update; publish atomically after generation and validation succeed. */
@@ -38,6 +39,9 @@ export class DashboardRegistry {
       if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(definition.id)) {
         throw new Error("看板 ID 无效:" + definition.id);
       }
+      if (definition.title !== undefined && (!definition.title.trim() || definition.title.length > 120)) {
+        throw new Error("看板显示名称必须为 1 到 120 个字符:" + definition.id);
+      }
       if (this.#definitions.has(definition.id)) throw new Error("看板 ID 重复:" + definition.id);
       this.#definitions.set(definition.id, definition);
     }
@@ -45,6 +49,11 @@ export class DashboardRegistry {
 
   list(): readonly DashboardDefinition[] {
     return [...this.#definitions.values()];
+  }
+
+  title(id: string): string {
+    const definition = this.#definitions.get(id);
+    return definition?.title ?? id;
   }
 
   loadInitial(id = "default"): DashboardState {
@@ -61,7 +70,7 @@ export function createDashboardRegistry(options: DefaultDashboardOptions = {}): 
   const defaultDefinition = createDefaultDashboardDefinition(options);
   return new DashboardRegistry([
     defaultDefinition,
-    // test refreshes its projection after default has published this run's snapshot.
-    createTestDashboardDefinition(defaultDefinition),
+    // overview refreshes its projection after default has published this run's snapshot.
+    createOverviewDashboardDefinition(defaultDefinition),
   ]);
 }

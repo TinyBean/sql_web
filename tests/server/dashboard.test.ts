@@ -136,8 +136,8 @@ test("initializes and restores the pinned thirteen-card dashboard per session", 
 
   const document = JSON.parse(
     readFileSync(path.join(artifacts.rootDir, SESSION_A, "dashboard.json"), "utf8"),
-  ) as { baseline: unknown; current: unknown };
-  assert.deepEqual(document.baseline, document.current);
+  ) as { dashboards: { baseline: unknown; current: unknown }[] };
+  assert.deepEqual(document.dashboards[0]!.baseline, document.dashboards[0]!.current);
   assert.deepEqual(dashboard.loadOrInitialize(SESSION_B), first);
 });
 
@@ -205,7 +205,7 @@ test("validates snapshot shape and emits only a transient full update plus compa
     "dashboard-call",
     {
       action: "upsert",
-      base_revision: 0,
+      dashboard_id: "default", base_revision: 0,
       snapshot,
       date_range: { start: "2026-09-01", end: "2026-09-01" },
       widget: {
@@ -220,6 +220,7 @@ test("validates snapshot shape and emits only a transient full update plus compa
   const details = result.details as { kind: string; revision: number; changedWidgetIds: string[]; pointCount: number };
   assert.deepEqual(details, {
     kind: "dashboard_summary",
+    dashboardId: "default",
     revision: 1,
     changedWidgetIds: ["yield-7d"],
     pointCount: 1,
@@ -242,7 +243,7 @@ test("accepts stringified model-server arguments and preserves an existing widge
   assert.ok(update);
   const arguments_ = {
     action: "upsert",
-    base_revision: "0",
+    dashboard_id: "default", base_revision: "0",
     snapshot,
     date_range: JSON.stringify({ start: "2026-08-31", end: "2026-09-06" }),
     widget: JSON.stringify({
@@ -348,7 +349,7 @@ test("the thirteen-card default allows additions up to twenty-card tool reorderi
   }
   const update = createDashboardTools(dashboard, SESSION_A).find((tool) => tool.name === "update_dashboard")!;
   const widgetIds = dashboard.loadOrInitialize(SESSION_A).widgets.map((widget) => widget.id).reverse();
-  const arguments_ = { action: "reorder", base_revision: extras.length, widget_ids: widgetIds };
+  const arguments_ = { action: "reorder", dashboard_id: "default", base_revision: extras.length, widget_ids: widgetIds };
   assert.equal(Value.Check(update.parameters, arguments_), true);
   assert.equal(Value.Check(update.parameters, { ...arguments_, widget_ids: [...widgetIds, "extra-h"] }), false);
   await update.execute("reorder-twenty", arguments_ as never, undefined, undefined, undefined as never);

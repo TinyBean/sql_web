@@ -23,12 +23,12 @@ function serializedSession(
   title: string,
   messages: readonly ChatMessage[] = [],
 ): SerializedSession {
-  return { ownerAccount: "test-user", readOnly: false, dashboardId: "default", id, title, model: null, tools: [], streaming: false, dashboard: EMPTY_DASHBOARD, messages };
+  return { ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"], id, title, model: null, tools: [], streaming: false, dashboards: [{ id: "default", title: "Test OEE 综合看板", state: EMPTY_DASHBOARD }], messages };
 }
 
 function sessionSummary(id: string, title: string, messageCount = 0): SessionSummary {
   return {
-    ownerAccount: "test-user", readOnly: false, dashboardId: "default",
+    ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
     id,
     title,
     createdAt: "2026-09-08T00:00:00.000Z",
@@ -117,7 +117,7 @@ test("switches between independent live session answers without stealing the cur
   expose("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const method = init.method ?? "GET";
-    if (url === "/api/auth/me") return jsonResponse({ account: "test-user", dashboardId: "default", expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    if (url === "/api/auth/me") return jsonResponse({ account: "test-user", dashboardIds: ["default"], expiresAt: new Date(Date.now() + 3600000).toISOString() });
     if (url === "/api/sessions" && method === "GET") return jsonResponse({ sessions });
     if (url === "/api/sessions" && method === "POST") {
       const createdId = createdSessionIds.shift();
@@ -331,7 +331,7 @@ test("switches between independent live session answers without stealing the cur
   sendSse("session-a", "dashboard_update", {
     turn: 0,
     toolCallId: "dashboard-a-1",
-    dashboard: { ...EMPTY_DASHBOARD, revision: 1, dataAsOf: "2026-09-08T01:00:00.000Z" },
+    dashboardId: "default", dashboard: { ...EMPTY_DASHBOARD, revision: 1, dataAsOf: "2026-09-08T01:00:00.000Z" },
   });
   await waitFor(() => messages.textContent.includes("A 正在回答"), "session A progress was not rendered");
   assert.match(dashboardUpdatedAt.textContent ?? "", /r1/u);
@@ -400,7 +400,7 @@ test("switches between independent live session answers without stealing the cur
   sendSse("session-a", "dashboard_update", {
     turn: 0,
     toolCallId: "dashboard-a-2",
-    dashboard: { ...EMPTY_DASHBOARD, revision: 2, dataAsOf: "2026-09-08T02:00:00.000Z" },
+    dashboardId: "default", dashboard: { ...EMPTY_DASHBOARD, revision: 2, dataAsOf: "2026-09-08T02:00:00.000Z" },
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(messages.scrollTop, 240, "background growth must not move the selected session");
@@ -415,7 +415,7 @@ test("switches between independent live session answers without stealing the cur
   sendSse("session-a", "dashboard_update", {
     turn: 0,
     toolCallId: "dashboard-a-late",
-    dashboard: { ...EMPTY_DASHBOARD, revision: 1, dataAsOf: "2026-09-08T01:30:00.000Z" },
+    dashboardId: "default", dashboard: { ...EMPTY_DASHBOARD, revision: 1, dataAsOf: "2026-09-08T01:30:00.000Z" },
   });
   assert.match(dashboardUpdatedAt.textContent ?? "", /r2/u, "late revision must be ignored");
   assert.equal(sessionLoads.get("session-a"), sessionALoadsBeforeStreaming, "live session A should reuse its preserved view");

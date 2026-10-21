@@ -162,7 +162,7 @@ test("table layout expands by content, reuses measurements, and preserves saved 
     ...table("empty", "small", 8), data: [],
   };
   state = { ...state, widgets: [tall, empty, numeric] };
-  renderer.render(state, { hiddenWidgetIds: new Set(["numeric"]) });
+  renderer.render(state);
   assert.equal(card("tall").querySelectorAll("tbody tr").length, 2000);
   assert.equal(card("tall").querySelector("tbody tr:last-child td:last-child")?.textContent, longText);
   assert.equal(card("tall").querySelector("tbody tr:first-child td:last-child")?.textContent, "多行\n短文");
@@ -175,8 +175,8 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   width = 1880;
   notifyResize();
   renderer.render(state);
-  assert.equal(card("numeric").style.gridColumn, "span 6", "restoring a hidden table must use the latest width");
-  renderer.previewOrder(["numeric", "tall", "empty"]);
+  assert.equal(card("numeric").style.gridColumn, "span 6", "resizing a table must use the latest width");
+  renderer.render({ ...state, widgets: [numeric, tall, empty] });
   assert.equal(grid.firstElementChild, card("numeric"));
   assert.equal(card("tall").querySelectorAll("tbody tr").length, 2000);
 

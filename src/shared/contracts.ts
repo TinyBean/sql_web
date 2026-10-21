@@ -1,4 +1,5 @@
-import type { DashboardState } from "./dashboard.ts";
+import type { DashboardState, SessionDashboard } from "./dashboard.ts";
+export type { SessionDashboard } from "./dashboard.ts";
 
 export type ChatRole = "user" | "assistant";
 export type AgentToolName = string;
@@ -47,12 +48,12 @@ export interface ModelDescriptor {
 export interface SessionAccess {
   readonly ownerAccount: string | null;
   readonly readOnly: boolean;
-  readonly dashboardId: string;
+  readonly dashboardIds: readonly string[];
 }
 
 export interface AuthResponse {
   readonly account: string;
-  readonly dashboardId: string;
+  readonly dashboardIds: readonly string[];
   readonly expiresAt: string;
 }
 
@@ -62,7 +63,7 @@ export interface SerializedSession extends SessionAccess {
   readonly model: ModelDescriptor | null;
   readonly tools: readonly AgentToolName[];
   readonly streaming: boolean;
-  readonly dashboard: DashboardState;
+  readonly dashboards: readonly SessionDashboard[];
   readonly messages: readonly ChatMessage[];
 }
 
@@ -120,6 +121,7 @@ export interface SessionsResponse {
 
 export interface MessageRequest {
   readonly message: string;
+  readonly dashboardId: string;
 }
 
 export interface ChatCompletionRequest {
@@ -128,22 +130,6 @@ export interface ChatCompletionRequest {
 
 export interface ChatCompletionResponse {
   readonly text: string;
-}
-
-export type DashboardEditRequest =
-  | {
-      readonly action: "remove";
-      readonly baseRevision: number;
-      readonly widgetId: string;
-    }
-  | {
-      readonly action: "reorder";
-      readonly baseRevision: number;
-      readonly widgetIds: readonly string[];
-    };
-
-export interface DashboardEditResponse {
-  readonly dashboard: DashboardState;
 }
 
 export interface ErrorResponse {
@@ -168,7 +154,7 @@ export interface SseEventMap {
   tool_call: { turn: number; id: string; name: string; arguments: JsonObject };
   tool_start: { turn: number; id: string; name: string };
   tool_end: { turn: number; id: string; name: string; isError: boolean };
-  dashboard_update: { turn: number; toolCallId: string; dashboard: DashboardState };
+  dashboard_update: { turn: number; toolCallId: string; dashboardId: string; dashboard: DashboardState };
   turn_end: { turn: number; final: boolean };
   compaction_start: { reason: AutomaticCompactionReason };
   compaction_end: { reason: AutomaticCompactionReason; outcome: CompactionOutcome };
@@ -188,7 +174,6 @@ export type JsonResponseBody =
   | AuthResponse
   | AbortResponse
   | ChatCompletionResponse
-  | DashboardEditResponse
   | DeleteSessionResponse
   | ErrorResponse
   | HealthResponse

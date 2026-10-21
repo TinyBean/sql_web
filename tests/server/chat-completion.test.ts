@@ -231,7 +231,7 @@ test("concurrent completions keep isolated history, snapshots and dashboard chan
   const env = await fixture(t, async (body) => {
     const tools = body.messages.filter((message) => message.role === "tool");
     if (!tools.length) return { calls: [{ name: "execute_sql", args: { sql: "SELECT 1 AS answer", save_as: "same_name" } }] };
-    if (tools.length === 1) return { calls: [{ name: "update_dashboard", args: { action: "reset", base_revision: 0 } }] };
+    if (tools.length === 1) return { calls: [{ name: "update_dashboard", args: { action: "reset", dashboard_id: "default", base_revision: 0 } }] };
     waiting += 1;
     if (waiting === 2) bothStarted.resolve();
     await release.promise;

@@ -32,20 +32,22 @@ npm run build && setsid -f node --enable-source-maps dist/src/server/main.js >> 
 
 ```json
 {
-  "defaultDashboard": "default",
+  "defaultDashboards": ["default"],
   "users": {
-    "3000100562": "test"
+    "3000100562": ["overview", "default"]
   }
 }
 ```
 
-所有验证成功的域账号都可登录，未单独配置的账号使用 `default`。`test` 由独立模板按卡片 ID 复用最新默认快照的四张概览卡：MT Effective OEE、MT Test OEE、ST Effective OEE、ST Test OEE；每日任务在默认看板发布后刷新校验，无需重复计算或 Agent 分析。配置引用的看板必须已注册，未知 ID 会使启动失败。
+列表顺序就是标签顺序，第一个看板默认选中；每个账号的列表必须非空且无重复，配置只绑定已经注册的看板。可使用上方 JSON 示例作为初始配置。兼容旧 `defaultDashboard` 单值字段和用户映射中的字符串，不能同时配置新旧默认字段。概览看板统一使用 `overview` ID。现有账号绑定不会由代码自动扩充。
 
-每个新会话绑定当前登录账号，并立即保存初始看板。文件名自动包含账号水印，例如 `3000100562__2026-10-19T08-00-00-000Z__<会话ID>.jsonl`，文件内另记录归属。只有所有者能看到、继续、编辑或删除私有会话；同一账号在不同浏览器登录可看到相同历史。配置只决定新会话的初始看板，已有会话的快照与后续编辑保持独立。
+所有验证成功的域账号都可登录，未单独配置的账号使用 `defaultDashboards` 列表。`overview` 由独立模板按卡片 ID 复用最新默认快照的四张概览卡：MT Effective OEE、MT Test OEE、ST Effective OEE、ST Test OEE；每日任务在默认看板发布后刷新校验，无需重复计算或 Agent 分析。配置引用的看板必须已注册，未知 ID 会使启动失败。
 
-原有未绑定会话显示为“共享历史”，所有登录账号都能只读查看。继续对话或编辑看板会先自动复制为当前账号的私有会话，保留对话、看板基线及产物；源会话不改名、不认领、不删除，副本也不受当前账号初始看板配置覆盖。带私有标记但归属损坏的文件不会作为共享历史展示。
+每个新会话绑定当前登录账号，并立即保存全部绑定看板的初始快照。文件名自动包含账号水印，例如 `3000100562__2026-10-19T08-00-00-000Z__<会话ID>.jsonl`，文件内另记录归属。只有所有者能看到、继续、编辑或删除私有会话；同一账号在不同浏览器登录可看到相同历史。配置只决定新会话的看板列表，已有会话保留创建时的列表、快照与后续编辑。同一会话的多个看板共享聊天，标签切换不创建新会话；刷新页面默认选中第一个标签。
 
-登录接口为 `POST /api/auth/login`，JSON 请求体为 `{"account":"工号","password":"域密码"}`；`GET /api/auth/me` 返回账号、初始看板 ID 和过期时间，`POST /api/auth/logout`（JSON `{}`）注销当前登录。业务 API 需携带登录 Cookie；健康检查和 `/chat/compeletion` 保持公开。通过 `POST /api/sessions/:id/fork`（JSON `{}`）可复制共享历史。
+原有未绑定会话显示为“共享历史”，所有登录账号都能只读查看。继续对话会先自动复制为当前账号的私有会话，保留对话、看板基线及产物；源会话不改名、不认领、不删除，副本也不受当前账号初始看板配置覆盖。带私有标记但归属损坏的文件不会作为共享历史展示。
+
+登录接口为 `POST /api/auth/login`，JSON 请求体为 `{"account":"工号","password":"域密码"}`；`GET /api/auth/me` 返回账号、有序 `dashboardIds` 和过期时间，`POST /api/auth/logout`（JSON `{}`）注销当前登录。业务 API 需携带登录 Cookie；健康检查和 `/chat/compeletion` 保持公开。通过 `POST /api/sessions/:id/fork`（JSON `{}`）可复制共享历史。
 
 网页 Agent、子 Agent 和匿名问答只允许读取共享每日分析、每日任务日志、已发布默认快照及当前会话产物；原始聊天文件、导出、备份、凭据、网站日志和其他会话产物不向 Agent 开放。域账号不限制共享 OEE 数据查询范围。
 
@@ -114,7 +116,13 @@ crontab -l
 
 默认看板包含 13 张卡片：MT/ST 的 Effective OEE 与 Test OEE 概览、周/月/季趋势、极值明细、机台 TOP10，以及日/周/月/季改善清单。缺数据保持 NULL，不补零；快照缺失或无效时显示等待更新的空模板。
 
-新会话锁定创建时按账号配置选择的看板，后续每日发布不会自动刷新已有会话；对话可修改当前会话的卡片，重置恢复其初始版本。每次模型请求都会注入当前会话看板。
+新会话锁定创建时按账号配置选择的全部看板，后续每日发布不会自动刷新已有会话。各看板独立维护卡片、初始基线和 revision，同名卡片不会跨看板联动；重置仅恢复目标看板的初始版本。快照文档使用版本 2，旧单看板快照在读取时保持原文件，首次由 Agent 修改时才转换；旧私有会话继续使用原看板 ID，不受新配置覆盖。
+
+前端通过页面顶部固定栏中的标签切换看板，各会话的每个看板独立记住本次页面使用中的滚动位置，切换回来时恢复；首次打开的看板从顶部开始。看板通过 Agent 对话修改。每次模型请求注入 `dashboards` 和 `activeDashboardId`；后者固定为发送问题时选中的看板，回答期间切换标签不改变默认目标。后台看板更新不会抢占当前标签。
+
+Agent 保留两个工具：`get_dashboard({dashboard_ids?, include_data?})` 默认返回全部看板和卡片摘要，指定 `include_data: true` 可返回完整卡片数据；`update_dashboard({dashboard_id, action, base_revision, ...})` 每次修改一个绑定看板，跨看板修改连续调用。查询快照可供同一会话的多个看板引用；修改始终使用目标看板的 revision。
+
+网页 HTTP 接口统一使用多看板结构，服务端与前端需同步发布：登录和会话摘要返回 `dashboardIds`，完整会话返回 `dashboards: [{id, title, state}]`，不再返回旧单值字段。`POST /api/sessions/:id/messages` 的请求为 `{"message":"问题","dashboardId":"overview"}`；SSE `dashboard_update` 同样携带 `dashboardId`。目标必须属于该会话，而不是只存在于当前账号的新配置中。匿名 `/chat/compeletion` 的文字问答格式保持不变。
 
 计算结果统一在展示时四舍五入：整数保持原样，小数补足两位（例如 `1.2 → 1.20`、`1.235 → 1.24`）。看板、图表、排名摘要和每日邮件共用格式化规则，聊天、API 回答与分析报告使用相同的 Agent 展示指引。计算、排序和证据保留原始精度；历史聊天与归档保持原文。看板 `format.precision` 字段保留兼容，展示以统一规则为准。
 
@@ -135,7 +143,7 @@ curl http://127.0.0.1:3000/chat/compeletion \
 
 临时 Agent 额外收到接口交流提醒：直接在 `text` 中回答，可以读取看板作为数据来源，不修改看板，也不引导调用方查看网页看板或访问临时产物。
 
-各看板位于 `src/server/dashboard/<看板 ID>/`，在公共入口 `src/server/dashboard/index.ts` 注册 `DashboardDefinition`，提供 `id`、`loadInitial()` 和可选 `update(context)`。公共层负责注册、账号映射、通用快照存储，以及供看板按需引用的邮件发送和通知路由。
+各看板位于 `src/server/dashboard/<看板 ID>/`，在公共入口 `src/server/dashboard/index.ts` 注册 `DashboardDefinition`，提供 `id`、可选显示名 `title`、`loadInitial()` 和可选 `update(context)`。公共层负责注册、账号映射、通用快照存储，以及供看板按需引用的邮件发送和通知路由。
 
 ```text
 src/server/dashboard/
@@ -151,7 +159,7 @@ src/server/dashboard/
 │       ├── agent.ts         # Agent、工具、证据管理及调用预算
 │       ├── validation.ts    # 报告结构、证据校验、修复反馈与降级
 │       └── worker.ts        # IPC 子进程入口
-└── test/
+└── overview/
     ├── index.ts
     ├── template.ts
     └── calculate/index.ts   # 按模板 ID 投影默认快照
@@ -159,7 +167,7 @@ src/server/dashboard/
 
 `calculate/index.ts` 提供 `calculateDefaultDashboard()`，在调用方的只读事务内完成计算并按 ID 填回模板。Agent 在基础指标交给父进程后加载，计算与分析使用同一只读事务，成功后原子发布快照。看板入口可引用公共 `email.ts` 的通知分发器，提供信息类型和邮件内容生成函数；未配置发送规则时跳过发送。
 
-`test/` 引用默认看板资源，按自身模板顺序读取指定卡片并返回独立副本，已注册每日更新入口，在 `default` 之后执行。更新复用本次发布的默认快照，校验四张概览卡并记录状态，不另存快照或启用分析模块；默认看板本次未发布时明确跳过，不将同日旧快照视为更新成功。网站加载时，默认快照缺失或无效仍展示四张等待更新的概览卡。
+`overview/` 引用默认看板资源，按自身模板顺序读取指定卡片并返回独立副本，已注册每日更新入口，在 `default` 之后执行。更新复用本次发布的默认快照，校验四张概览卡并记录状态，不另存快照或启用分析模块；默认看板本次未发布时明确跳过，不将同日旧快照视为更新成功。网站加载时，默认快照缺失或无效仍展示四张等待更新的概览卡。
 
 ## 邮件通知
 

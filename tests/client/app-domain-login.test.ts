@@ -10,11 +10,11 @@ import type { DashboardState } from "../../src/shared/dashboard.ts";
 
 const dashboard: DashboardState = { schemaVersion: 1, revision: 0, dataAsOf: "2026-10-19T00:00:00Z", dateRange: { start: null, end: null }, widgets: [] };
 function session(id: string, ownerAccount: string | null, text = ""): SerializedSession {
-  return { id, ownerAccount, readOnly: ownerAccount === null, dashboardId: "default", title: text || id, model: null,
-    tools: [], streaming: false, dashboard, messages: text ? [{ id: "user-1", role: "user", text }, { id: "assistant-1", role: "assistant", text: text + " answer" }] : [] };
+  return { id, ownerAccount, readOnly: ownerAccount === null, dashboardIds: ["default"], title: text || id, model: null,
+    tools: [], streaming: false, dashboards: [{ id: "default", title: "Test OEE 综合看板", state: dashboard }], messages: text ? [{ id: "user-1", role: "user", text }, { id: "assistant-1", role: "assistant", text: text + " answer" }] : [] };
 }
 function summary(value: SerializedSession): SessionSummary {
-  return { id: value.id, title: value.title, ownerAccount: value.ownerAccount, readOnly: value.readOnly, dashboardId: value.dashboardId,
+  return { id: value.id, title: value.title, ownerAccount: value.ownerAccount, readOnly: value.readOnly, dashboardIds: value.dashboardIds,
     createdAt: "2026-10-19T00:00:00Z", updatedAt: "2026-10-19T00:00:00Z", messageCount: value.messages.length, active: false };
 }
 function json(body: unknown, status = 200): Response {
@@ -55,7 +55,7 @@ test("login, shared-history copying, logout and account switches discard streams
   const legacy = session("legacy-session", null, "shared history");
   const secret = session("alice-private", "alice", "alice secret");
   const stored = new Map([[legacy.id, legacy], [secret.id, secret]]);
-  const auth = () => ({ account, dashboardId: "default", expiresAt: new Date(Date.now() + 3600000).toISOString() });
+  const auth = () => ({ account, dashboardIds: ["default"], expiresAt: new Date(Date.now() + 3600000).toISOString() });
   expose("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const method = init.method ?? "GET";
@@ -118,22 +118,13 @@ test("login, shared-history copying, logout and account switches discard streams
   await login("alice");
   assert.equal(document.querySelector('[data-delete-session-id="legacy-session"]'), null);
   await selectLegacy();
-  const edit = document.querySelector("#dashboardEditButton") as unknown as HTMLButtonElement;
-  edit.click(); edit.click();
-  await waitFor(() => forks === 1, "shared history was not copied");
-  completeFork!();
-  await waitFor(() => location.hash.includes("copy-session-1") && edit.getAttribute("aria-pressed") === "true", "copy did not enter dashboard editing");
-  assert.equal(forks, 1, "concurrent operations must share the same copy request");
-  edit.click();
-  await waitFor(() => edit.getAttribute("aria-pressed") === "false", "dashboard editing did not finish");
-  await selectLegacy();
   const input = document.querySelector("#questionInput") as unknown as HTMLTextAreaElement;
   input.value = "continue legacy";
   document.querySelector("#composer")!.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
-  await waitFor(() => forks === 2, "continuing shared history did not create a private copy");
+  await waitFor(() => forks === 1, "continuing shared history did not create a private copy");
   completeFork!();
   await waitFor(() => messages.textContent.includes("alice live secret"), "private copy stream did not start");
-  assert.equal(streamingSessionId, "copy-session-2");
+  assert.equal(streamingSessionId, "copy-session-1");
   (document.querySelector('[data-session-id="alice-private"]') as unknown as HTMLButtonElement).click();
   await waitFor(() => !!lateResponse, "late session request did not start");
   (document.querySelector("#logoutButton") as unknown as HTMLButtonElement).click();

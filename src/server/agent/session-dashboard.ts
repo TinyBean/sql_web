@@ -26,6 +26,8 @@ import {
   type DashboardOverviewEncoding,
   type DashboardRow,
   type DashboardState,
+  type SessionDashboard,
+  DASHBOARD_ID_PATTERN,
   type DashboardTableEncoding,
   type DashboardWidget,
   type DashboardWidgetSize,
@@ -34,15 +36,20 @@ import type { QueryResult } from "../database/database.ts";
 import type { ArtifactStore, SessionArtifactStore } from "../tool/artifact-store.ts";
 import { formatMachineMentions, machineLabel } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
 
-export type InitialDashboardProvider = (sessionId: string) => DashboardState;
+export type InitialDashboardProvider = (sessionId: string) => DashboardState | readonly SessionDashboard[];
+export type DashboardIdentity = Pick<SessionDashboard, "id" | "title">;
+export type DashboardIdentityProvider = (sessionId: string) => readonly DashboardIdentity[] | undefined;
 
 const DASHBOARD_FILENAME = "dashboard.json";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 
-interface DashboardDocument {
-  readonly schemaVersion: typeof DASHBOARD_SCHEMA_VERSION;
+interface DashboardEntry extends DashboardIdentity {
   readonly baseline: DashboardState;
   readonly current: DashboardState;
+}
+interface DashboardDocument {
+  readonly schemaVersion: 2;
+  readonly dashboards: readonly DashboardEntry[];
 }
 
 interface WidgetRequestBase {
@@ -105,36 +112,55 @@ function dashboardPath(rootDir: string, sessionId: string): string {
   return path.join(rootDir, sessionId, DASHBOARD_FILENAME);
 }
 
-function parseDashboardDocument(value: unknown): DashboardDocument {
-  if (
-    typeof value !== "object" || value === null || Array.isArray(value) ||
-    !("schemaVersion" in value) || value.schemaVersion !== DASHBOARD_SCHEMA_VERSION ||
-    !("baseline" in value) || !("current" in value)
-  ) {
+function parseDashboardDocument(value: unknown, identities?: readonly DashboardIdentity[]): DashboardDocument {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !("schemaVersion" in value)) {
     throw new DashboardInputError("看板文件结构无效");
   }
-  try {
-    const baseline = parseDashboardState(value.baseline, "$dashboard.baseline");
-    const current = parseDashboardState(value.current, "$dashboard.current");
-    if (baseline.revision !== 0) throw new DashboardInputError("看板 baseline revision 必须为 0");
-    return { schemaVersion: DASHBOARD_SCHEMA_VERSION, baseline, current };
-  } catch (error) {
-    if (error instanceof DashboardInputError) throw error;
-    throw new DashboardInputError(error instanceof Error ? error.message : "看板文件结构无效");
+  const legacyIdentity = identities ?? [{ id: "default", title: "Test OEE 综合看板" }];
+  let entries: unknown[];
+  if (value.schemaVersion === 1 && "baseline" in value && "current" in value && legacyIdentity.length === 1) {
+    entries = [{ ...legacyIdentity[0], baseline: value.baseline, current: value.current }];
+  } else if (value.schemaVersion === 2 && "dashboards" in value && Array.isArray(value.dashboards)) {
+    entries = value.dashboards;
+  } else throw new DashboardInputError("看板文件结构无效");
+  if (!entries.length) throw new DashboardInputError("会话看板不能为空");
+  const seen = new Set<string>();
+  const dashboards = entries.map((entry): DashboardEntry => {
+    if (!entry || typeof entry !== "object" || !("id" in entry) || typeof entry.id !== "string" ||
+        !DASHBOARD_ID_PATTERN.test(entry.id) || seen.has(entry.id) || !("title" in entry) ||
+        typeof entry.title !== "string" || !entry.title.trim() || entry.title.length > 120 ||
+        !("baseline" in entry) || !("current" in entry)) throw new DashboardInputError("看板条目结构无效或 ID 重复");
+    seen.add(entry.id);
+    if (Buffer.byteLength(JSON.stringify({ schemaVersion: 1, baseline: entry.baseline, current: entry.current })) > MAX_DASHBOARD_FILE_BYTES) throw new DashboardInputError("单个看板文件大小无效");
+    try {
+      const baseline = parseDashboardState(entry.baseline, "$dashboard.baseline");
+      const current = parseDashboardState(entry.current, "$dashboard.current");
+      if (baseline.revision !== 0) throw new DashboardInputError("看板 baseline revision 必须为 0");
+      return { id: entry.id, title: entry.title, baseline, current };
+    } catch (error) {
+      throw new DashboardInputError(error instanceof Error ? error.message : "看板文件结构无效");
+    }
+  });
+  if (identities && (dashboards.length !== identities.length || dashboards.some((entry, index) => entry.id !== identities[index]?.id))) {
+    throw new DashboardInputError("看板文件与会话绑定不一致");
   }
+  return { schemaVersion: 2, dashboards };
 }
 
-function readDocument(filePath: string): DashboardDocument | null {
+function readDocument(filePath: string, identities?: readonly DashboardIdentity[]): DashboardDocument | null {
   if (!existsSync(filePath)) return null;
   const metadata = lstatSync(filePath);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new DashboardInputError("看板文件类型无效");
-  }
-  if (metadata.size < 1 || metadata.size > MAX_DASHBOARD_FILE_BYTES) {
+  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new DashboardInputError("看板文件类型无效");
+  if (metadata.size < 1 || (identities && metadata.size > (MAX_DASHBOARD_FILE_BYTES + 1024) * identities.length + 64)) {
     throw new DashboardInputError("看板文件大小无效");
   }
   try {
-    return parseDashboardDocument(JSON.parse(readFileSync(filePath, "utf8")) as unknown);
+    const value: unknown = JSON.parse(readFileSync(filePath, "utf8"));
+    const document = parseDashboardDocument(value, identities);
+    const maximum = typeof value === "object" && value !== null && "schemaVersion" in value && value.schemaVersion === 1
+      ? MAX_DASHBOARD_FILE_BYTES : (MAX_DASHBOARD_FILE_BYTES + 1024) * document.dashboards.length + 64;
+    if (metadata.size > maximum) throw new DashboardInputError("看板文件大小无效");
+    return document;
   } catch (error) {
     if (error instanceof DashboardInputError) throw error;
     throw new DashboardInputError("看板文件无法解析");
@@ -143,8 +169,10 @@ function readDocument(filePath: string): DashboardDocument | null {
 
 function writeDocument(filePath: string, document: DashboardDocument): void {
   const payload = JSON.stringify(document);
-  if (Buffer.byteLength(payload) > MAX_DASHBOARD_FILE_BYTES) {
-    throw new DashboardInputError(`看板文件不能超过 ${MAX_DASHBOARD_FILE_BYTES} 字节`);
+  for (const entry of document.dashboards) {
+    if (Buffer.byteLength(JSON.stringify({ schemaVersion: 1, baseline: entry.baseline, current: entry.current })) > MAX_DASHBOARD_FILE_BYTES) {
+      throw new DashboardInputError(`单个看板文件不能超过 ${MAX_DASHBOARD_FILE_BYTES} 字节`);
+    }
   }
   const directory = path.dirname(filePath);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -313,65 +341,104 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
 export class SessionDashboardStore {
   readonly #artifacts: ArtifactStore;
   readonly #loadInitialDashboard: InitialDashboardProvider;
-  readonly #previews = new Map<string, DashboardState>();
+  readonly #identities: DashboardIdentityProvider;
+  readonly #previews = new Map<string, readonly SessionDashboard[]>();
+  readonly #activeDashboardIds = new Map<string, string>();
 
-  constructor(artifacts: ArtifactStore, loadInitialDashboard: InitialDashboardProvider) {
+  constructor(artifacts: ArtifactStore, loadInitialDashboard: InitialDashboardProvider,
+    identities: DashboardIdentityProvider = () => undefined) {
     this.#artifacts = artifacts;
     this.#loadInitialDashboard = loadInitialDashboard;
+    this.#identities = identities;
   }
 
-  initialize(sessionId: string, baseline: DashboardState): void {
-    const state = parseDashboardState(baseline);
-    if (state.revision !== 0) throw new DashboardInputError("初始看板 revision 必须为 0");
-    writeDocument(dashboardPath(this.#artifacts.rootDir, sessionId), {
-      schemaVersion: DASHBOARD_SCHEMA_VERSION, baseline: state, current: state,
-    });
+  initialize(sessionId: string, baseline: DashboardState | readonly SessionDashboard[]): void {
+    const values = Array.isArray(baseline) ? baseline : [{ ...(this.#identities(sessionId)?.[0] ?? { id: "default", title: "Test OEE 综合看板" }), state: baseline }];
+    const document = parseDashboardDocument({ schemaVersion: 2, dashboards: values.map((item) => ({
+      id: item.id, title: item.title, baseline: item.state, current: item.state,
+    })) }, this.#identities(sessionId) ?? values);
+    writeDocument(dashboardPath(this.#artifacts.rootDir, sessionId), document);
     this.forget(sessionId);
   }
 
   forget(sessionId: string): void {
     this.#previews.delete(sessionId);
+    this.#activeDashboardIds.delete(sessionId);
   }
 
   dispose(): void {
     this.#previews.clear();
+    this.#activeDashboardIds.clear();
   }
 
-  #initialState(sessionId: string): DashboardState {
-    let state = this.#previews.get(sessionId);
-    if (!state) {
-      state = parseDashboardState(this.#loadInitialDashboard(sessionId));
-      if (state.revision !== 0) throw new DashboardInputError("初始看板 revision 必须为 0");
-      this.#previews.set(sessionId, state);
+  setActiveDashboard(sessionId: string, dashboardId: string): void {
+    const identities = this.#identities(sessionId) ?? this.#previews.get(sessionId) ?? [{ id: "default" }];
+    if (!identities.some((item) => item.id === dashboardId)) throw new DashboardInputError("会话中不存在看板：" + dashboardId);
+    this.#activeDashboardIds.set(sessionId, dashboardId);
+  }
+
+  activeDashboardId(sessionId: string): string {
+    return this.#activeDashboardIds.get(sessionId) ?? this.#identities(sessionId)?.[0]?.id ?? this.#previews.get(sessionId)?.[0]?.id ?? "default";
+  }
+
+  clearActiveDashboard(sessionId: string): void {
+    this.#activeDashboardIds.delete(sessionId);
+  }
+
+  #initialDocument(sessionId: string): DashboardDocument {
+    let values = this.#previews.get(sessionId);
+    if (!values) {
+      const initial = this.#loadInitialDashboard(sessionId);
+      values = Array.isArray(initial) ? initial : [{ ...(this.#identities(sessionId)?.[0] ?? { id: "default", title: "Test OEE 综合看板" }), state: initial as DashboardState }];
+      const pinned = parseDashboardDocument({ schemaVersion: 2, dashboards: values.map((item) => ({
+        id: item.id, title: item.title, baseline: item.state, current: item.state,
+      })) }, this.#identities(sessionId));
+      values = pinned.dashboards.map((item) => ({ id: item.id, title: item.title, state: item.baseline }));
+      this.#previews.set(sessionId, values);
     }
-    return parseDashboardState(state);
+    return parseDashboardDocument({ schemaVersion: 2, dashboards: values.map((item) => ({
+      id: item.id, title: item.title, baseline: item.state, current: item.state,
+    })) }, this.#identities(sessionId));
   }
 
-  loadOrPreview(sessionId: string): DashboardState {
-    const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
-    return readDocument(filePath)?.current ?? this.#initialState(sessionId);
+  #document(sessionId: string): DashboardDocument {
+    return readDocument(dashboardPath(this.#artifacts.rootDir, sessionId), this.#identities(sessionId)) ?? this.#initialDocument(sessionId);
   }
 
-  loadOrInitialize(sessionId: string): DashboardState {
-    const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
-    const existing = readDocument(filePath);
-    if (existing) return existing.current;
-    const baseline = this.#initialState(sessionId);
-    writeDocument(filePath, {
-      schemaVersion: DASHBOARD_SCHEMA_VERSION,
-      baseline,
-      current: baseline,
-    });
-    this.forget(sessionId);
-    return baseline;
+  listOrPreview(sessionId: string): readonly SessionDashboard[] {
+    return this.#document(sessionId).dashboards.map((item) => ({ id: item.id, title: item.title, state: item.current }));
   }
 
-  apply(sessionId: string, command: DashboardCommand): DashboardApplyResult {
+  listOrInitialize(sessionId: string): readonly SessionDashboard[] {
     const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
-    const document = readDocument(filePath) ?? (() => {
-      const baseline = this.#initialState(sessionId);
-      return { schemaVersion: DASHBOARD_SCHEMA_VERSION, baseline, current: baseline } as const;
-    })();
+    const existing = readDocument(filePath, this.#identities(sessionId));
+    const document = existing ?? this.#initialDocument(sessionId);
+    if (!existing) writeDocument(filePath, document);
+    this.#previews.delete(sessionId);
+    return document.dashboards.map((item) => ({ id: item.id, title: item.title, state: item.current }));
+  }
+
+  #select(values: readonly SessionDashboard[], dashboardId?: string): SessionDashboard {
+    if (dashboardId === undefined && values.length !== 1) throw new DashboardInputError("多看板会话必须指定看板 ID");
+    const item = dashboardId === undefined ? values[0] : values.find((item) => item.id === dashboardId);
+    if (!item) throw new DashboardInputError("会话中不存在看板：" + dashboardId);
+    return item;
+  }
+
+  loadOrPreview(sessionId: string, dashboardId?: string): DashboardState {
+    return this.#select(this.listOrPreview(sessionId), dashboardId).state;
+  }
+
+  loadOrInitialize(sessionId: string, dashboardId?: string): DashboardState {
+    this.#select(this.listOrPreview(sessionId), dashboardId);
+    return this.#select(this.listOrInitialize(sessionId), dashboardId).state;
+  }
+
+  apply(sessionId: string, command: DashboardCommand, dashboardId?: string): DashboardApplyResult {
+    const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
+    const collection = this.#document(sessionId);
+    const selected = this.#select(collection.dashboards.map((item) => ({ ...item, state: item.current })), dashboardId);
+    const document = collection.dashboards.find((item) => item.id === selected.id)!;
     if (command.baseRevision !== document.current.revision) {
       throw new DashboardConflictError(command.baseRevision, document.current.revision);
     }
@@ -427,8 +494,9 @@ export class SessionDashboardStore {
       dateRange,
       widgets,
     });
-    writeDocument(filePath, { ...document, current: dashboard });
-    this.forget(sessionId);
+    writeDocument(filePath, { ...collection, dashboards: collection.dashboards.map((entry) =>
+      entry.id === selected.id ? { ...entry, current: dashboard } : entry) });
+    this.#previews.delete(sessionId);
     return { dashboard, changedWidgetIds, pointCount };
   }
 }

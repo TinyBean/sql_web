@@ -31,15 +31,13 @@
           <span><strong>DataLens</strong><small>OEE INTELLIGENCE</small></span>
         </div>
         <div class="dashboard-heading">
-          <div class="heading-line"><span class="live-dot"></span><h1>Test OEE 综合看板</h1></div>
+          <nav class="dashboard-tabs" id="dashboardTabs" role="tablist" aria-label="切换看板" hidden></nav>
+          <div class="heading-line"><span class="live-dot"></span><h1 id="dashboardTitle">Test OEE 综合看板</h1></div>
           <p><span id="dashboardDateRange">读取数据范围…</span><span class="heading-separator">/</span><span id="dashboardUpdatedAt">准备快照…</span></p>
         </div>
         <div class="topbar-actions">
           <span class="account-label" id="currentAccount"></span>
           <button class="topbar-button" id="logoutButton" type="button">退出</button>
-          <button class="topbar-button" id="dashboardEditButton" type="button" aria-pressed="false" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.9-10.9a2.1 2.1 0 0 0-3-3L5.2 16 4 20ZM14.8 6.2l3 3"/></svg><span>编辑看板</span>
-          </button>
           <button class="topbar-button primary" id="newChatButton" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新建会话
           </button>
@@ -50,7 +48,7 @@
       </header>
 
       <main class="dashboard-main" id="dashboardMain">
-        <section class="dashboard-grid" id="dashboardGrid" aria-label="指标看板" aria-live="polite">
+        <section class="dashboard-grid" id="dashboardGrid" role="tabpanel" aria-label="指标看板" aria-live="polite">
           <article class="metric-card dashboard-loading"><span></span><p>正在构建会话看板…</p></article>
         </section>
       </main>

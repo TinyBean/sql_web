@@ -102,7 +102,7 @@ test("loss snapshots survive restoration, never replace earlier measurements, an
   const dashboard = new SessionDashboardStore(store, () => createDefaultDashboard());
   const baseline = dashboard.loadOrInitialize(sessionId);
   const result = dashboard.apply(sessionId, {
-    action: "upsert", baseRevision: baseline.revision, snapshot: first.snapshot.name,
+    action: "upsert", baseRevision: baseline.revision, data: { columns: first.snapshot.columns, rows: first.rows },
     dateRange: { start: range.start_date, end: range.end_date },
     widget: {
       id: "measured-loss", kind: "table", title: "状态损失", subtitle: "标准口径", size: "wide",

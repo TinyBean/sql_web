@@ -120,7 +120,9 @@ crontab -l
 
 前端通过页面顶部固定栏中的标签切换看板，各会话的每个看板独立记住本次页面使用中的滚动位置，切换回来时恢复；首次打开的看板从顶部开始。看板通过 Agent 对话修改。每次模型请求注入 `dashboards` 和 `activeDashboardId`；后者固定为发送问题时选中的看板，回答期间切换标签不改变默认目标。后台看板更新不会抢占当前标签。
 
-Agent 保留两个工具：`get_dashboard({dashboard_ids?, include_data?})` 默认返回全部看板和卡片摘要，指定 `include_data: true` 可返回完整卡片数据；`update_dashboard({dashboard_id, action, base_revision, ...})` 每次修改一个绑定看板，跨看板修改连续调用。查询快照可供同一会话的多个看板引用；修改始终使用目标看板的 revision。
+Agent 保留两个工具：`get_dashboard({dashboard_ids?, include_data?})` 默认返回全部看板和卡片摘要，指定 `include_data: true` 可返回完整卡片数据；`update_dashboard({dashboard_id, action, base_revision, ...})` 每次修改一个绑定看板，跨看板修改连续调用。upsert 直接接收 `data: {columns: string[], rows: object[]}`、`widget` 和 `date_range`，data 支持原生对象及 JSON 字符串，旧 snapshot 参数已移除。看板更新只校验展示结构、列映射和数值类型，不读取或校验查询快照；data 最多 2000 行、2 MiB，单个看板仍受 2 MiB 文件限制。dataAsOf 为本次 upsert 的服务器时间。
+
+指标计算仍采用 SQL 优先：通过 `execute_sql.save_as` 或业务工具保存完整快照，需要二次计算时使用 `code_interpreter(snapshot)` 复用快照。仅当预览包含全部结果时可直接构造展示 data；预览截断时先从完整快照提取，或通过 SQL 聚合、筛选并保存完整可见的新结果。展示数据保持数值精度和 null；同一快照的计算结果可提交到多个看板，修改始终使用目标看板的 revision。
 
 网页 HTTP 接口统一使用多看板结构，服务端与前端需同步发布：登录和会话摘要返回 `dashboardIds`，完整会话返回 `dashboards: [{id, title, state}]`，不再返回旧单值字段。`POST /api/sessions/:id/messages` 的请求为 `{"message":"问题","dashboardId":"overview"}`；SSE `dashboard_update` 同样携带 `dashboardId`。目标必须属于该会话，而不是只存在于当前账号的新配置中。匿名 `/chat/compeletion` 的文字问答格式保持不变。
 

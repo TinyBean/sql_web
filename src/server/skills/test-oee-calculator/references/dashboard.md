@@ -1,6 +1,8 @@
 # OEE 看板字段映射
 
-使用 `get_default_sql(view: "overview" | "trends")`，将 SQL 原样交给 `execute_sql.save_as` 后再更新看板。聚合公式见 [业务规则](business-rules.md)。所有 `_percent` 列已乘 100，`unit: "%"` 只追加单位。
+使用 `get_default_sql(view: "overview" | "trends")`，将 SQL 原样交给 `execute_sql.save_as` 保存完整快照，基于快照计算或提取最终数据后，通过 `update_dashboard(data={columns,rows}, widget=...)` 更新看板，工具会校验展示数据和图表映射。聚合公式见 [业务规则](business-rules.md)。所有 `_percent` 列已乘 100，`unit: "%"` 只追加单位。
+
+指标须以已保存的完整快照为依据。`preview.truncated=false` 时可直接使用完整预览构造 data；预览截断时使用 `code_interpreter(snapshot)` 从完整快照计算或提取，或重新聚合、筛选并保存完整可见的新结果。不得将局部预览当成完整展示数据或抄入 Python。data 保留原始数值精度和 null，不需要 rowCount、truncated、版本或文件信息；支持原生对象及 JSON 字符串。
 
 ### 多看板读写
 
@@ -8,11 +10,11 @@
 
 先调用 `get_dashboard` 读取目标 revision 和卡片。省略 `dashboard_ids` 返回全部绑定看板摘要；传 `dashboard_ids: ["overview", "default"]` 可筛选多个看板，`include_data: true` 返回完整卡片数据。概览看板 ID 为 `overview`，操作必须使用该会话实际返回的 ID。
 
-每次 `update_dashboard` 必须传入一个 `dashboard_id`，并使用该看板最近读取的 `base_revision`；同时修改多个看板须分别调用。各看板的卡片、revision 和重置基线彼此独立，同名卡片不会联动。只能修改当前会话已有看板，不得创建未绑定看板。同一会话保存的完整查询快照可被多个看板引用。
+每次 `update_dashboard` 必须传入一个 `dashboard_id`，并使用该看板最近读取的 `base_revision`；同时修改多个看板须分别调用。各看板的卡片、revision 和重置基线彼此独立，同名卡片不会联动。只能修改当前会话已有看板，不得创建未绑定看板。同一快照计算得到的数据可提交到多个看板。upsert 的 dataAsOf 为服务器生成本次看板数据的时间，不代表数据库的实时更新时间。
 
 ### 概览字段映射与核对
 
-`get_default_sql(view: "overview")` 返回一行，可保存为一个快照供多张概览卡片引用。该行同时包含合并指标和分类指标，按以下映射选择字段：
+`get_default_sql(view: "overview")` 返回一行，保存快照后可将完整结果作为 data 提交给多张概览卡片。该行同时包含合并指标和分类指标，按以下映射选择字段：
 
 | 卡片口径 | OEE（`encoding.value`） | Availability | Performance (DUT-On) | Performance (Test Time) | Yield |
 |---|---|---|---|---|---|

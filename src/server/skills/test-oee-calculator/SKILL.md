@@ -26,7 +26,7 @@ description: 查询、计算和解释 Test OEE 与 Effective OEE，支持全类�
 
 SQL 与表达式工具只生成查询或片段，将 SQL 原样交给 `execute_sql`；看板查询使用 `save_as` 保存完整快照。排名工具使用当前会话的只读查询能力执行并保存完整候选快照。
 
-标准状态损失使用公共工具 `measure_loss`，其快照可直接用于后续分析或看板。少量 LOT／分类抽查通过表达式和 SQL VALUES 完成，示例见业务规则。
+标准状态损失使用公共工具 `measure_loss`，其快照用于后续计算，完整工具结果或基于快照的计算结果可作为看板展示数据。少量 LOT／分类抽查通过表达式和 SQL VALUES 完成，示例见业务规则。
 
 每日分析引用以返回的 `source` 和 `report_usage` 为准：`measure_loss` 的 `ranking`／`machine_summaries` 仅供调查，其编号不能填入 `machine_evidence_ids`；该字段仅接受同周期、同类型、同入选状态的 `rank_machines` 标准排名编号，并须同时加入 `evidence_ids`。`loss_reference` 始终使用程序提供的 `losses[period].evidence_id` 和入选原始行，不能用补查或排名替换。
 
@@ -34,6 +34,6 @@ SQL 与表达式工具只生成查询或片段，将 SQL 原样交给 `execute_s
 
 - 说明业务日范围、计算粒度与实际覆盖；缺失和不可计算结果不作为零，部分周期不作为完整周期。
 - 明细以 1 表示 100%；看板 `_percent` 列及排名 value/metric_value 已是百分数值，损失为小时。不要重复缩放。
-- 更新看板前核对字段前缀、计算样本和覆盖计数，使用完整快照，不复制预览行。
+- 更新看板前核对字段前缀、计算样本和覆盖计数，指标以已保存的完整快照为依据。`update_dashboard` 接收最终 `data={columns,rows}`。预览包含全部结果时可用于构造 data；预览截断时先从完整快照提取，或通过 SQL 聚合、筛选并保存完整可见结果。二次计算使用 `code_interpreter(snapshot)`，不得将预览抄进 Python；保留数值原始精度和 null。
 - 具体指标／损失问题或机台集中、分散结论需查询同范围同 MT/ST 的 TOP3，并逐字引用返回的 summary；解释每日归档报告时，可完整读取同运行中成功的排名工具结果，引用原 summary 并注明业务日期和原口径；新分析仍调用排名工具。纯公式解释和单台数值查询无需额外排名。
 - 机台展示使用平台号/机台号，映射结果以工具返回的标签为准，无需查询数据库；SQL 键使用原始机台号。排名证据属于派生统计，不能作为实测 loss_reference。

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -167,11 +167,12 @@ test("one overview SQL snapshot saves two independent type cards without changin
     writeSync(fileDescriptor, JSON.stringify({ columns, rows, rowCount: 1, truncated: false }));
     return { columns, rowCount: 1 };
   });
+  const data = JSON.parse(readFileSync(artifacts.forSession(sessionId).resolveDataSnapshot(snapshot.name).filePath, "utf8"));
 
   let revision = baseline.revision;
   for (const prefix of ["mt", "st"] as const) {
     const result = store.apply(sessionId, {
-      action: "upsert", baseRevision: revision, dateRange: range, snapshot: snapshot.name,
+      action: "upsert", baseRevision: revision, dateRange: range, data,
       widget: {
         id: `${prefix}-oee-overview-period`, kind: "overview", size: "wide",
         title: `${prefix.toUpperCase()} · OEE 概览`, subtitle: `${range.start} 至 ${range.end}`,

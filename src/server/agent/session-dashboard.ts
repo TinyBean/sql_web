@@ -32,8 +32,7 @@ import {
   type DashboardWidget,
   type DashboardWidgetSize,
 } from "../../shared/dashboard.ts";
-import type { QueryResult } from "../database/database.ts";
-import type { ArtifactStore, SessionArtifactStore } from "../tool/artifact-store.ts";
+import type { ArtifactStore } from "../tool/artifact-store.ts";
 import { formatMachineMentions, machineLabel } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
 
 export type InitialDashboardProvider = (sessionId: string) => DashboardState | readonly SessionDashboard[];
@@ -71,11 +70,16 @@ export type DashboardWidgetRequest = WidgetRequestBase & (
   | { readonly kind: "table"; readonly encoding: DashboardTableEncoding }
 );
 
+export interface DashboardData {
+  readonly columns: readonly string[];
+  readonly rows: readonly DashboardRow[];
+}
+
 export type DashboardCommand =
   | {
       readonly action: "upsert";
       readonly baseRevision: number;
-      readonly snapshot: string;
+      readonly data: DashboardData;
       readonly dateRange: { readonly start: string | null; readonly end: string | null };
       readonly widget: DashboardWidgetRequest;
     }
@@ -98,7 +102,7 @@ export class DashboardInputError extends Error {
 
 export class DashboardConflictError extends Error {
   constructor(expected: number, actual: number) {
-    super(`看板版本已变化：请求基于 revision ${expected}，当前为 ${actual}；请重新读取看板后重试`);
+    super(`看板版本已变化:请求基于 revision ${expected},当前为 ${actual};请重新读取看板后重试`);
     this.name = "DashboardConflictError";
   }
 }
@@ -193,48 +197,37 @@ function writeDocument(filePath: string, document: DashboardDocument): void {
   }
 }
 
-function snapshotRows(artifacts: SessionArtifactStore, snapshotName: string): QueryResult {
-  const snapshot = artifacts.resolveDataSnapshot(snapshotName);
-  if (snapshot.rowCount > MAX_DASHBOARD_ROWS_PER_WIDGET) {
-    throw new DashboardInputError(
-      `图表快照不能超过 ${MAX_DASHBOARD_ROWS_PER_WIDGET} 行，请先在 SQL 中聚合或筛选`,
-    );
-  }
-  if (snapshot.byteCount > MAX_DASHBOARD_FILE_BYTES) {
-    throw new DashboardInputError(`图表快照不能超过 ${MAX_DASHBOARD_FILE_BYTES} 字节`);
-  }
-  const parsed: unknown = JSON.parse(readFileSync(snapshot.filePath, "utf8"));
+function parseDashboardData(parsed: unknown): DashboardData {
   if (
     typeof parsed !== "object" || parsed === null || Array.isArray(parsed) ||
     !("columns" in parsed) || !Array.isArray(parsed.columns) ||
-    !parsed.columns.every((column) => typeof column === "string") ||
+    parsed.columns.length === 0 ||
+    !parsed.columns.every((column) => typeof column === "string" && column.trim() && column.length <= 80) ||
     new Set(parsed.columns).size !== parsed.columns.length ||
-    !("rows" in parsed) || !Array.isArray(parsed.rows) ||
-    !("rowCount" in parsed) || parsed.rowCount !== parsed.rows.length ||
-    !("truncated" in parsed) || parsed.truncated !== false
+    !("rows" in parsed) || !Array.isArray(parsed.rows)
   ) {
-    throw new DashboardInputError("图表数据快照结构无效");
+    throw new DashboardInputError("图表数据结构无效,data 必须包含不重复的非空列名和 rows 数组");
+  }
+  if (parsed.rows.length > MAX_DASHBOARD_ROWS_PER_WIDGET) {
+    throw new DashboardInputError(`图表数据不能超过 ${MAX_DASHBOARD_ROWS_PER_WIDGET} 行,请先在 SQL 中聚合或筛选`);
   }
   const rows = parsed.rows.map((value, rowIndex): DashboardRow => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new DashboardInputError(`图表数据快照第 ${rowIndex + 1} 行不是对象`);
+      throw new DashboardInputError(`图表数据第 ${rowIndex + 1} 行不是对象`);
     }
-    const decoded: Record<string, string | number | null> = {};
     for (const [key, cell] of Object.entries(value)) {
       if (cell !== null && typeof cell !== "string" &&
           (typeof cell !== "number" || !Number.isFinite(cell))) {
-        throw new DashboardInputError(`图表数据快照第 ${rowIndex + 1} 行的 ${key} 不是可展示标量`);
+        throw new DashboardInputError(`图表数据第 ${rowIndex + 1} 行的 ${key} 不是可展示标量`);
       }
-      decoded[key] = cell as string | number | null;
     }
-    return decoded;
+    return Object.fromEntries(Object.entries(value)) as DashboardRow;
   });
-  return {
-    columns: parsed.columns,
-    rows,
-    rowCount: rows.length,
-    truncated: false,
-  };
+  const data = { columns: parsed.columns as string[], rows };
+  if (Buffer.byteLength(JSON.stringify(data)) > MAX_DASHBOARD_FILE_BYTES) {
+    throw new DashboardInputError(`图表数据不能超过 ${MAX_DASHBOARD_FILE_BYTES} 字节`);
+  }
+  return data;
 }
 
 function requestedColumns(widget: DashboardWidgetRequest): readonly string[] {
@@ -268,20 +261,21 @@ function numericColumns(widget: DashboardWidgetRequest): ReadonlySet<string> {
 
 function materializeWidget(
   request: DashboardWidgetRequest,
-  snapshot: QueryResult,
+  source: DashboardData,
 ): DashboardWidget {
-  if ((request.kind === "kpi" || request.kind === "overview") && snapshot.rows.length !== 1) {
-    throw new DashboardInputError("KPI 或概览图表快照必须恰好包含一行");
+  if ((request.kind === "kpi" || request.kind === "overview") && source.rows.length !== 1) {
+    throw new DashboardInputError("KPI 或概览图表数据必须恰好包含一行");
   }
   const columns = [...new Set(requestedColumns(request))];
-  const available = new Set(snapshot.columns);
+  const available = new Set(source.columns);
   for (const column of columns) {
-    if (!available.has(column)) throw new DashboardInputError(`图表快照中不存在列 ${column}`);
+    if (!available.has(column)) throw new DashboardInputError(`图表数据中不存在列 ${column}`);
   }
   const numbers = numericColumns(request);
-  let data = snapshot.rows.map((row, rowIndex): DashboardRow => {
+  let data = source.rows.map((row, rowIndex): DashboardRow => {
     const output: Record<string, string | number | null> = {};
     for (const column of columns) {
+      if (!Object.hasOwn(row, column)) throw new DashboardInputError(`第 ${rowIndex + 1} 行缺少列 ${column}`);
       const value = row[column];
       if (value !== null && typeof value !== "string" && typeof value !== "number") {
         throw new DashboardInputError(`第 ${rowIndex + 1} 行的 ${column} 不是可展示标量`);
@@ -296,7 +290,7 @@ function materializeWidget(
     }
     return output;
   });
-  // Keep original snapshot keys/IDs for audit; only display bindings point at formatted labels.
+  // Keep original data keys/IDs for audit; only display bindings point at formatted labels.
   const displayColumns = new Map<string, string>();
   const occupied = new Set(columns);
   for (const column of columns.filter((column) => !numbers.has(column))) {
@@ -339,7 +333,7 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
 }
 
 export class SessionDashboardStore {
-  readonly #artifacts: ArtifactStore;
+  readonly #rootDir: string;
   readonly #loadInitialDashboard: InitialDashboardProvider;
   readonly #identities: DashboardIdentityProvider;
   readonly #previews = new Map<string, readonly SessionDashboard[]>();
@@ -347,7 +341,7 @@ export class SessionDashboardStore {
 
   constructor(artifacts: ArtifactStore, loadInitialDashboard: InitialDashboardProvider,
     identities: DashboardIdentityProvider = () => undefined) {
-    this.#artifacts = artifacts;
+    this.#rootDir = artifacts.rootDir;
     this.#loadInitialDashboard = loadInitialDashboard;
     this.#identities = identities;
   }
@@ -357,7 +351,7 @@ export class SessionDashboardStore {
     const document = parseDashboardDocument({ schemaVersion: 2, dashboards: values.map((item) => ({
       id: item.id, title: item.title, baseline: item.state, current: item.state,
     })) }, this.#identities(sessionId) ?? values);
-    writeDocument(dashboardPath(this.#artifacts.rootDir, sessionId), document);
+    writeDocument(dashboardPath(this.#rootDir, sessionId), document);
     this.forget(sessionId);
   }
 
@@ -373,7 +367,7 @@ export class SessionDashboardStore {
 
   setActiveDashboard(sessionId: string, dashboardId: string): void {
     const identities = this.#identities(sessionId) ?? this.#previews.get(sessionId) ?? [{ id: "default" }];
-    if (!identities.some((item) => item.id === dashboardId)) throw new DashboardInputError("会话中不存在看板：" + dashboardId);
+    if (!identities.some((item) => item.id === dashboardId)) throw new DashboardInputError("会话中不存在看板:" + dashboardId);
     this.#activeDashboardIds.set(sessionId, dashboardId);
   }
 
@@ -402,7 +396,7 @@ export class SessionDashboardStore {
   }
 
   #document(sessionId: string): DashboardDocument {
-    return readDocument(dashboardPath(this.#artifacts.rootDir, sessionId), this.#identities(sessionId)) ?? this.#initialDocument(sessionId);
+    return readDocument(dashboardPath(this.#rootDir, sessionId), this.#identities(sessionId)) ?? this.#initialDocument(sessionId);
   }
 
   listOrPreview(sessionId: string): readonly SessionDashboard[] {
@@ -410,7 +404,7 @@ export class SessionDashboardStore {
   }
 
   listOrInitialize(sessionId: string): readonly SessionDashboard[] {
-    const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
+    const filePath = dashboardPath(this.#rootDir, sessionId);
     const existing = readDocument(filePath, this.#identities(sessionId));
     const document = existing ?? this.#initialDocument(sessionId);
     if (!existing) writeDocument(filePath, document);
@@ -421,7 +415,7 @@ export class SessionDashboardStore {
   #select(values: readonly SessionDashboard[], dashboardId?: string): SessionDashboard {
     if (dashboardId === undefined && values.length !== 1) throw new DashboardInputError("多看板会话必须指定看板 ID");
     const item = dashboardId === undefined ? values[0] : values.find((item) => item.id === dashboardId);
-    if (!item) throw new DashboardInputError("会话中不存在看板：" + dashboardId);
+    if (!item) throw new DashboardInputError("会话中不存在看板:" + dashboardId);
     return item;
   }
 
@@ -435,7 +429,7 @@ export class SessionDashboardStore {
   }
 
   apply(sessionId: string, command: DashboardCommand, dashboardId?: string): DashboardApplyResult {
-    const filePath = dashboardPath(this.#artifacts.rootDir, sessionId);
+    const filePath = dashboardPath(this.#rootDir, sessionId);
     const collection = this.#document(sessionId);
     const selected = this.#select(collection.dashboards.map((item) => ({ ...item, state: item.current })), dashboardId);
     const document = collection.dashboards.find((item) => item.id === selected.id)!;
@@ -449,8 +443,7 @@ export class SessionDashboardStore {
     let pointCount = 0;
 
     if (command.action === "upsert") {
-      const snapshot = snapshotRows(this.#artifacts.forSession(sessionId), command.snapshot);
-      const nextWidget = materializeWidget(command.widget, snapshot);
+      const nextWidget = materializeWidget(command.widget, parseDashboardData(command.data));
       const existingIndex = widgets.findIndex((widget) => widget.id === nextWidget.id);
       if (existingIndex < 0) {
         if (widgets.length >= MAX_DASHBOARD_WIDGETS) {
@@ -460,8 +453,7 @@ export class SessionDashboardStore {
       } else {
         widgets = widgets.map((widget, index) => index === existingIndex ? nextWidget : widget);
       }
-      const descriptor = this.#artifacts.forSession(sessionId).resolveDataSnapshot(command.snapshot);
-      dataAsOf = descriptor.createdAt;
+      dataAsOf = new Date().toISOString();
       dateRange = command.dateRange;
       changedWidgetIds = [nextWidget.id];
       pointCount = nextWidget.data.length;

@@ -12,6 +12,8 @@ import {
 } from "../../src/server/tool/code-interpreter.ts";
 import { createAgentTools } from "../../src/server/tool/database-tools.ts";
 import { AppDatabase } from "../../src/server/database/database.ts";
+import { SessionDashboardStore, type DashboardData } from "../../src/server/agent/session-dashboard.ts";
+import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 
 interface ToolResult {
   readonly content: readonly { readonly type: string; readonly text?: string }[];
@@ -347,4 +349,57 @@ test("execute_sql saves logical snapshots and code_interpreter reuses frozen dat
   const restoredPayload = JSON.parse(restored.content[0]?.text ?? "{}") as Record<string, unknown>;
   assert.deepEqual((restoredPayload["result"] as { metrics: unknown }).metrics, { total: 42 });
   assert.equal("images" in restoredPayload, false);
+});
+
+test("chart metrics computed from a complete snapshot feed direct-data dashboard updates", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-snapshot-chart-"));
+  const filePath = path.join(directory, "oee.sqlite");
+  initializeOeeDatabase(filePath);
+  const database = AppDatabase.open({ filePath });
+  const artifactStore = new ArtifactStore(path.join(directory, "artifacts"));
+  const sessionId = "snapshot-chart-session";
+  const artifacts = artifactStore.forSession(sessionId);
+  const dashboard = new SessionDashboardStore(artifactStore, () => createDefaultDashboard());
+  const runtime = await CodeInterpreterRuntime.create({
+    pythonPath: "/usr/bin/python3", bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit", projectRoot: directory,
+  });
+  t.after(() => {
+    runtime.dispose();
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  assert.equal(runtime.status.available, true, runtime.status.reason ?? "Python runtime unavailable");
+  const tools = createAgentTools(database, artifacts, runtime, { dashboard, sessionId }) as readonly CallableTool[];
+  const executeSql = tools.find((tool) => tool.name === "execute_sql")!;
+  const calculate = tools.find((tool) => tool.name === "code_interpreter")!;
+  const update = tools.find((tool) => tool.name === "update_dashboard")!;
+  const saved = await executeSql.execute("save", {
+    sql: "WITH RECURSIVE numbers(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM numbers WHERE value<25) SELECT value FROM numbers",
+    save_as: "chart-source",
+  }, undefined, undefined, undefined as never);
+  const savedPayload = JSON.parse(saved.content[0]?.text ?? "{}") as {
+    snapshot: { name: string; rowCount: number }; preview: { rowCount: number; truncated: boolean };
+  };
+  assert.equal(savedPayload.snapshot.rowCount, 25);
+  assert.equal(savedPayload.preview.rowCount, 20);
+  assert.equal(savedPayload.preview.truncated, true);
+  const computed = await calculate.execute("compute", {
+    snapshot: savedPayload.snapshot.name,
+    code: 'emit_result(summary="Total", data={"columns": ["total"], "rows": [{"total": sum(row["value"] for row in snapshot_rows)}]})',
+  }, undefined, undefined, undefined as never);
+  const details = computed.details as { result: { data: DashboardData }; provenance: { snapshotName: string } };
+  assert.equal(details.provenance.snapshotName, savedPayload.snapshot.name);
+  assert.deepEqual(details.result.data, { columns: ["total"], rows: [{ total: 325 }] });
+  const snapshotsBefore = artifacts.listDataSnapshots();
+  await update.execute("display", {
+    dashboard_id: "default", action: "upsert", base_revision: 0, data: details.result.data,
+    date_range: { start: null, end: null },
+    widget: {
+      id: "snapshot-total", kind: "kpi", title: "Total", subtitle: "25 rows",
+      encoding: { value: "total", comparison: null }, format: { unit: "", precision: 2 },
+      metric_definition: "Sum of all snapshot rows", warnings: [],
+    },
+  }, undefined, undefined, undefined as never);
+  assert.deepEqual(dashboard.loadOrPreview(sessionId).widgets.at(-1)?.data, [{ total: 325 }]);
+  assert.deepEqual(artifacts.listDataSnapshots(), snapshotsBefore);
 });

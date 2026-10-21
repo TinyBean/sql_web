@@ -75,7 +75,7 @@ test("boards pin separate baselines and revisions, including identical card IDs,
 });
 
 test("dashboard tools read summaries or full data and submit changes to explicitly selected boards", async (t) => {
-  const { store, artifacts } = fixture(t);
+  const { store } = fixture(t);
   const [get, update] = createDashboardTools(store, sessionId);
   assert.ok(get && update);
   const executeGet = (args: unknown) => get.execute("read", args as never, undefined, undefined, undefined as never);
@@ -88,15 +88,11 @@ test("dashboard tools read summaries or full data and submit changes to explicit
   assert.match(JSON.stringify(detail.content), /overall_effective_oee_percent/u);
   await assert.rejects(executeGet({ dashboard_ids: ["missing"] }), /不存在/u);
   assert.equal(Value.Check(update.parameters, { action: "reset", base_revision: 0 }), false);
-  const snapshots = artifacts.forSession(sessionId);
-  snapshots.createDataSnapshot("metric", (fd) => {
-    writeFileSync(fd, JSON.stringify({ columns: ["value"], rows: [{ value: 42 }], rowCount: 1, truncated: false }));
-    return { columns: ["value"], rowCount: 1 };
-  });
+  const data = { columns: ["value"], rows: [{ value: 42 }] };
   store.setActiveDashboard(sessionId, "overview");
   for (const dashboard_id of ["default", "overview"]) {
     const events: unknown[] = [];
-    const result = await update.execute("write", { dashboard_id, action: "upsert", base_revision: 0, snapshot: "metric",
+    const result = await update.execute("write", { dashboard_id, action: "upsert", base_revision: 0, data,
       date_range: { start: null, end: null }, widget: { id: "shared-metric", kind: "kpi", title: dashboard_id,
         subtitle: "", encoding: { value: "value", comparison: null }, format: { unit: "", precision: 2 },
         metric_definition: "测试数据", warnings: [] } } as never, undefined, (event) => events.push(event), undefined as never);

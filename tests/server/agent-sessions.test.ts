@@ -118,7 +118,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.match(piSession.systemPrompt, /Dashboard 使用说明:/u);
   assert.match(
     piSession.systemPrompt,
-    /标准流程为 get_dashboard → 查询并保存快照 → update_dashboard/u,
+    /标准流程为 get_dashboard → 查询并保存快照 → 基于快照计算或提取最终图表数据 → update_dashboard/u,
   );
   assert.match(piSession.systemPrompt, /kpi 用于单值,line 用于有序趋势/u);
   assert.match(piSession.systemPrompt, /format\.unit 只是显示后缀,不会缩放数值/u);

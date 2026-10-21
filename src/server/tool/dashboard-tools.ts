@@ -4,6 +4,8 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import {
   DASHBOARD_ID_PATTERN,
+  MAX_DASHBOARD_FILE_BYTES,
+  MAX_DASHBOARD_ROWS_PER_WIDGET,
   MAX_DASHBOARD_SERIES,
   MAX_DASHBOARD_TABLE_COLUMNS,
   MAX_DASHBOARD_WIDGETS,
@@ -49,6 +51,12 @@ const widgetId = Type.String({
   pattern: "^[a-z][a-z0-9-]{0,63}$",
 });
 const columnName = Type.String({ minLength: 1, maxLength: 80 });
+const dashboardData = Type.Object({
+  columns: Type.Array(columnName, { minItems: 1, uniqueItems: true }),
+  rows: Type.Array(Type.Record(Type.String(), Type.Union([
+    Type.String(), Type.Number(), Type.Null(),
+  ])), { maxItems: MAX_DASHBOARD_ROWS_PER_WIDGET }),
+});
 const series = Type.Array(Type.Object({
   name: Type.String({ minLength: 1, maxLength: 80 }),
   column: columnName,
@@ -65,7 +73,7 @@ const commonWidgetProperties = {
   format: Type.Object({
     unit: Type.String({
       maxLength: 24,
-      description: "Display suffix only; it never rescales snapshot values. For unit %, provide percentage points (56.65 means 56.65%), not a 0-1 ratio.",
+      description: "Display suffix only; it never rescales data values. For unit %, provide percentage points (56.65 means 56.65%), not a 0-1 ratio.",
     }),
     precision: Type.Integer({ minimum: 0, maximum: 8,
       description: "Compatibility field; use 2. Display always keeps integers unchanged and rounds fractional values half away from zero to exactly two decimal places, regardless of this field.",
@@ -154,7 +162,14 @@ const updateParameters = Type.Object({
     Type.Literal("reset"),
   ]),
   base_revision: revision,
-  snapshot: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+  data: Type.Optional(Type.Union([
+    dashboardData,
+    Type.String({
+      minLength: 2,
+      maxLength: MAX_DASHBOARD_FILE_BYTES,
+      description: "JSON-encoded chart data accepted when the model server stringifies nested objects.",
+    }),
+  ])),
   date_range: Type.Optional(Type.Union([
     dateRange,
     Type.String({
@@ -267,7 +282,7 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
       if (!ids.length || new Set(ids).size !== ids.length) throw new DashboardInputError("看板 ID 列表必须非空且不重复");
       const summaries = ids.map((id) => {
         const item = states.find((item) => item.id === id);
-        if (!item) throw new DashboardInputError("会话中不存在看板：" + id);
+        if (!item) throw new DashboardInputError("会话中不存在看板:" + id);
         const state = item.state;
         return {
           id, title: item.title, revision: state.revision, dateRange: state.dateRange, dataAsOf: state.dataAsOf,
@@ -292,18 +307,21 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
     name: "update_dashboard",
     label: "更新指标看板",
     description:
-      "Atomically update exactly one bound dashboard selected by required dashboard_id. Revisions and widget IDs are local to that dashboard. For multiple dashboards, call this tool sequentially for each target. For upsert, reference one complete session snapshot created by execute_sql.save_as or measure_loss and map snapshot columns into a controlled widget. Never copy database rows into this call and never provide ECharts options, HTML, functions, or styles. For an overview, set encoding.label and encoding.description to match its actual metric, period, and aggregation; never assume seven days or OEE. Use SQL or the standard loss query to aggregate and sort the snapshot first. format.unit is a suffix only and never rescales values: with %, the snapshot must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
-    promptSnippet: "按 dashboard_id、快照名和列映射原子更新指定会话看板",
+      "Atomically update exactly one bound dashboard selected by required dashboard_id. Revisions and widget IDs are local to that dashboard. For multiple dashboards, call this tool sequentially for each target. For upsert, provide data with columns and object rows containing the final chart values and map those columns into a controlled widget. Compute metrics with SQL first and save a complete session snapshot using execute_sql.save_as or a business tool such as measure_loss. Reuse that snapshot for further calculations through code_interpreter(snapshot). Only copy a snapshot preview when it contains the complete result; otherwise extract the chart data from the full snapshot or aggregate/filter and save a complete visible result. Preserve numeric precision and nulls. This tool validates presentation data only and never reads or validates snapshots; the snapshot parameter has been removed. Never provide ECharts options, HTML, functions, or styles. For an overview, set encoding.label and encoding.description to match its actual metric, period, and aggregation. format.unit is a suffix only: with %, data must contain percentage points such as 56.65, not ratio 0.5665. Use get_dashboard immediately before this tool and pass its revision as base_revision.",
+    promptSnippet: "按 dashboard_id、最终图表数据和列映射原子更新指定会话看板",
     executionMode: "sequential",
     parameters: updateParameters,
     async execute(_toolCallId, params, signal, onUpdate): Promise<AgentToolResult<DashboardToolDetails>> {
       signal?.throwIfAborted();
+      if ("snapshot" in params) {
+        throw new DashboardInputError("update_dashboard 已移除 snapshot 参数,请将基于快照计算的最终图表数据传入 data(columns、rows)");
+      }
       const targetId = checked(dashboardId, params.dashboard_id, "dashboard_id");
       dashboard.loadOrPreview(sessionId, targetId);
       const revisionNumber = baseRevision(params.base_revision);
       let command: DashboardCommand;
       if (params.action === "upsert") {
-        const snapshot = required(params.snapshot, "snapshot");
+        const data = checked(dashboardData, decodedJson(required(params.data, "data"), "data"), "data");
         const decodedRange = checked(
           dateRange,
           decodedJson(required(params.date_range, "date_range"), "date_range"),
@@ -320,7 +338,7 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
         command = {
           action: "upsert",
           baseRevision: revisionNumber,
-          snapshot: checked(Type.String({ minLength: 1, maxLength: 64 }), snapshot, "snapshot"),
+          data,
           dateRange: decodedRange,
           widget: widgetRequest(decodedWidget, existingSize),
         };

@@ -220,7 +220,8 @@ test("refreshes after persisted updates and between SQL and dashboard tool calls
       sql: "SELECT 77.25 AS oee_pct", save_as: "oee-check",
     } }],
     [{ type: "toolCall", id: "update", name: "update_dashboard", arguments: {
-      dashboard_id: "default", action: "upsert", base_revision: edited.revision, snapshot: "oee-check",
+      dashboard_id: "default", action: "upsert", base_revision: edited.revision,
+      data: { columns: ["oee_pct"], rows: [{ oee_pct: 77.25 }] },
       date_range: { start: "2026-09-15", end: "2026-09-15" },
       widget: {
         id: "oee-check", kind: "kpi", title: "OEE 验证值", subtitle: "测试快照",

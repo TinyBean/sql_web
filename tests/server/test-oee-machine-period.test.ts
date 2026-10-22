@@ -12,14 +12,14 @@ function fixture(t: TestContext) {
   db.exec(readFileSync("scripts/database/schema.sql", "utf8"));
   t.after(() => db.close());
   const a = db.prepare(`INSERT INTO oee_availability
-    (tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,'Test(Normal)',?,?,100)`);
+    (tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)`);
   const d = db.prepare(`INSERT INTO oee_dut_utilization
     (machine_id,lot_id,step_id,date,in_qty,out_qty,dut_num,test_stage,touchdown_index,start_time,end_time)
     VALUES(?,?,?,?,'10','8','20','1st',?,?,?)`);
   return {
     db,
-    a(machine: string, day: string, kind = "MT", lot = "P1") {
-      a.run(machine, lot, kind === "MT" ? "5000" : "7000", day);
+    a(machine: string, day: string, kind = "MT", lot = "P1", seconds = 100, state = "Test(Normal)") {
+      a.run(machine, lot, state, kind === "MT" ? "5000" : "7000", day, seconds);
     },
     d(machine: string, day: string, seconds: number | null, td: string | null = "1", kind = "MT", lot = "P1") {
       const start = "2026-01-01T23:59:59.500Z";
@@ -36,6 +36,85 @@ function closeTo(actual: unknown, expected: number) {
   assert.equal(typeof actual, "number");
   assert.ok(Math.abs(Number(actual) - expected) < 1e-12, `${actual} != ${expected}`);
 }
+
+test("NoWIP uses period state totals in every grain and in type-specific and merged rankings", (t) => {
+  const f = fixture(t), start = "2026-01-04", end = "2026-01-05";
+  for (const [day, kind, running, noWip, idle, pm, noWipState] of [
+    [start, "MT", 50, 10, 15, 25, "IDLE_NoWIP"],
+    [end, "MT", 30, 90, 60, 120, "IDLE_NoWIP(NoTask)"],
+    [start, "ST", 20, 20, 30, 30, "IDLE_NoTask(xCurrentLot)"],
+  ] as const) {
+    f.a("A", day, kind, "P1", running);
+    f.a("A", day, kind, "None", noWip, noWipState);
+    f.a("A", day, kind, "X1", idle, "IDLE");
+    f.a("A", day, kind, "P1", pm, "PM");
+    f.d("A", day, 10, "1", kind);
+    for (const lot of ["Q1", "E1"]) f.a("A", day, kind, lot, 100_000, noWipState);
+  }
+  for (const grain of ["day", "week", "month", "quarter"] as const) {
+    const rows = f.rows(start, end, grain);
+    assert.equal(rows.length, grain === "day" ? 3 : 2);
+    for (const row of rows) {
+      const [total, running, noWip, idle] = row["kind"] === "ST" ? [100, 20, 20, 50]
+        : grain !== "day" ? [400, 80, 100, 175]
+        : row["day"] === start ? [100, 50, 10, 25] : [300, 30, 90, 150];
+      assert.equal(row["available_seconds"], total);
+      assert.equal(row["idle_seconds"], idle);
+      assert.equal(row["idle_no_wip_seconds"], noWip);
+      closeTo(row["idle_no_wip"], noWip / total);
+      const effective = running / total + (noWip / total) / (2 - (noWip + running) / total);
+      closeTo(row["effective_availability"], effective);
+      closeTo(row["test_oee"], running / total * .4);
+      closeTo(row["effective_oee"], effective * .4);
+    }
+  }
+  const byKind = f.db.prepare(machinePeriodSql({ start, end }, true)).all();
+  const mt = byKind.find((row) => row["kind"] === "MT")!;
+  const st = byKind.find((row) => row["kind"] === "ST")!;
+  closeTo(mt["effective_availability"], (.2 + 5 / 31) * 100);
+  closeTo(mt["effective_oee"], (.2 + 5 / 31) * 40);
+  closeTo(st["effective_availability"], 32.5);
+  closeTo(st["effective_oee"], 13);
+  const merged = f.db.prepare(machinePeriodSql({ start, end })).get()!;
+  assert.equal(merged["kind"], "MT");
+  closeTo(merged["availability"], 20);
+  closeTo(merged["effective_availability"], (.2 + 2 / 13) * 100);
+  closeTo(merged["effective_oee"], (.2 + 2 / 13) * 40);
+});
+
+test("NoWIP period calculations preserve zero, missing DUT and undefined denominators", (t) => {
+  const f = fixture(t), day = "2026-01-04";
+  for (const [machine, running, noWip, otherIdle, pm, expected] of [
+    ["NO-NOWIP", 50, 0, 50, 0, .5],
+    ["ALL-NOWIP", 0, 100, 0, 0, 1],
+    ["ZERO-TOTAL", 0, 0, 0, 0, null],
+    ["ZERO-EFFECTIVE", 100, 100, 0, -100, null],
+    ["NO-DUT", 50, 10, 15, 25, 4 / 7],
+  ] as const) {
+    f.a(machine, day, "MT", "P1", running);
+    f.a(machine, day, "MT", "None", noWip, "IDLE_NoWIP");
+    f.a(machine, day, "MT", "X1", otherIdle, "IDLE");
+    f.a(machine, day, "MT", "P1", pm, "PM");
+    if (machine !== "NO-DUT") f.d(machine, day, 10);
+    for (const grain of ["day", "week", "month", "quarter"] as const) {
+      const row = f.rows(day, day, grain).find((entry) => entry["machine"] === machine)!;
+      assert.equal(row["idle_no_wip_seconds"], noWip);
+      if (machine === "ZERO-TOTAL") assert.equal(row["idle_no_wip"], null);
+      if (expected === null) assert.equal(row["effective_availability"], null);
+      else closeTo(row["effective_availability"], expected);
+      if (expected === null || machine === "NO-DUT") assert.equal(row["effective_oee"], null);
+      else closeTo(row["effective_oee"], expected * .4);
+    }
+    for (const byKind of [true, false]) {
+      const row = f.db.prepare(machinePeriodSql({ start: day, end: day }, byKind)).all()
+        .find((entry) => entry["machine"] === machine)!;
+      if (expected === null) assert.equal(row["effective_availability"], null);
+      else closeTo(row["effective_availability"], expected * 100);
+      if (expected === null || machine === "NO-DUT") assert.equal(row["effective_oee"], null);
+      else closeTo(row["effective_oee"], expected * 40);
+    }
+  }
+});
 
 test("each machine period trims 1% across days at 199/200/400 rows and isolates machines and types", (t) => {
   for (const grain of ["week", "month", "quarter"] as const) {

@@ -65,27 +65,61 @@ test("partial-day state totals produce the expected Availability, Idle and both 
   const f = fixture(t);
   const day = "2026-01-01";
   f.a(day, "Test(Normal)", 21_600);
-  f.a(day, "IDLE", 10_800);
+  f.a(day, "IDLE_NoWIP", 4_320);
+  f.a(day, "IDLE", 6_480);
   f.a(day, "PM", 10_800);
+  const effectiveAvailability = 4 / 7;
+  const effectiveOee = effectiveAvailability * .8 * .9 * .95;
   // Ten equal durations, nine valid TD labels: Test Time is 90%.
   for (let i = 0; i < 10; i++) {
     f.d(day, { input: 80, output: 76, sockets: 100, td: i === 9 ? "0" : "1" });
   }
   assertValues(f.rows(day)[0]!, {
     idle_seconds: 10_800, available_seconds: 43_200, idle: .25, availability: .5,
-    effective_availability: .7, dut_on: .8, performance: .8, test_time_performance: .9,
-    final_yield: .95, daily_test_oee: .342, daily_effective_oee: .4788,
-    period_test_oee: .342, period_effective_oee: .4788,
+    idle_no_wip_seconds: 4_320, idle_no_wip: .1,
+    effective_availability: effectiveAvailability, dut_on: .8, performance: .8, test_time_performance: .9,
+    final_yield: .95, daily_test_oee: .342, daily_effective_oee: effectiveOee,
+    period_test_oee: .342, period_effective_oee: effectiveOee,
     calculable_day_count: 1, effective_calculable_day_count: 1,
   });
   assertValues(f.overview(day), {
-    mt_oee_percent: 34.2, mt_effective_oee_percent: 47.88, overall_effective_oee_percent: 47.88,
-    mt_idle_percent: 25, mt_effective_availability_percent: 70,
+    mt_oee_percent: 34.2, mt_effective_oee_percent: effectiveOee * 100, overall_effective_oee_percent: effectiveOee * 100,
+    mt_idle_percent: 25, mt_effective_availability_percent: effectiveAvailability * 100,
     mt_effective_dut_on_percent: 80, mt_effective_test_time_percent: 90, mt_effective_yield_percent: 95,
   });
   assertValues(f.trends(day)[0]!, {
-    mt_oee_percent: 34.2, mt_idle_percent: 25, mt_effective_availability_percent: 70,
-    mt_effective_oee_percent: 47.88, st_idle_percent: null, st_effective_oee_percent: null,
+    mt_oee_percent: 34.2, mt_idle_percent: 25, mt_effective_availability_percent: effectiveAvailability * 100,
+    mt_effective_oee_percent: effectiveOee * 100, st_idle_percent: null, st_effective_oee_percent: null,
+  });
+});
+
+test("IDLENoWIP counts each normalized NoWIP state and excludes other Idle states", (t) => {
+  const f = fixture(t);
+  ["IDLE_NoWIP", "IDLE_NoWIP(NoTask)", "IDLE_NoTask(xCurrentLot)"].forEach((state, index) => {
+    const day = `2026-01-0${index + 1}`;
+    f.a(day, "Test(Normal)", 50);
+    f.a(day, state, 10, { lot: "None" });
+    for (const other of ["IDLE", "IDLE_WaitARV", "IDLE_NoTask(xAny)", "IDLE_NoTask(xCurrentLotExtra)"]) {
+      f.a(day, other, 5);
+    }
+    f.a(day, "Assistance", 5, { lot: "None" });
+    f.a(day, "HangUp", 5, { lot: "None" });
+    f.a(day, "PM", 10);
+    f.d(day);
+    assertValues(f.rows(day)[0]!, {
+      available_seconds: 100, availability: .5, idle_seconds: 30, idle: .3,
+      idle_no_wip_seconds: 10, idle_no_wip: .1, effective_availability: 4 / 7,
+      daily_test_oee: .2, daily_effective_oee: 4 / 7 * .4,
+    });
+  });
+  const day = "2026-01-04";
+  for (const state of ["IDLE_NoWIP", "IDLE_NoWIP(NoTask)", "IDLE_NoTask(xCurrentLot)"]) {
+    f.a(day, state, 10);
+  }
+  f.d(day);
+  assertValues(f.rows(day)[0]!, {
+    idle_no_wip_seconds: 30, idle_no_wip: 1, availability: 0,
+    effective_availability: 1, daily_test_oee: 0, daily_effective_oee: .4,
   });
 });
 
@@ -120,13 +154,14 @@ test("all components exclude Q/E while non-Yield None and X LOTs remain eligible
     }
     const row = f.rows(day).find((row) => row["kind"] === kind)!;
     assertValues(row, {
-      available_seconds: 36_000, availability: .5, idle: .25, effective_availability: .7,
+      available_seconds: 36_000, availability: .5, idle: .25, effective_availability: .5,
+      idle_no_wip_seconds: 0, idle_no_wip: 0,
       availability_rows: 3, machine_count: 1,
       dut_rows: 4, input_quantity: 150, output_quantity: 80, socket_quantity: 400,
       yield_rows: 2, yield_input_quantity: 100, yield_output_quantity: 80,
       valid_duration_rows: 4, actual_test_seconds: 60, touchdown_count: 2,
       trimmed_mean_test_seconds: 15, dut_on: .375, test_time_performance: .5,
-      final_yield: .8, daily_test_oee: .075, daily_effective_oee: .105,
+      final_yield: .8, daily_test_oee: .075, daily_effective_oee: .075,
     });
   }
   const day = "2026-01-01";
@@ -135,7 +170,7 @@ test("all components exclude Q/E while non-Yield None and X LOTs remain eligible
   const trends = f.trends(day);
   for (const [kind, step] of [["MT", "5000"], ["ST", "7000"]] as const) {
     for (const lot of ["Q1", "E1"]) {
-      for (const state of ["Test(Normal)", "IDLE", "PM"]) {
+      for (const state of ["Test(Normal)", "IDLE", "IDLE_NoWIP", "PM"]) {
         f.a(day, state, 100_000, { machine: kind, step, lot });
       }
       f.a(day, "IDLE", 100_000, { machine: kind + "-EXCLUDED", step, lot });
@@ -165,6 +200,7 @@ test("Q/E-only days have no valid coverage and keep missing metrics null", (t) =
   for (const row of f.rows("2026-01-01", "2026-01-02").filter((row) => row["day"] === "2026-01-02")) {
     assertValues(row, {
       availability_rows: 0, machine_count: 0, available_seconds: null, idle_seconds: null,
+      idle_no_wip_seconds: null, idle_no_wip: null,
       dut_rows: null, yield_rows: null, valid_duration_rows: null, touchdown_count: null,
       actual_test_seconds: null, trimmed_mean_test_seconds: null,
       availability: null, idle: null, effective_availability: null, dut_on: null,
@@ -223,6 +259,7 @@ test("zero state totals are undefined and negative totals are not clamped", (t) 
     assertValues(f.rows(day)[0]!, {
       availability_rows: 2, machine_count: 1, available_seconds: defined ? -100 : 0,
       availability: defined ? -1 : null, idle: defined ? 0 : null,
+      idle_no_wip_seconds: 0, idle_no_wip: defined ? 0 : null,
       effective_availability: defined ? -1 : null, daily_test_oee: defined ? -.4 : null,
       daily_effective_oee: defined ? -.4 : null,
     });
@@ -251,11 +288,12 @@ test("Idle includes non-Q/E LOTs and loss-only machines while preserving PCIe, d
   assert.equal(rows.length, 4);
   assertValues(rows[0]!, {
     availability_rows: 8, machine_count: 3, available_seconds: 329_400,
-    idle_seconds: 286_200, idle: 53 / 61, availability: 8 / 61, effective_availability: 1,
-    daily_test_oee: .4 * 8 / 61, daily_effective_oee: .4,
+    idle_seconds: 286_200, idle: 53 / 61, availability: 8 / 61,
+    idle_no_wip_seconds: 1_800, idle_no_wip: 1 / 183, effective_availability: 8 / 61 + 1 / 341,
+    daily_test_oee: .4 * 8 / 61, daily_effective_oee: .4 * (8 / 61 + 1 / 341),
   });
-  assertValues(rows[1]!, { machine_count: 1, idle: .5, availability: .5, effective_availability: 1 });
-  assertValues(rows[2]!, { machine_count: 1, idle: 2 / 3, availability: 1 / 3, effective_availability: 1 });
+  assertValues(rows[1]!, { machine_count: 1, idle: .5, availability: .5, idle_no_wip: 0, effective_availability: .5 });
+  assertValues(rows[2]!, { machine_count: 1, idle: 2 / 3, availability: 1 / 3, idle_no_wip: 0, effective_availability: 1 / 3 });
   assertValues(rows[3]!, { idle: null, effective_availability: null, daily_effective_oee: null });
 });
 
@@ -264,21 +302,22 @@ test("no IDLE, all IDLE and missing DUT preserve zero and null semantics", (t) =
   f.a("2026-01-01", "Test(Normal)", 43_200); f.d("2026-01-01");
   f.a("2026-01-02", "IDLE", 86_400); f.d("2026-01-02");
   f.a("2026-01-03", "PM", 86_400); f.d("2026-01-03");
-  f.a("2026-01-04", "IDLE", 86_400); // Availability without DUT
+  f.a("2026-01-04", "IDLE_NoWIP", 86_400); // Availability without DUT
   f.d("2026-01-05"); // DUT without Availability
   const mt = f.rows("2026-01-01", "2026-01-06").filter((row) => row["kind"] === "MT");
-  assertValues(mt[0]!, { idle_seconds: 0, idle: 0, effective_availability: 1, daily_effective_oee: .4 });
-  assertValues(mt[1]!, { idle: 1, availability: 0, effective_availability: 1, daily_test_oee: 0, daily_effective_oee: .4 });
+  assertValues(mt[0]!, { idle_seconds: 0, idle: 0, idle_no_wip: 0, effective_availability: 1, daily_effective_oee: .4 });
+  assertValues(mt[1]!, { idle: 1, idle_no_wip: 0, availability: 0, effective_availability: 0, daily_test_oee: 0, daily_effective_oee: 0 });
   assertValues(mt[2]!, { idle: 0, effective_availability: 0, daily_effective_oee: 0 });
-  assertValues(mt[3]!, { idle: 1, effective_availability: 1, daily_effective_oee: null });
+  assertValues(mt[3]!, { idle: 1, idle_no_wip: 1, effective_availability: 1, daily_effective_oee: null });
   for (const row of mt.slice(4)) {
-    assertValues(row, { idle_seconds: null, idle: null, effective_availability: null, daily_effective_oee: null });
+    assertValues(row, { idle_seconds: null, idle: null, idle_no_wip_seconds: null, idle_no_wip: null,
+      effective_availability: null, daily_effective_oee: null });
   }
   for (const row of mt) {
-    assertValues(row, { effective_calculable_day_count: 3, selected_day_count: 6, period_effective_oee: .8 / 3 });
+    assertValues(row, { effective_calculable_day_count: 3, selected_day_count: 6, period_effective_oee: .4 / 3 });
   }
   assertValues(f.overview("2026-01-01", "2026-01-06"), {
-    mt_effective_oee_percent: 80 / 3, mt_effective_calculable_day_count: 3, mt_selected_day_count: 6,
+    mt_effective_oee_percent: 40 / 3, mt_effective_calculable_day_count: 3, mt_selected_day_count: 6,
     mt_availability_day_count: 4, mt_dut_day_count: 3, st_effective_calculable_day_count: 0,
     st_effective_oee_percent: null, st_idle_percent: null, st_effective_availability_percent: null,
   });
@@ -303,7 +342,7 @@ test("Effective OEE remains null when any DUT factor is not calculable", (t) => 
   const cases = [{ sockets: 0 }, { input: 0 }, { seconds: null }, { seconds: 0 }, { td: null }];
   cases.forEach((options, index) => {
     const day = `2026-01-0${index + 1}`;
-    f.a(day, "IDLE", 86_400); f.d(day, options);
+    f.a(day, "IDLE_NoWIP", 86_400); f.d(day, options);
     assertValues(f.rows(day)[0]!, {
       effective_availability: 1, daily_test_oee: null, daily_effective_oee: null,
       effective_calculable_day_count: 0, period_effective_oee: null,
@@ -320,11 +359,12 @@ test("zero effective denominator only excludes Effective OEE, while negative and
     { day: "2026-01-04", running: 43_200, idle: -21_600, availability: .5, effective: 5 / 14 },
   ];
   for (const entry of cases) {
-    f.a(entry.day, "Test(Normal)", entry.running); f.a(entry.day, "IDLE", entry.idle);
+    f.a(entry.day, "Test(Normal)", entry.running); f.a(entry.day, "IDLE_NoWIP", entry.idle);
     // Negative source loss time exercises anomalous ratios with the actual total denominator.
     f.a(entry.day, "PM", 86_400 - entry.running - entry.idle); f.d(entry.day);
     assertValues(f.rows(entry.day)[0]!, {
-      idle_seconds: entry.idle, availability: entry.availability, effective_availability: entry.effective,
+      idle_seconds: entry.idle, idle_no_wip_seconds: entry.idle, idle_no_wip: entry.idle / 86_400,
+      availability: entry.availability, effective_availability: entry.effective,
       daily_test_oee: entry.availability * .4,
       daily_effective_oee: entry.effective === null ? null : entry.effective * .4,
       calculable_day_count: 1, effective_calculable_day_count: entry.effective === null ? 0 : 1,
@@ -338,18 +378,18 @@ test("periods and overview components use separate Effective OEE samples and equ
   const end = "2026-01-04";
   // Two machines on the first day, one on the second: the two days still have equal weight.
   for (const machine of ["M1", "M2"]) {
-    f.a(start, "Test(Normal)", 43_200, { machine }); f.a(start, "IDLE", 21_600, { machine });
+    f.a(start, "Test(Normal)", 43_200, { machine }); f.a(start, "IDLE_NoWIP", 21_600, { machine });
     f.a(start, "PM", 21_600, { machine });
   }
   f.d(start, { input: 80, output: 76, sockets: 100 }); // Effective OEE 53.2%, original 38%
-  f.a("2026-01-02", "Test(Normal)", 21_600); f.a("2026-01-02", "IDLE", 21_600);
+  f.a("2026-01-02", "Test(Normal)", 21_600); f.a("2026-01-02", "IDLE_NoWIP", 21_600);
   f.a("2026-01-02", "PM", 43_200);
   f.d("2026-01-02"); // Effective OEE 1/6, original 10%
-  f.a("2026-01-03", "Test(Normal)", 86_400); f.a("2026-01-03", "IDLE", 86_400);
+  f.a("2026-01-03", "Test(Normal)", 86_400); f.a("2026-01-03", "IDLE_NoWIP", 86_400);
   f.a("2026-01-03", "PM", -86_400); // Actual total 86400, effective denominator zero.
   f.d("2026-01-03", { input: 20, output: 2, sockets: 100 });
   f.d("2026-01-03", { input: 20, output: 2, sockets: 100, td: "0" }); // Original 1%, effective undefined
-  f.a(start, "IDLE", 86_400, { machine: "ST", step: "7000" });
+  f.a(start, "IDLE_NoWIP", 86_400, { machine: "ST", step: "7000" });
   f.d(start, { kind: "ST" }); // ST Effective OEE 40%
   const expectedMt = (.532 + 1 / 6) / 2;
   const overview = f.overview(start, end);

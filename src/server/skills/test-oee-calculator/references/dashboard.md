@@ -53,7 +53,7 @@ OEE 保持 `AVG(日 Availability × 日 Performance (DUT-On) × 日 Performance 
 | Performance (Test Time) | `{p}_effective_test_time_percent` |
 | Yield | `{p}_effective_yield_percent` |
 
-四个乘积组成项映射到 `encoding.gauges[].column`；Idle 是用于解释 Effective Availability 的辅助指标，不额外乘入 OEE。所有这些概览字段仅平均对应类型或合并范围中 **日 Effective OEE 非 NULL** 的行。Performance 和 Yield 的日公式没有改变，独立字段用于保证平均样本一致；不能借用原 Test OEE 概览的组成项均值。
+四个乘积组成项映射到 `encoding.gauges[].column`；Idle 保留原始状态包含 IDLE 的总空闲占比，作为辅助指标，不额外乘入 OEE。Effective Availability 使用 `Availability + IDLENoWIP / (1 + (1 - IDLENoWIP - Availability))`，其中 IDLENoWIP 为派生状态 IDLE_NoWIP 的秒数占全部状态秒数的比率，不能用总 Idle 替代。可查询日明细的 `idle_no_wip_seconds` 和 `idle_no_wip` 核对组成项。所有这些概览字段仅平均对应类型或合并范围中 **日 Effective OEE 非 NULL** 的行。Performance 和 Yield 的日公式没有改变，独立字段用于保证平均样本一致；不能借用原 Test OEE 概览的组成项均值。
 
 分类覆盖使用 `{mt|st}_effective_calculable_day_count`，合并覆盖使用 `effective_calculable_day_type_count`。日期、Availability 和 DUT 覆盖计数复用原字段。新分母为零时，Effective OEE 覆盖可能少于 Test OEE；覆盖不足须明确说明。
 

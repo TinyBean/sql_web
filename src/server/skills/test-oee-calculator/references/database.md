@@ -70,7 +70,7 @@ CREATE TABLE oee_dut_utilization (
 |---|---|---|
 | Availability | `tool_name` | 原始机台号，关联 DUT 的 `machine_id` |
 | Availability | `lot_id` | 批次号，用于基础 Q/E 排除及状态分类；不应用 Yield 白名单 |
-| Availability | `final_state` | 原始机台状态，派生 Machine_Running，并用于 Idle 判定 |
+| Availability | `final_state` | 原始机台状态，派生 Machine_Running 和 IDLE_NoWIP，并用于总 Idle 判定 |
 | Availability | `step` | MT/ST 分类步骤 |
 | Availability | `time_span` | 状态时长，单位秒 |
 | DUT | `machine_id` | 原始机台号 |

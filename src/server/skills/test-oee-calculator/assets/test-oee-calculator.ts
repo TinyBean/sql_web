@@ -623,17 +623,20 @@ availability_daily AS (
     MAX(is_partial_period) AS is_partial_period,
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END) AS machine_running_seconds,
     SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
+    SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END) AS idle_no_wip_seconds,
     SUM(state_seconds) AS available_seconds,
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
       / NULLIF(SUM(state_seconds), 0) AS availability,
     SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END)
-      / NULLIF(SUM(state_seconds), 0) AS idle
+      / NULLIF(SUM(state_seconds), 0) AS idle,
+    SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END)
+      / NULLIF(SUM(state_seconds), 0) AS idle_no_wip
   FROM availability_classified
   WHERE kind IN ('MT','ST')
   GROUP BY day, machine, kind
 ),
 availability_effective AS (
-  SELECT *, availability + idle / NULLIF(1 + (1 - idle - availability), 0) AS effective_availability
+  SELECT *, availability + idle_no_wip / NULLIF(1 + (1 - idle_no_wip - availability), 0) AS effective_availability
   FROM availability_daily
 ),
 ${getTestOeeDutCtes(startDate, endDate, "machine_day_kind", grain)},
@@ -740,6 +743,7 @@ availability_daily AS (
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
       AS machine_running_seconds,
     SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
+    SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END) AS idle_no_wip_seconds,
     SUM(state_seconds) AS available_seconds,
     CASE
       WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
@@ -750,7 +754,12 @@ availability_daily AS (
       WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
       ELSE SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END)
         / SUM(state_seconds)
-    END AS idle
+    END AS idle,
+    CASE
+      WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
+      ELSE SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END)
+        / SUM(state_seconds)
+    END AS idle_no_wip
   FROM availability_classified
   WHERE kind IN ('MT','ST')
   GROUP BY day, kind
@@ -759,9 +768,9 @@ availability_effective AS (
   SELECT
     *,
     CASE
-      WHEN availability IS NULL OR idle IS NULL
-        OR (1 + (1 - idle - availability))=0 THEN NULL
-      ELSE availability + idle / (1 + (1 - idle - availability))
+      WHEN availability IS NULL OR idle_no_wip IS NULL
+        OR (1 + (1 - idle_no_wip - availability))=0 THEN NULL
+      ELSE availability + idle_no_wip / (1 + (1 - idle_no_wip - availability))
     END AS effective_availability
   FROM availability_daily
 ),
@@ -806,6 +815,7 @@ daily_results AS (
     a.machine_count,
     a.machine_running_seconds,
     a.idle_seconds,
+    a.idle_no_wip_seconds,
     a.available_seconds,
     d.dut_rows,
     d.yield_rows,
@@ -821,6 +831,7 @@ daily_results AS (
     d.trimmed_mean_test_seconds,
     a.availability,
     a.idle,
+    a.idle_no_wip,
     a.effective_availability,
     d.dut_on,
     d.test_time_performance,
@@ -845,6 +856,7 @@ SELECT
   COALESCE(r.machine_count,0) AS machine_count,
   r.machine_running_seconds,
   r.idle_seconds,
+  r.idle_no_wip_seconds,
   r.available_seconds,
   r.dut_rows,
   r.yield_rows,
@@ -860,6 +872,7 @@ SELECT
   r.trimmed_mean_test_seconds,
   r.availability,
   r.idle,
+  r.idle_no_wip,
   r.effective_availability,
   r.dut_on,
   r.dut_on AS performance,

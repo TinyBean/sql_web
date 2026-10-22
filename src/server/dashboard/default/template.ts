@@ -41,8 +41,8 @@ export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): D
     encoding: { value, label, description: WAITING, gauges },
     format: { unit: "%", precision: 2 },
     metricDefinition: `${kind} ${label} = AVG(${kind} 日 ${label})x100;日 ${label} = ${availability}xPerformance (DUT-On)xPerformance (Test Time)xYield。` +
-      (effective ? "Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))。" : "") +
-      `五项指标分别对该类型 ${label} 可计算日等权平均;OEE 不由组成项的平均值再次相乘。所有指标先排除大写 Q/E 前缀 LOT。Availability 和 Idle 使用过滤后全部状态秒数作分母;仅 Yield 再筛选 P/M/R/A/F/L 前缀 LOT。沿用 PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
+      (effective ? "Effective Availability = Availability + IDLENoWIP / (1 + (1 - IDLENoWIP - Availability))。IDLENoWIP 为归类后 IDLE_NoWIP 的时长占比,包含 IDLE_NoWIP、IDLE_NoWIP(NoTask) 和 IDLE_NoTask(xCurrentLot);总 Idle 仍按原始状态包含 IDLE 统计。" : "") +
+      `五项指标分别对该类型 ${label} 可计算日等权平均;OEE 不由组成项的平均值再次相乘。所有指标先排除大写 Q/E 前缀 LOT。${effective ? "Availability、Idle 和 IDLENoWIP" : "Availability 和 Idle"} 使用过滤后全部状态秒数作分母;仅 Yield 再筛选 P/M/R/A/F/L 前缀 LOT。沿用 PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
   };
 }
 

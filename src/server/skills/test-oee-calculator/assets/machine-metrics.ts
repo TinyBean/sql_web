@@ -10,11 +10,13 @@ availability_merged AS (
       >= SUM(CASE WHEN kind='ST' THEN state_seconds ELSE 0 END) THEN 'MT' ELSE 'ST' END AS kind,
     SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
       / NULLIF(SUM(state_seconds), 0) AS availability,
-    SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) / NULLIF(SUM(state_seconds), 0) AS idle
+    SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) / NULLIF(SUM(state_seconds), 0) AS idle,
+    SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END)
+      / NULLIF(SUM(state_seconds), 0) AS idle_no_wip
   FROM availability_classified WHERE kind IN ('MT','ST') GROUP BY machine
 ),
 availability_merged_effective AS (
-  SELECT *, availability + idle / NULLIF(1 + (1 - idle - availability), 0) AS effective_availability
+  SELECT *, availability + idle_no_wip / NULLIF(1 + (1 - idle_no_wip - availability), 0) AS effective_availability
   FROM availability_merged
 ),
 dut_coverage AS (

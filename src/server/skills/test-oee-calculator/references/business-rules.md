@@ -34,7 +34,7 @@ Availability 使用 tool_name/step；DUT 使用 machine_id/step_id。两表统�
 | Temp_Up(Normal Retest)，LOT 为 None | Other |
 | 其余状态 | Machine_Running |
 
-默认分支包含 Retest(Golden)、RMS_Initialize(Golden) 和含 Golden Retest 的状态。Idle 指标另按原始 final_state 包含大写子串 IDLE 判断，不使用派生状态。
+默认分支包含 Retest(Golden)、RMS_Initialize(Golden) 和含 Golden Retest 的状态。Idle 指标另按原始 final_state 包含大写子串 IDLE 判断，不使用派生状态。IDLENoWIP 使用派生状态 IDLE_NoWIP，仅计入原始状态 IDLE_NoWIP、IDLE_NoWIP(NoTask) 和 IDLE_NoTask(xCurrentLot)。
 
 ## 公式与粒度
 
@@ -50,7 +50,8 @@ Availability 使用 tool_name/step；DUT 使用 machine_id/step_id。两表统�
 ```text
 Availability = Machine_Running 状态秒数 / 全部状态秒数
 Idle = 原始状态包含 IDLE 的状态秒数 / 全部状态秒数
-Effective Availability = Availability + Idle / (1 + (1 - Idle - Availability))
+IDLENoWIP = 派生状态为 IDLE_NoWIP 的状态秒数 / 全部状态秒数
+Effective Availability = Availability + IDLENoWIP / (1 + (1 - IDLENoWIP - Availability))
 Performance (DUT-On) = SUM(IN_QTY) / SUM(DUT_NUM)
 Performance (Test Time) = TrimmedMean(测试秒数, 截尾参数) × SUM(TD_Label) / SUM(测试秒数)
 Yield = SUM(Yield 合格 OUT_QTY) / SUM(Yield 合格 IN_QTY)
@@ -69,7 +70,7 @@ Effective OEE = Effective Availability × DUT-On × Test Time × Yield
 ## 输出与覆盖
 
 - 全类型 daily 为每个所选业务日生成 MT、ST 两行，包括缺数据日。availability_rows、machine_count、dut_rows、yield_rows 用于检查来源；machine_count 不参与 Availability 分母。
-- available_seconds 是全部有效状态秒数，idle_seconds 是其中原始状态包含 IDLE 的秒数。input_quantity/output_quantity/socket_quantity 是共享 DUT 总和；Yield 使用独立的 yield_input_quantity/yield_output_quantity。
+- available_seconds 是全部有效状态秒数，idle_seconds 是其中原始状态包含 IDLE 的秒数。idle_no_wip_seconds 是其中派生状态为 IDLE_NoWIP 的秒数，idle_no_wip 是对应占比（IDLENoWIP），用于 Effective Availability；总 Idle 不能替代 IDLENoWIP。以上指标使用相同的基础筛选及全部状态秒数分母，以原始比率参与计算。input_quantity/output_quantity/socket_quantity 是共享 DUT 总和；Yield 使用独立的 yield_input_quantity/yield_output_quantity。
 - valid_duration_rows、trimmed_rows_each_tail、trimmed_mean_test_seconds、touchdown_count、actual_test_seconds 是 Test Time 审计组成项。
 - 全类型 selected_day_count 与 calculable_day_count/effective_calculable_day_count 分别表示所选日数和实际平均日数；dut_rows 为 NULL 表示该 Availability 日类型没有匹配 DUT。
 - 单机台 period_label、period_start、period_end 表示查询范围内周期标签及边界，is_partial_period 标识边界不完整；availability_days/dut_days 为实际覆盖日数，不从边界天数推算。不补缺机台周期。

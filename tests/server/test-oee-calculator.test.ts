@@ -563,7 +563,7 @@ test("publishes four Skill tools and preserves default SQL views and numeric sca
     if (view === "overview") {
       assert.equal(rows.length, 1);
       assert.ok(Math.abs(Number(rows[0]!["mt_oee_percent"]) - 35) < 1e-12);
-      assert.ok(Math.abs(Number(rows[0]!["mt_effective_oee_percent"]) - 45) < 1e-12);
+      assert.ok(Math.abs(Number(rows[0]!["mt_effective_oee_percent"]) - 35) < 1e-12);
       assert.equal(rows[0]!["mt_selected_day_count"], 7);
       assert.equal(rows[0]!["mt_calculable_day_count"], 2);
     } else {

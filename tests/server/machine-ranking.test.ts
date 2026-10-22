@@ -39,6 +39,28 @@ function fixture(t: TestContext) {
 }
 const range = { start_date: "2026-01-01", end_date: "2026-01-03" };
 
+test("Effective Availability and Effective OEE rank by NoWIP rather than total Idle", (t) => {
+  const { a, d, queries, artifacts } = fixture(t);
+  a("ADH001", 5, "Test(Normal)"); a("ADH001", 1, "IDLE_NoWIP(NoTask)"); a("ADH001", 4, "IDLE");
+  a("ADH002", 4, "Test(Normal)"); a("ADH002", 6, "PM");
+  a("ADH003", 10, "IDLE_NoTask(xCurrentLot)");
+  a("ADH004", 5, "Test(Normal)"); a("ADH004", 5, "IDLE");
+  for (const machine of ["ADH001", "ADH002", "ADH003", "ADH004"]) d(machine);
+  const runtime = createOeeSkillRuntime(queries, artifacts);
+  for (const metric of ["effective_availability", "effective_oee"] as const) {
+    const measurement = rankMachines(runtime, { ...range, kind: "MT", metric });
+    const view = machineRankingView(measurement);
+    assert.equal(view.machine_count, 4);
+    assert.deepEqual(view.top3.map((row) => row.machine), ["ADH002", "ADH004", "ADH001"]);
+    const expected = [.4, .5, 4 / 7, 1].map((value) => value * (metric === "effective_oee" ? 40 : 100));
+    for (const [index, value] of expected.entries()) {
+      const machine = ["ADH002", "ADH004", "ADH001", "ADH003"][index]!;
+      const row = measurement.rows.find((entry) => entry["machine"] === machine)!;
+      assert.ok(Math.abs(Number(row["metric_value"]) - value) < 1e-10);
+    }
+  }
+});
+
 test("Skill ranking needs runtime resources and binds each task to its own snapshots", async (t) => {
   const { directory, a, queries, artifacts } = fixture(t);
   a("ADH001", 4);

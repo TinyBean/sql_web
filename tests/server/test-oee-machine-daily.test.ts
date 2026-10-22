@@ -147,6 +147,8 @@ test("machine-day joins require day, machine and type and preserve whole end-day
   assert.equal(mt["available_seconds"], 100);
   assert.equal(mt["availability"], .4);
   assert.equal(mt["idle"], .2);
+  assert.equal(mt["idle_no_wip_seconds"], 20);
+  assert.equal(mt["idle_no_wip"], .2);
   closeTo(mt["effective_availability"], .4 + .2 / 1.4);
   closeTo(mt["daily_test_oee"], .16);
   closeTo(mt["daily_effective_oee"], (.4 + .2 / 1.4) * .4);

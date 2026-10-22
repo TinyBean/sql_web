@@ -23,7 +23,7 @@ const validSession = {
     "example_skill__calculate",
   ],
   streaming: false,
-  dashboards: [{ id: "default", title: "Test OEE 综合看板", state: {
+  dashboards: [{ id: "default", title: "OEE综合看板", state: {
     schemaVersion: 1,
     revision: 0,
     dataAsOf: "2026-09-08T00:00:00.000Z",

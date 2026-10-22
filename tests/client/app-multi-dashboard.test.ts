@@ -9,7 +9,7 @@ import type { SerializedSession, SessionSummary } from "../../src/shared/contrac
 import type { SessionDashboard } from "../../src/shared/dashboard.ts";
 
 function board(id: string, value: number): SessionDashboard {
-  return { id, title: id === "default" ? "完整看板" : "概览看板", state: {
+  return { id, title: id === "default" ? "OEE综合看板" : "OEE分析看板", state: {
     schemaVersion: 1, revision: 0, dataAsOf: "2026-10-01T00:00:00Z", dateRange: { start: "2026-10-01", end: "2026-10-01" },
     widgets: [{ id: "same-card", title: id + " metric", kind: "kpi", subtitle: "",
       data: [{ value }], size: "small", encoding: { value: "value", comparison: null },
@@ -36,7 +36,7 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   const { document } = browser;
   browser.matchMedia = () => ({ matches: true }) as MediaQueryList;
   const viewport = { left: 0, top: 0 };
-  const maxScrollTop = () => document.querySelector("[role='tab'][aria-selected='true']")?.getAttribute("data-dashboard-id") === "overview" ? 300 : 2000;
+  const maxScrollTop = () => document.querySelector("[role='tab'][aria-selected='true']")?.getAttribute("data-dashboard-id") === "analysis" ? 300 : 2000;
   Object.defineProperties(browser, {
     scrollX: { configurable: true, get: () => viewport.left },
     scrollY: { configurable: true, get: () => Math.min(viewport.top, maxScrollTop()) },
@@ -63,7 +63,7 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   expose("HTMLFormElement", document.querySelector("#composer")!.constructor);
   expose("HTMLTextAreaElement", document.querySelector("#questionInput")!.constructor);
   let session: SerializedSession = { id: "session-multi", title: "多看板会话", ownerAccount: "alice", readOnly: false,
-    dashboardIds: ["default", "overview"], dashboards: [board("default", 10), board("overview", 20)],
+    dashboardIds: ["default", "analysis"], dashboards: [board("default", 10), board("analysis", 20)],
     model: null, tools: [], streaming: false, messages: [{ id: "ready", role: "assistant", text: "准备完成" }] };
   const single: SerializedSession = { ...session, id: "session-single", title: "单看板会话", dashboardIds: ["default"], dashboards: [board("default", 30)] };
   let posted: { dashboardId: string; message: string } | undefined;
@@ -93,6 +93,9 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   const tab = (id: string) => document.querySelector(`[role='tab'][data-dashboard-id='${id}']`) as unknown as HTMLButtonElement;
   const grid = document.querySelector("#dashboardGrid")!;
   await waitFor(() => selected() === "default", "first board not selected");
+  assert.equal(tab("default").textContent, "OEE综合看板");
+  assert.equal(tab("analysis").textContent, "OEE分析看板");
+  assert.equal(document.querySelector("#dashboardTitle")!.textContent, "OEE综合看板");
   assert.equal(document.querySelector("#dashboardTabs")!.hasAttribute("hidden"), false);
   assert.match(grid.textContent, /default metric/u);
   assert.equal(document.querySelector("#dashboardEditButton"), null);
@@ -100,15 +103,16 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   viewport.left = 60; viewport.top = 1400;
   const next = new browser.Event("keydown", { bubbles: true, cancelable: true });
   Object.defineProperty(next, "key", { value: "ArrowRight" }); tab("default").dispatchEvent(next);
-  await waitFor(() => selected() === "overview", "keyboard navigation failed");
-  assert.equal(tab("overview").getAttribute("tabindex"), "0");
+  await waitFor(() => selected() === "analysis", "keyboard navigation failed");
+  assert.equal(document.querySelector("#dashboardTitle")!.textContent, "OEE分析看板");
+  assert.equal(tab("analysis").getAttribute("tabindex"), "0");
   assert.deepEqual(viewport, { left: 0, top: 0 }, "a board's first visit starts at the top");
   viewport.left = 15; viewport.top = 220;
   tab("default").click();
   await waitFor(() => selected() === "default", "default board not restored");
   assert.deepEqual(viewport, { left: 60, top: 1400 }, "the long board must retain its position after visiting a short board");
-  tab("overview").click();
-  await waitFor(() => selected() === "overview", "overview board not restored");
+  tab("analysis").click();
+  await waitFor(() => selected() === "analysis", "analysis board not restored");
   assert.deepEqual(viewport, { left: 15, top: 220 }, "each board must restore its own viewport");
   tab("default").click();
   await waitFor(() => selected() === "default", "default board not selected before submitting");
@@ -116,14 +120,14 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   input.value = "更新当前看板";
   document.querySelector("#composer")!.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
   await waitFor(() => !!controller, "chat stream not opened");
-  tab("overview").click();
-  await waitFor(() => selected() === "overview", "could not switch during chat");
+  tab("analysis").click();
+  await waitFor(() => selected() === "analysis", "could not switch during chat");
   assert.equal(posted?.dashboardId, "default");
   const send = (event: string, data: unknown) => controller!.enqueue(new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
   send("turn_start", { turn: 0 });
-  const overview = { ...board("overview", 88).state, revision: 2 };
-  send("dashboard_update", { turn: 0, toolCallId: "overview-write", dashboardId: "overview", dashboard: overview });
-  await waitFor(() => grid.textContent.includes("overview metric"), "visible board update not applied");
+  const analysis = { ...board("analysis", 88).state, revision: 2 };
+  send("dashboard_update", { turn: 0, toolCallId: "analysis-write", dashboardId: "analysis", dashboard: analysis });
+  await waitFor(() => grid.textContent.includes("analysis metric"), "visible board update not applied");
   send("tool_call", { turn: 0, id: "default-write", name: "update_dashboard",
     arguments: { dashboard_id: "default", action: "upsert", widget: { id: "same-card" } } });
   send("status", { message: "pending-marker" });
@@ -131,27 +135,35 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   assert.equal(grid.querySelector("[data-widget-id='same-card']")!.getAttribute("aria-busy"), "false");
   tab("default").click(); await waitFor(() => selected() === "default", "pending board not selected");
   assert.equal(grid.querySelector("[data-widget-id='same-card']")!.getAttribute("aria-busy"), "true");
-  tab("overview").click(); await waitFor(() => selected() === "overview", "could not return to overview");
+  tab("analysis").click(); await waitFor(() => selected() === "analysis", "could not return to analysis");
   const newer = { ...board("default", 99).state, revision: 3 };
   send("dashboard_update", { turn: 0, toolCallId: "default-write", dashboardId: "default", dashboard: newer });
   send("status", { message: "background-saved" });
   await waitFor(() => document.querySelector("#toast")!.textContent.includes("background-saved"), "background update not received");
-  assert.equal(selected(), "overview", "background update changed the selected tab");
+  assert.equal(selected(), "analysis", "background update changed the selected tab");
   send("dashboard_update", { turn: 0, toolCallId: "old-default", dashboardId: "default", dashboard: { ...newer, revision: 2 } });
-  session = { ...session, dashboards: session.dashboards.map((item) => ({ ...item, state: item.id === "default" ? newer : overview })) };
+  session = { ...session, dashboards: session.dashboards.map((item) => ({ ...item, state: item.id === "default" ? newer : analysis })) };
   send("done", session); controller!.close();
   await waitFor(() => !input.readOnly, "chat did not finish");
   tab("default").click();
   await waitFor(() => selected() === "default", "default board not restored");
   assert.match(document.querySelector("#dashboardUpdatedAt")!.textContent, /r3/u, "stale event overwrote a newer revision");
-  tab("overview").click(); await waitFor(() => selected() === "overview", "overview not selected");
+  tab("analysis").click(); await waitFor(() => selected() === "analysis", "analysis not selected");
+  controller = undefined;
+  input.value = "查看分析看板";
+  document.querySelector("#composer")!.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
+  await waitFor(() => !!controller, "analysis chat stream not opened");
+  assert.equal(posted?.dashboardId, "analysis");
+  send("turn_start", { turn: 1 });
+  send("done", session); controller!.close();
+  await waitFor(() => !input.readOnly, "analysis chat did not finish");
   (document.querySelector("[data-session-id='session-single']") as unknown as HTMLButtonElement).click();
   await waitFor(() => location.hash.includes("session-single"), "single session not loaded");
   assert.equal(document.querySelector("#dashboardTabs")!.hasAttribute("hidden"), true);
   assert.deepEqual(viewport, { left: 0, top: 0 }, "another session with the same board ID must have a separate viewport");
   viewport.left = 5; viewport.top = 75;
   (document.querySelector("[data-session-id='session-multi']") as unknown as HTMLButtonElement).click();
-  await waitFor(() => selected() === "overview", "session selection was not remembered");
+  await waitFor(() => selected() === "analysis", "session selection was not remembered");
   assert.deepEqual(viewport, { left: 15, top: 220 }, "returning to a session must restore its selected board position");
   (document.querySelector("[data-session-id='session-single']") as unknown as HTMLButtonElement).click();
   await waitFor(() => location.hash.includes("session-single"), "single session not revisited");

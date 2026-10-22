@@ -17,8 +17,8 @@ function fixture(t: TestContext) {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const state = createDefaultDashboard(new Date("2026-10-01T00:00:00Z"));
   const values: SessionDashboard[] = [
-    { id: "default", title: "完整看板", state },
-    { id: "overview", title: "概览看板", state: { ...state, widgets: state.widgets.slice(0, 4) } },
+    { id: "default", title: "OEE综合看板", state },
+    { id: "analysis", title: "OEE分析看板", state: createDashboardRegistry().loadInitial("analysis") },
   ];
   const identities = () => values.map(({ id, title }) => ({ id, title }));
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
@@ -36,11 +36,16 @@ test("account bindings preserve order, support legacy config formats, and reject
     writeFileSync(file, JSON.stringify(value));
     return loadUserDashboards(file, registry);
   };
-  const resolve = load({ defaultDashboards: ["default"], users: { Alice: ["overview", "default"] } });
-  assert.deepEqual(resolve(" ALICE "), ["overview", "default"]);
+  const resolve = load({ defaultDashboards: ["default"], users: { Alice: ["analysis", "default"] } });
+  assert.deepEqual(resolve(" ALICE "), ["analysis", "default"]);
   assert.deepEqual(resolve("bob"), ["default"]);
   assert.ok(Object.isFrozen(resolve("alice")));
-  assert.deepEqual(load({ defaultDashboard: "overview", users: { alice: "default" } })("bob"), ["overview"]);
+  assert.deepEqual(load({ defaultDashboard: "analysis", users: { alice: "default" } })("bob"), ["analysis"]);
+  assert.deepEqual(load({ defaultDashboards: ["analysis", "default"], users: {} })("bob"), ["analysis", "default"]);
+  assert.throws(() => registry.loadInitial("overview"), /未知看板/u);
+  assert.throws(() => load({ defaultDashboard: "overview", users: {} }), /未知看板/u);
+  assert.throws(() => load({ defaultDashboards: ["default"], users: { alice: "overview" } }), /未知看板/u);
+  assert.throws(() => load({ defaultDashboards: ["analysis", "analysis"], users: {} }), /重复看板/u);
   assert.throws(() => registry.loadInitial("test"), /未知看板/u);
   assert.throws(() => load({ defaultDashboard: "test", users: {} }), /未知看板/u);
   assert.throws(() => load({ defaultDashboards: ["default"], users: { alice: "test" } }), /未知看板/u);
@@ -49,7 +54,7 @@ test("account bindings preserve order, support legacy config formats, and reject
   }
   assert.throws(() => load({ defaultDashboard: "default", defaultDashboards: ["default"], users: {} }), /只能/u);
   assert.throws(() => load({ defaultDashboards: "default", users: {} }));
-  assert.throws(() => load({ defaultDashboards: ["default"], users: { Alice: "default", alice: "overview" } }), /重复账号/u);
+  assert.throws(() => load({ defaultDashboards: ["default"], users: { Alice: "default", alice: "analysis" } }), /重复账号/u);
   assert.throws(() => load({ defaultDashboards: ["default"], users: { alice: [] } }), /不能为空/u);
   assert.equal(new DashboardRegistry([{ id: "custom", loadInitial: () => registry.loadInitial() }]).title("custom"), "custom");
 });
@@ -60,17 +65,17 @@ test("boards pin separate baselines and revisions, including identical card IDs,
   assert.deepEqual(store.listOrPreview(sessionId), original);
   values[0] = { ...values[0]!, state: { ...values[0]!.state, widgets: [] } };
   store.listOrInitialize(sessionId);
-  const widgetId = original[0]!.state.widgets[0]!.id;
+  const widgetId = original[1]!.state.widgets[0]!.id;
   store.apply(sessionId, { action: "remove", baseRevision: 0, widgetId }, "default");
-  assert.deepEqual(store.loadOrPreview(sessionId, "overview"), original[1]!.state);
-  store.apply(sessionId, { action: "remove", baseRevision: 0, widgetId }, "overview");
+  assert.deepEqual(store.loadOrPreview(sessionId, "analysis"), original[1]!.state);
+  store.apply(sessionId, { action: "remove", baseRevision: 0, widgetId }, "analysis");
   assert.throws(() => store.apply(sessionId, { action: "reset", baseRevision: 0 }, "default"), DashboardConflictError);
   assert.throws(() => store.apply(sessionId, { action: "reset", baseRevision: 1 }, "missing"), /不存在/u);
   const restarted = new SessionDashboardStore(artifacts, () => { throw new Error("must use saved baseline"); }, identities);
   const reset = restarted.apply(sessionId, { action: "reset", baseRevision: 1 }, "default").dashboard;
   assert.deepEqual(reset, { ...original[0]!.state, revision: 2 });
-  assert.equal(restarted.loadOrPreview(sessionId, "overview").revision, 1);
-  assert.equal(restarted.loadOrPreview(sessionId, "overview").widgets.length, 3);
+  assert.equal(restarted.loadOrPreview(sessionId, "analysis").revision, 1);
+  assert.equal(restarted.loadOrPreview(sessionId, "analysis").widgets.length, 3);
   assert.throws(() => restarted.loadOrPreview(sessionId), /必须指定/u);
 });
 
@@ -82,15 +87,15 @@ test("dashboard tools read summaries or full data and submit changes to explicit
   const content = (await executeGet({})).content[0]!;
   assert.equal(content.type, "text");
   const summary = JSON.parse(content.type === "text" ? content.text : "{}");
-  assert.deepEqual(summary.dashboards.map((item: { id: string }) => item.id), ["default", "overview"]);
+  assert.deepEqual(summary.dashboards.map((item: { id: string }) => item.id), ["default", "analysis"]);
   assert.equal("data" in summary.dashboards[0].widgets[0], false);
-  const detail = await executeGet({ dashboard_ids: ["overview"], include_data: true });
-  assert.match(JSON.stringify(detail.content), /overall_effective_oee_percent/u);
+  const detail = await executeGet({ dashboard_ids: ["analysis"], include_data: true });
+  assert.match(JSON.stringify(detail.content), /loss_hours/u);
   await assert.rejects(executeGet({ dashboard_ids: ["missing"] }), /不存在/u);
   assert.equal(Value.Check(update.parameters, { action: "reset", base_revision: 0 }), false);
   const data = { columns: ["value"], rows: [{ value: 42 }] };
-  store.setActiveDashboard(sessionId, "overview");
-  for (const dashboard_id of ["default", "overview"]) {
+  store.setActiveDashboard(sessionId, "analysis");
+  for (const dashboard_id of ["default", "analysis"]) {
     const events: unknown[] = [];
     const result = await update.execute("write", { dashboard_id, action: "upsert", base_revision: 0, data,
       date_range: { start: null, end: null }, widget: { id: "shared-metric", kind: "kpi", title: dashboard_id,
@@ -99,26 +104,27 @@ test("dashboard tools read summaries or full data and submit changes to explicit
     assert.equal(result.details?.dashboardId, dashboard_id);
     assert.match(JSON.stringify(events), new RegExp('"dashboardId":"' + dashboard_id + '"', "u"));
   }
-  assert.equal(store.activeDashboardId(sessionId), "overview", "writes must preserve the request's default target");
+  assert.equal(store.activeDashboardId(sessionId), "analysis", "writes must preserve the request's default target");
   assert.equal(store.loadOrPreview(sessionId, "default").widgets.at(-1)!.title, "default");
-  assert.equal(store.loadOrPreview(sessionId, "overview").widgets.at(-1)!.title, "overview");
+  assert.equal(store.loadOrPreview(sessionId, "analysis").widgets.at(-1)!.title, "analysis");
 });
 
 test("legacy snapshots keep their original binding and bytes until their first edit", (t) => {
   const { store, values, artifacts } = fixture(t);
   store.initialize(sessionId, values);
   const filename = path.join(artifacts.rootDir, sessionId, "dashboard.json");
-  const legacy = JSON.stringify({ schemaVersion: 1, baseline: values[1]!.state,
-    current: { ...values[1]!.state, revision: 3, widgets: [] } });
+  const baseline = values[1]!.state;
+  const legacy = JSON.stringify({ schemaVersion: 1, baseline,
+    current: { ...baseline, revision: 3, widgets: [] } });
   writeFileSync(filename, legacy);
   const old = new SessionDashboardStore(artifacts, () => { throw new Error("must not reload"); },
-    () => [{ id: "overview", title: "旧概览" }]);
-  assert.deepEqual(old.listOrInitialize(sessionId).map((item) => item.id), ["overview"]);
+    () => [{ id: "analysis", title: "OEE分析看板" }]);
+  assert.deepEqual(old.listOrInitialize(sessionId).map((item) => item.id), ["analysis"]);
   assert.equal(readFileSync(filename, "utf8"), legacy);
-  assert.equal(old.apply(sessionId, { action: "reset", baseRevision: 3 }, "overview").dashboard.widgets.length, 4);
+  assert.equal(old.apply(sessionId, { action: "reset", baseRevision: 3 }, "analysis").dashboard.widgets.length, 4);
   const document = JSON.parse(readFileSync(filename, "utf8"));
   assert.equal(document.schemaVersion, 2);
-  assert.equal(document.dashboards[0].id, "overview");
+  assert.equal(document.dashboards[0].id, "analysis");
 });
 
 test("aggregate snapshots can exceed the old file limit while each board retains its size budget", (t) => {

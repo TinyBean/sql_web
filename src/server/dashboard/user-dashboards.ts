@@ -17,8 +17,8 @@ export function loadUserDashboards(filePath: string, registry: DashboardRegistry
     if (!items.length) throw new Error("账号看板列表不能为空");
     const result: string[] = [];
     for (const id of items) {
-      if (typeof id !== "string" || !known.has(id)) throw new Error("账号配置引用未知看板：" + String(id));
-      if (result.includes(id)) throw new Error("账号看板配置存在重复看板：" + id);
+      if (typeof id !== "string" || !known.has(id)) throw new Error("账号配置引用未知看板:" + String(id));
+      if (result.includes(id)) throw new Error("账号看板配置存在重复看板:" + id);
       result.push(id);
     }
     return Object.freeze(result);
@@ -28,7 +28,7 @@ export function loadUserDashboards(filePath: string, registry: DashboardRegistry
   const users = new Map<string, readonly string[]>();
   for (const [key, dashboards] of Object.entries(value.users)) {
     const account = normalizeAccount(key);
-    if (users.has(account)) throw new Error("账号看板配置存在重复账号：" + account);
+    if (users.has(account)) throw new Error("账号看板配置存在重复账号:" + account);
     users.set(account, ids(dashboards));
   }
   return (account) => users.get(normalizeAccount(account)) ?? defaults;

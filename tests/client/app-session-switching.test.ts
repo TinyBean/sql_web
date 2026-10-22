@@ -23,7 +23,7 @@ function serializedSession(
   title: string,
   messages: readonly ChatMessage[] = [],
 ): SerializedSession {
-  return { ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"], id, title, model: null, tools: [], streaming: false, dashboards: [{ id: "default", title: "Test OEE 综合看板", state: EMPTY_DASHBOARD }], messages };
+  return { ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"], id, title, model: null, tools: [], streaming: false, dashboards: [{ id: "default", title: "OEE综合看板", state: EMPTY_DASHBOARD }], messages };
 }
 
 function sessionSummary(id: string, title: string, messageCount = 0): SessionSummary {

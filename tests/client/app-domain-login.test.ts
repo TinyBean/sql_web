@@ -11,7 +11,7 @@ import type { DashboardState } from "../../src/shared/dashboard.ts";
 const dashboard: DashboardState = { schemaVersion: 1, revision: 0, dataAsOf: "2026-10-19T00:00:00Z", dateRange: { start: null, end: null }, widgets: [] };
 function session(id: string, ownerAccount: string | null, text = ""): SerializedSession {
   return { id, ownerAccount, readOnly: ownerAccount === null, dashboardIds: ["default"], title: text || id, model: null,
-    tools: [], streaming: false, dashboards: [{ id: "default", title: "Test OEE 综合看板", state: dashboard }], messages: text ? [{ id: "user-1", role: "user", text }, { id: "assistant-1", role: "assistant", text: text + " answer" }] : [] };
+    tools: [], streaming: false, dashboards: [{ id: "default", title: "OEE综合看板", state: dashboard }], messages: text ? [{ id: "user-1", role: "user", text }, { id: "assistant-1", role: "assistant", text: text + " answer" }] : [] };
 }
 function summary(value: SerializedSession): SessionSummary {
   return { id: value.id, title: value.title, ownerAccount: value.ownerAccount, readOnly: value.readOnly, dashboardIds: value.dashboardIds,

@@ -70,7 +70,7 @@ async function createFixture(
       tools: ["execute_sql", "get_current_time"],
       ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
       streaming: false,
-      dashboards: [{ id: "default", title: "Test OEE 综合看板", state: EMPTY_DASHBOARD }],
+      dashboards: [{ id: "default", title: "OEE综合看板", state: EMPTY_DASHBOARD }],
       messages: [],
     }),
     get: async () => { throw new Error("not used in this test"); },
@@ -283,7 +283,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     tools: ["execute_sql", "get_current_time"],
     ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
     streaming: false,
-    dashboards: [{ id: "default", title: "Test OEE 综合看板", state: EMPTY_DASHBOARD }],
+    dashboards: [{ id: "default", title: "OEE综合看板", state: EMPTY_DASHBOARD }],
     messages: [
       { id: "user-1", role: "user", text: "统计销售额" },
       {
@@ -435,16 +435,16 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
   });
 });
 
-test("streams a persisted dashboard update before tool end and reconciles it in done", async (t) => {
+test("streams a persisted analysis dashboard update before tool end and reconciles it in done", async (t) => {
   const dashboard: DashboardState = { ...EMPTY_DASHBOARD, revision: 1 };
   const completedSession: SerializedSession = {
     id: "fake-session",
     title: "更新看板",
     model: null,
     tools: ["get_dashboard", "update_dashboard"],
-    ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
+    ownerAccount: "test-user", readOnly: false, dashboardIds: ["analysis"],
     streaming: false,
-    dashboards: [{ id: "default", title: "Test OEE 综合看板", state: dashboard }],
+    dashboards: [{ id: "analysis", title: "OEE分析看板", state: dashboard }],
     messages: [],
   };
   const listeners = new Set<(event: AgentSessionEvent) => void>();
@@ -485,7 +485,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
         type: "tool_execution_update",
         toolCallId: "dashboard-call",
         toolName: "update_dashboard",
-        partialResult: { details: { kind: "dashboard_update", dashboardId: "default", dashboard } },
+        partialResult: { details: { kind: "dashboard_update", dashboardId: "analysis", dashboard } },
       } as AgentSessionEvent);
       emit({
         type: "tool_execution_end",
@@ -501,7 +501,7 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
   const response = await fetch(`${baseUrl}/api/sessions/fake-session/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dashboardId: "default", message: "更新看板" }),
+    body: JSON.stringify({ dashboardId: "analysis", message: "更新看板" }),
   });
   const events = parseSseBody(await response.text());
   const names = events.map((event) => event.event);
@@ -512,11 +512,14 @@ test("streams a persisted dashboard update before tool end and reconciles it in 
   assert.ok(start < update && update < end && end < done);
   assert.equal(events[update]?.event, "dashboard_update");
   if (events[update]?.event === "dashboard_update") {
+    assert.equal(events[update].data.dashboardId, "analysis");
     assert.equal(events[update].data.dashboard.revision, 1);
   }
   const finalEvent = events.at(-1);
   assert.equal(finalEvent?.event, "done");
   if (finalEvent?.event === "done") {
+    assert.deepEqual(finalEvent.data.dashboardIds, ["analysis"]);
+    assert.equal(finalEvent.data.dashboards[0]!.title, "OEE分析看板");
     assert.equal(finalEvent.data.dashboards[0]!.state.revision, 1);
   }
 });
@@ -530,7 +533,7 @@ test("does not stream legacy images from any tool result", async (t) => {
     tools: ["code_interpreter", "execute_sql"],
     ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
     streaming: false,
-    dashboards: [{ id: "default", title: "Test OEE 综合看板", state: EMPTY_DASHBOARD }],
+    dashboards: [{ id: "default", title: "OEE综合看板", state: EMPTY_DASHBOARD }],
     messages: [],
   };
   const listeners = new Set<(event: AgentSessionEvent) => void>();
@@ -633,7 +636,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
     tools: [],
     ownerAccount: "test-user", readOnly: false, dashboardIds: ["default"],
     streaming: false,
-    dashboards: [{ id: "default", title: "Test OEE 综合看板", state: EMPTY_DASHBOARD }],
+    dashboards: [{ id: "default", title: "OEE综合看板", state: EMPTY_DASHBOARD }],
     messages: [],
   };
   const listeners = new Set<(event: AgentSessionEvent) => void>();
@@ -730,8 +733,8 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
 
 test("requires explicit bound dashboard IDs for messages and routes selected IDs through prompts", async (t) => {
   const session: SerializedSession = { id: "fake-session", title: "多个看板", model: null, tools: [],
-    ownerAccount: "test-user", readOnly: false, dashboardIds: ["default", "overview"], streaming: false, messages: [],
-    dashboards: ["default", "overview"].map((id) => ({ id, title: id, state: EMPTY_DASHBOARD })) };
+    ownerAccount: "test-user", readOnly: false, dashboardIds: ["default", "analysis"], streaming: false, messages: [],
+    dashboards: ["default", "analysis"].map((id) => ({ id, title: id, state: EMPTY_DASHBOARD })) };
   const targets: string[] = [];
   const sessions: WebSessionPort = {
     forAccount() { return { ...this, fork: async () => session }; },
@@ -745,20 +748,20 @@ test("requires explicit bound dashboard IDs for messages and routes selected IDs
   const post = (body: unknown) => fetch(base + "/api/sessions/fake-session/messages", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
-  for (const body of [{ message: "question" }, { message: "question", dashboardId: "missing" }, { message: "question", dashboardId: "../overview" }]) {
+  for (const body of [{ message: "question" }, { message: "question", dashboardId: "missing" }, { message: "question", dashboardId: "../analysis" }]) {
     const response = await post(body);
     assert.equal(response.status, 400);
     assert.match(response.headers.get("content-type")!, /application\/json/u);
   }
   assert.deepEqual(targets, []);
-  const response = await post({ message: "question", dashboardId: "overview" });
+  const response = await post({ message: "question", dashboardId: "analysis" });
   assert.equal(response.status, 200);
   await response.text();
-  assert.deepEqual(targets, ["overview"]);
+  assert.deepEqual(targets, ["analysis"]);
   const removedEditor = await fetch(base + "/api/sessions/fake-session/dashboard", {
     method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dashboardId: "overview", action: "remove", widgetId: "card", baseRevision: 0 }),
+    body: JSON.stringify({ dashboardId: "analysis", action: "remove", widgetId: "card", baseRevision: 0 }),
   });
   assert.equal(removedEditor.status, 404);
-  assert.deepEqual(targets, ["overview"]);
+  assert.deepEqual(targets, ["analysis"]);
 });

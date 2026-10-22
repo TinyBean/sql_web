@@ -100,7 +100,7 @@ export function createDefaultDashboardDefinition(
   if (analysis && !defaultDashboardPath) throw new Error("默认看板更新需要发布路径");
   return {
     id: "default",
-    title: "Test OEE 综合看板",
+    title: "OEE综合看板",
     loadInitial: () => readDefaultDashboard(defaultDashboardPath, logger),
     ...(analysis && defaultDashboardPath ? {
       async update(context) {

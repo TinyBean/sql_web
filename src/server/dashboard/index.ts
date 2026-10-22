@@ -2,7 +2,7 @@ import type { JsonObject } from "../../shared/contracts.ts";
 import { parseDashboardState, type DashboardState } from "../../shared/dashboard.ts";
 import type { AppLogger } from "../logger.ts";
 import { createDefaultDashboardDefinition, type DefaultDashboardOptions } from "./default/index.ts";
-import { createOverviewDashboardDefinition } from "./overview/index.ts";
+import { createAnalysisDashboardDefinition } from "./analysis/index.ts";
 
 export interface DashboardUpdateContext {
   /** Updates may only open this database read-only. Database ingestion runs separately. */
@@ -70,7 +70,7 @@ export function createDashboardRegistry(options: DefaultDashboardOptions = {}): 
   const defaultDefinition = createDefaultDashboardDefinition(options);
   return new DashboardRegistry([
     defaultDefinition,
-    // overview refreshes its projection after default has published this run's snapshot.
-    createOverviewDashboardDefinition(defaultDefinition),
+    // analysis refreshes its projection after default has published this run's snapshot.
+    createAnalysisDashboardDefinition(defaultDefinition),
   ]);
 }

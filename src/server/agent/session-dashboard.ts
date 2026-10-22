@@ -120,7 +120,7 @@ function parseDashboardDocument(value: unknown, identities?: readonly DashboardI
   if (typeof value !== "object" || value === null || Array.isArray(value) || !("schemaVersion" in value)) {
     throw new DashboardInputError("看板文件结构无效");
   }
-  const legacyIdentity = identities ?? [{ id: "default", title: "Test OEE 综合看板" }];
+  const legacyIdentity = identities ?? [{ id: "default", title: "OEE综合看板" }];
   let entries: unknown[];
   if (value.schemaVersion === 1 && "baseline" in value && "current" in value && legacyIdentity.length === 1) {
     entries = [{ ...legacyIdentity[0], baseline: value.baseline, current: value.current }];
@@ -347,7 +347,7 @@ export class SessionDashboardStore {
   }
 
   initialize(sessionId: string, baseline: DashboardState | readonly SessionDashboard[]): void {
-    const values = Array.isArray(baseline) ? baseline : [{ ...(this.#identities(sessionId)?.[0] ?? { id: "default", title: "Test OEE 综合看板" }), state: baseline }];
+    const values = Array.isArray(baseline) ? baseline : [{ ...(this.#identities(sessionId)?.[0] ?? { id: "default", title: "OEE综合看板" }), state: baseline }];
     const document = parseDashboardDocument({ schemaVersion: 2, dashboards: values.map((item) => ({
       id: item.id, title: item.title, baseline: item.state, current: item.state,
     })) }, this.#identities(sessionId) ?? values);
@@ -383,7 +383,7 @@ export class SessionDashboardStore {
     let values = this.#previews.get(sessionId);
     if (!values) {
       const initial = this.#loadInitialDashboard(sessionId);
-      values = Array.isArray(initial) ? initial : [{ ...(this.#identities(sessionId)?.[0] ?? { id: "default", title: "Test OEE 综合看板" }), state: initial as DashboardState }];
+      values = Array.isArray(initial) ? initial : [{ ...(this.#identities(sessionId)?.[0] ?? { id: "default", title: "OEE综合看板" }), state: initial as DashboardState }];
       const pinned = parseDashboardDocument({ schemaVersion: 2, dashboards: values.map((item) => ({
         id: item.id, title: item.title, baseline: item.state, current: item.state,
       })) }, this.#identities(sessionId));

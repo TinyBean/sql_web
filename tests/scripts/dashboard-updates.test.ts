@@ -11,8 +11,8 @@ import type { DashboardDefinition, DashboardUpdateContext, DashboardUpdateOutcom
 import { DashboardRegistry, createDashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { createDefaultDashboardDefinition, writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import { createOverviewDashboardDefinition } from "../../src/server/dashboard/overview/index.ts";
-import { projectOverviewDashboard } from "../../src/server/dashboard/overview/calculate/index.ts";
+import { createAnalysisDashboardDefinition } from "../../src/server/dashboard/analysis/index.ts";
+import { projectAnalysisDashboard } from "../../src/server/dashboard/analysis/calculate/index.ts";
 import { readDashboardSnapshot, writeDashboardSnapshot } from "../../src/server/dashboard/snapshot-store.ts";
 import { dailyUpdatePlan, type DailyDatabaseDependencies } from "../../scripts/database/daily-update.ts";
 import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
@@ -177,7 +177,7 @@ test("daily CLI dry-run reports database requests and registered updates without
   assert.equal(output.dryRun, true);
   assert.equal(output.requests.length, 2);
   assert.equal(output.databasePath, config.databasePath);
-  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }, { dashboardId: "overview", hasUpdate: true }]);
+  assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }, { dashboardId: "analysis", hasUpdate: true }]);
   assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "throughDate", "timezone"]);
   assert.deepEqual(output.requests, [
     { dataset: "availability", date: "2026-01-12" },
@@ -188,12 +188,12 @@ test("daily CLI dry-run reports database requests and registered updates without
 
 test("shared registration loads initial snapshots without requiring an update agent", () => {
   const registry = createDashboardRegistry();
-  assert.deepEqual(registry.list().map((definition) => definition.id), ["default", "overview"]);
+  assert.deepEqual(registry.list().map((definition) => definition.id), ["default", "analysis"]);
   assert.equal(registry.list()[0]?.update, undefined);
   assert.equal(registry.loadInitial().widgets.length, 13);
 });
 
-test("daily overview refresh follows one default publication and skips old same-day data after a failed rerun", async (t) => {
+test("daily analysis refresh follows one default publication and skips old same-day data after a failed rerun", async (t) => {
   const { config } = fixture(t);
   let generations = 0;
   let fail = false;
@@ -210,15 +210,15 @@ test("daily overview refresh follows one default publication and skips old same-
     },
     publish: writeDefaultDashboard,
   });
-  const registry = new DashboardRegistry([definition, createOverviewDashboardDefinition(definition)]);
+  const registry = new DashboardRegistry([definition, createAnalysisDashboardDefinition(definition)]);
   const first = await runDailyUpdate(config, plan, registry, logger, database([]));
-  assert.equal(generations, 1, "overview reuses publication without another model run");
+  assert.equal(generations, 1, "analysis reuses publication without another model run");
   assert.deepEqual(first.dashboards.map(({ dashboardId, status, published }) => ({ dashboardId, status, published })), [
     { dashboardId: "default", status: "completed", published: true },
-    { dashboardId: "overview", status: "completed", published: true },
+    { dashboardId: "analysis", status: "completed", published: true },
   ]);
   assert.equal(first.dashboards[1]!.dataAsOf, first.dashboards[0]!.dataAsOf);
-  assert.deepEqual(registry.loadInitial("overview"), projectOverviewDashboard(registry.loadInitial()));
+  assert.deepEqual(registry.loadInitial("analysis"), projectAnalysisDashboard(registry.loadInitial()));
   const before = readFileSync(config.defaultDashboardPath, "utf8");
 
   fail = true;

@@ -137,7 +137,7 @@ test("calculation fills the template and analysis placeholders without starting 
     assert.deepEqual(state.widgets.map(({ id, kind, size, format }) => ({ id, kind, size, format })),
       template.widgets.map(({ id, kind, size, format }) => ({ id, kind, size, format })));
     const analysis = state.widgets.filter((widget) => widget.id.startsWith("improvement-actions-"));
-    assert.equal(analysis.length, 4);
+    assert.equal(analysis.length, 2);
     assert.ok(analysis.every((widget) => widget.data.length === 0));
     assert.equal(database.prepare("SELECT total_changes() AS changes").get()?.["changes"], 0);
     assert.deepEqual(readdirSync(directory, { recursive: true }), before);
@@ -265,7 +265,7 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
 test("empty and cross-year dashboards contain null metrics and accurate period warnings", (t) => {
   const { config } = fixture(t);
   const empty = readCalculatedDashboard(config.databasePath, "2027-01-01");
-  assert.equal(empty.widgets.length, 13);
+  assert.equal(empty.widgets.length, 15);
   assert.equal(empty.widgets[1]?.data[0]?.["overall_oee_percent"], null);
   assert.equal(empty.widgets[7]?.data.length, 0);
   assert.equal(empty.widgets[8]?.kind, "table");
@@ -276,7 +276,7 @@ test("empty and cross-year dashboards contain null metrics and accurate period w
   assert.match(empty.widgets[9]!.subtitle, /最新业务日 · 2027-01-01/u);
   assert.match(empty.widgets[10]!.subtitle, /2026-12-20 至 2026-12-26/u);
   assert.match(empty.widgets[4]!.title, /2027/u);
-  assert.match(empty.widgets[11]!.warnings.join(" "), /部分月/u);
+  assert.match(empty.widgets[11]!.warnings.join(" "), /不足 10 台/u);
 });
 
 function result(status: SyncResult["status"], dataset: "availability" | "dut_utilization"): SyncResult {
@@ -313,7 +313,7 @@ test("hard sync failures preserve the published default and still attempt the ot
   assert.equal(readFileSync(config.defaultDashboardPath, "utf8"), "old snapshot");
 });
 
-test("sync warnings publish all thirteen cards with data coverage warnings", async (t) => {
+test("sync warnings publish all fifteen cards with data coverage warnings", async (t) => {
   const { config } = fixture(t);
   let published = false;
   const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
@@ -323,7 +323,7 @@ test("sync warnings publish all thirteen cards with data coverage warnings", asy
     },
     publish(filePath, state) {
       assert.equal(filePath, config.defaultDashboardPath);
-      assert.equal(state.widgets.length, 13);
+      assert.equal(state.widgets.length, 15);
       assert.ok(state.widgets[1]?.warnings.some((warning) => warning.includes("同步存在")));
       published = true;
     },

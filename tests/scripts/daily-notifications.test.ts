@@ -22,6 +22,27 @@ const database: DailyDatabaseDependencies = { openStore: () => ({
   async importNewDay() { return { runId: "sync", status: "completed", datasets: [] }; }, close() {},
 }) };
 
+test("machine-only degradation keeps the original daily notification content and quality", async (t) => {
+  const f = fixture(t);
+  let sent = 0;
+  const notify: NotificationDispatcher = async ({ buildEmail }) => {
+    const email = buildEmail(); sent += 1;
+    assert.doesNotMatch(email.subject, /报告降级/u);
+    assert.match(email.text, /换线时间偏长/u);
+    assert.doesNotMatch(email.text, /最佳|最差|TEST OEE|机台建议/u);
+    return { status: "accepted", reason: "test accepted", messageId: "test-message",
+      recipientCount: 1, acceptedCount: 1, rejectedCount: 0, errorCode: null };
+  };
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition({ ...f.config, notify }, {
+    async generate() { return { ...f.generated, analysisStatus: "degraded", periodAnalysisStatus: "completed",
+      analysisReason: "部分机台建议暂不可用", machineAnalysis: { status: "degraded", issues: [] } }; },
+    publish: writeDefaultDashboard,
+  })]);
+  const result = await runDailyUpdate(f.config, plan, registry, f.logger, database);
+  assert.equal(result.status, "completed_with_warnings");
+  assert.equal(result.dashboards[0]!.published, true); assert.equal(sent, 1);
+});
+
 function fixture(t: TestContext) {
   const directory = mkdtempSync(path.join(tmpdir(), "daily-notifications-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -178,13 +199,13 @@ test("degraded analysis publishes before sending marked daily mail and reports w
     return sendEmail(config, input);
   });
   const registry = new DashboardRegistry([createDefaultDashboardDefinition({ ...f.config, notify }, {
-    async generate() { return { ...f.generated, analysisStatus: "degraded", analysisReason: "季度 MT 剔除 1 条建议",
-      analysisExclusions: [{ period: "quarter", kind: "MT", priority: 3, codes: ["METRIC_CATEGORY_MISMATCH"] }] }; },
+    async generate() { return { ...f.generated, analysisStatus: "degraded", analysisReason: "周 MT 剔除 1 条建议",
+      analysisExclusions: [{ period: "week", kind: "MT", priority: 3, codes: ["METRIC_CATEGORY_MISMATCH"] }] }; },
     publish(file, state) { order.push("publish"); writeDefaultDashboard(file, state); },
   })]);
   const result = await runDailyUpdate(f.config, plan, registry, f.logger, database);
   assert.deepEqual(order, ["publish", "send"]);
   assert.equal(result.status, "completed_with_warnings"); assert.equal(outcomeExitCode(result.status), 2);
   assert.equal(smtp.messages.length, 1);
-  assert.match(decodedBody(smtp.messages[0]!, "text/plain"), /报告降级.*季度 MT 剔除 1 条/u);
+  assert.match(decodedBody(smtp.messages[0]!, "text/plain"), /报告降级.*周 MT 剔除 1 条/u);
 });

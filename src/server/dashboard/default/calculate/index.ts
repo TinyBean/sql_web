@@ -10,6 +10,7 @@ import { createDefaultDashboard, fillCardTemplate, createOverviewTemplate, creat
   createExtremesTemplate, createMachineExtremesTemplate, createAnalysisTemplate } from "../template.ts";
 import { dashboardPeriods, periodLabel, isPartialPeriod, PERIOD_KEYS, ANALYSIS_PERIOD_KEYS,
   PERIOD_GRAINS, type PeriodKey } from "./periods.ts";
+import { buildDailyMachineCards, readDailyMachines } from "./daily-machines.ts";
 
 type Grain = "周" | "月" | "季";
 interface PeriodData extends DatePeriod {
@@ -62,6 +63,7 @@ export function calculateDefaultDashboard(
   throughDate: string,
   now = new Date(),
   syncWarnings: readonly string[] = [],
+  machineRows?: readonly DashboardRow[],
 ): DashboardState {
   const periods = dashboardPeriods(throughDate);
   // At most 732 aggregate day/type rows. This read-only batch intentionally
@@ -119,6 +121,7 @@ export function calculateDefaultDashboard(
   const machines = buildMachineExtremesTable(database, extremeRows, periods.trend, commonWarnings);
   cards.set(machines.id, machines);
   for (const card of prepareAnalysisCards(database, throughDate, syncWarnings)) cards.set(card.id, card);
+  for (const card of buildDailyMachineCards(machineRows ?? readDailyMachines(database, throughDate), throughDate, syncWarnings)) cards.set(card.id, card);
   const template = createDefaultDashboard(now);
   return parseDashboardState({ ...template, dateRange: periods.trend,
     widgets: template.widgets.map((widget) => {
@@ -297,9 +300,6 @@ function prepareAnalysisCards(
     const subtitle = key === "day" ? "最新业务日 · " + period.end : (key === "week" ? "最近完整周" : grain + "累计") + " · " + periodText;
     const warnings = [...syncWarnings, ...coverageWarnings(readDailyOee(database, period)),
       "本次分析暂不可用：尚未生成临时 Agent 报告", "责任人列为职能建议，需管理层确认后指派到人"];
-    if (key !== "day" && key !== "week" && isPartialPeriod(period, PERIOD_GRAINS[key])) {
-      warnings.push("本期为截至 " + throughDate + " 的部分" + grain + "，损失小时不可与完整周期直接对比");
-    }
     return {
       ...template, title: template.title + "（" + label + "）",
       subtitle: subtitle + " · 临时 Agent 分析",

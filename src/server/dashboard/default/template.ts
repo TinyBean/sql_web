@@ -3,9 +3,37 @@ import {
   type DashboardLineWidget, type DashboardTableWidget, type DashboardWidget,
 } from "../../../shared/dashboard.ts";
 import { PERIOD_KEYS, ANALYSIS_PERIOD_KEYS, PERIOD_GRAINS, type PeriodKey } from "./calculate/periods.ts";
+import { formatMachineAnalysisWidget } from "../../skills/test-oee-calculator/assets/machine-platforms.ts";
 
 const WAITING = "尚未更新,等待每日任务生成数据";
 const empty = () => ({ subtitle: WAITING, data: [], warnings: [WAITING] });
+
+export const MACHINE_KINDS = ["MT", "ST"] as const;
+export const MACHINE_RANKINGS = ["best", "worst"] as const;
+export type MachineKind = typeof MACHINE_KINDS[number];
+export type MachineRanking = typeof MACHINE_RANKINGS[number];
+
+export function createMachineAnalysisTemplate(kind: MachineKind, ranking: MachineRanking): DashboardTableWidget {
+  return {
+    ...empty(), id: `machine-improvement-${kind.toLowerCase()}-${ranking}-2026`, kind: "table", size: "wide",
+    title: `昨日 ${kind} TEST OEE ${ranking === "best" ? "最佳" : "最差"} 10 台 · 改善措施与责任人`,
+    encoding: { columns: [
+      { key: "kind", label: "类型" }, { key: "rank", label: "排名" }, { key: "machine_label", label: "平台/机台" },
+      { key: "oee", label: "TEST OEE (%)" }, { key: "availability", label: "Availability (%)" },
+      { key: "dut_on", label: "Performance (DUT-On) (%)" },
+      { key: "test_time_performance", label: "Performance (Test Time) (%)" }, { key: "final_yield", label: "Yield (%)" },
+      { key: "loss_and_bottleneck", label: "主损失状态与短板" }, { key: "action_and_owner", label: "改善措施与责任人" },
+    ] },
+    format: { unit: "", precision: 2 },
+    metricDefinition: `${kind} 单业务日单机台 TEST OEE;本机台同类型 Test Time 使用 1% 截尾标准、上限 100%。` +
+      `按未舍入 TEST OEE ${ranking === "best" ? "降" : "升"}序取 10 台,并列按机台编号升序;NULL 不排名,零值参与,不足展示实际数量,最佳与最差独立选取。` +
+      "主损失为本机台同日同类型非运行状态累计损失小时最大项,并列按状态名称;短板为四个子项的最低值,并列全部展示。责任人为职能建议,待人工确认。",
+  };
+}
+
+export function createMachineAnalysisTemplates(): DashboardTableWidget[] {
+  return MACHINE_KINDS.flatMap((kind) => MACHINE_RANKINGS.map((ranking) => createMachineAnalysisTemplate(kind, ranking)));
+}
 
 /** Copy runtime values while keeping the template's identity, layout and encoding. */
 export function fillCardTemplate(template: DashboardWidget, values: DashboardWidget): DashboardWidget {
@@ -19,7 +47,7 @@ export function fillCardTemplate(template: DashboardWidget, values: DashboardWid
       ...(values.encoding.description !== undefined ? { description: values.encoding.description } : {}),
     } };
   }
-  return card;
+  return formatMachineAnalysisWidget(card);
 }
 
 export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): DashboardOverviewWidget {
@@ -106,6 +134,7 @@ const CARD_TEMPLATES = [
   ...(["MT", "ST"] as const).flatMap((kind) => [createOverviewTemplate(kind, true), createOverviewTemplate(kind, false)]),
   ...PERIOD_KEYS.map(createTrendTemplate), createExtremesTemplate(), createMachineExtremesTemplate(),
   ...ANALYSIS_PERIOD_KEYS.map(createAnalysisTemplate),
+  ...createMachineAnalysisTemplates(),
 ];
 
 /** Initial snapshots and generated dashboards share the template's card structure. */

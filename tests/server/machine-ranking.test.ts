@@ -259,7 +259,7 @@ test("reports and email share server TOP3 text and reject wrong type, period, me
   const base = calculatedDashboard(database, "2026-01-01");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
   const context = evidence.context(base, "2026-01-01");
-  const report = { periods: (["day", "week", "month", "quarter"] as const).map((period) => ({
+  const report = { periods: (["day", "week"] as const).map((period) => ({
     period, comparison: "覆盖有限，根因待验证。", minimum_evidence: context.comparisons[period].minimum.id,
     history_evidence: context.comparisons[period].history.id,
     groups: (["MT", "ST"] as const).map((kind) => ({ kind, evidence_ids: [context.comparisons[period].current.id, context.losses[period].evidence_id],

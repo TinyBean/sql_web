@@ -1,3 +1,5 @@
+import type { DashboardWidget } from "../../../../shared/dashboard.ts";
+
 /** Display inventory from OEE_Agent需求及逻辑v4; it does not change MT/ST classification. */
 export const MACHINE_PLATFORM_VERSION = "oee-v4";
 const inventory = {
@@ -22,6 +24,25 @@ export function machinePlatform(machine: string): string | null {
 
 export function machineLabel(machine: string): string {
   return (machinePlatform(machine) ?? "平台待维护") + "/" + machine;
+}
+
+/** Upgrade display bindings in published and pinned daily tables without changing machine IDs or facts. */
+export function formatMachineAnalysisWidget(widget: DashboardWidget): DashboardWidget {
+  if (widget.kind !== "table" || !/^machine-improvement-(?:mt|st)-(?:best|worst)-\d{4}$/u.test(widget.id)) return widget;
+  const hasLabel = widget.encoding.columns.some((column) => column.key === "machine_label");
+  const upgrade = !hasLabel && widget.encoding.columns.some((column) => column.key === "machine");
+  if (!hasLabel && !upgrade) return widget;
+  let changed = upgrade;
+  const data = widget.data.map((row) => {
+    if (typeof row["machine"] !== "string") return row;
+    const label = machineLabel(row["machine"].split("/").at(-1)!);
+    if (row["machine_label"] === label) return row;
+    changed = true;
+    return { ...row, machine_label: label };
+  });
+  if (!changed) return widget;
+  return { ...widget, data, encoding: { ...widget.encoding, columns: widget.encoding.columns.map((column) =>
+    upgrade && column.key === "machine" ? { ...column, key: "machine_label", label: column.label === "机台" ? "平台/机台" : column.label } : column) } };
 }
 
 /** Normalize prose and standalone identifier spans; preserve SQL/code and link destinations. */

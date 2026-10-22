@@ -33,7 +33,7 @@ import {
   type DashboardWidgetSize,
 } from "../../shared/dashboard.ts";
 import type { ArtifactStore } from "../tool/artifact-store.ts";
-import { formatMachineMentions, machineLabel } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
+import { formatMachineMentions, machineLabel, formatMachineAnalysisWidget } from "../skills/test-oee-calculator/assets/machine-platforms.ts";
 
 export type InitialDashboardProvider = (sessionId: string) => DashboardState | readonly SessionDashboard[];
 export type DashboardIdentity = Pick<SessionDashboard, "id" | "title">;
@@ -140,7 +140,10 @@ function parseDashboardDocument(value: unknown, identities?: readonly DashboardI
       const baseline = parseDashboardState(entry.baseline, "$dashboard.baseline");
       const current = parseDashboardState(entry.current, "$dashboard.current");
       if (baseline.revision !== 0) throw new DashboardInputError("看板 baseline revision 必须为 0");
-      return { id: entry.id, title: entry.title, baseline, current };
+      // Display compatibility also applies to saved sessions, independently of new publications.
+      return { id: entry.id, title: entry.title,
+        baseline: { ...baseline, widgets: baseline.widgets.map(formatMachineAnalysisWidget) },
+        current: { ...current, widgets: current.widgets.map(formatMachineAnalysisWidget) } };
     } catch (error) {
       throw new DashboardInputError(error instanceof Error ? error.message : "看板文件结构无效");
     }

@@ -3,10 +3,77 @@ import { Value } from "typebox/value";
 import { parseDashboardState, type DashboardRow, type DashboardState } from "../../../../shared/dashboard.ts";
 import type { AnalysisContext, Evidence } from "./agent.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../calculate/periods.ts";
-import { createAnalysisTemplate } from "../template.ts";
+import { createAnalysisTemplate, createMachineAnalysisTemplate, MACHINE_KINDS, MACHINE_RANKINGS,
+  type MachineKind, type MachineRanking } from "../template.ts";
+import { MACHINE_ADVICE_UNAVAILABLE, machineLossAndBottleneck, selectDailyMachines } from "../calculate/daily-machines.ts";
 import { normalizeDataSnapshotName } from "../../../tool/artifact-store.ts";
-import { formatMachineMentions, hasMachineDistributionClaim } from "../../../skills/test-oee-calculator/assets/machine-platforms.ts";
+import { formatMachineMentions, hasMachineDistributionClaim, machineLabel } from "../../../skills/test-oee-calculator/assets/machine-platforms.ts";
 import { machineRankingView } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
+
+// Shared feedback
+
+/** Shared diagnostics for period and machine validators; paths address the original candidate. */
+export interface AnalysisValidationIssue {
+  readonly code: string;
+  readonly path: string;
+  readonly period?: PeriodKey;
+  readonly kind?: MachineKind;
+  readonly ranking?: MachineRanking;
+  readonly machine?: string;
+  readonly priority?: number;
+  readonly item_index?: number;
+  readonly evidence_id?: string;
+  readonly expected: unknown;
+  readonly actual: unknown;
+  readonly message: string;
+  readonly hint: string;
+  readonly reason?: string;
+  readonly reasons?: readonly string[];
+}
+
+export interface AnalysisValidationFeedback {
+  readonly status: "valid" | "needs_repair" | "unavailable";
+  readonly issues: readonly AnalysisValidationIssue[];
+  readonly has_more: boolean;
+  readonly reason?: string;
+}
+
+export class AnalysisValidationError extends Error {
+  readonly issues: readonly AnalysisValidationIssue[];
+  readonly has_more: boolean;
+  constructor(issues: readonly AnalysisValidationIssue[], hasMore = false) {
+    const summary = issues.slice(0, 3).map((issue) => [issue.code, issue.period, issue.kind, issue.path,
+      issue.evidence_id, issue.message].filter(Boolean).join(" / ").slice(0, 180)).join("；");
+    super(summary.slice(0, 420) + (issues.length > 1 || hasMore
+      ? `；详见 validation.issues（本次 ${issues.length} 条${hasMore ? "，还有更多" : ""}）。` : ""));
+    this.name = "AnalysisValidationError";
+    this.issues = issues;
+    this.has_more = hasMore;
+  }
+}
+
+export function validationFeedback(
+  issues: readonly AnalysisValidationIssue[], options: { has_more?: boolean; reason?: string } = {},
+): AnalysisValidationFeedback {
+  return { status: options.reason !== undefined ? "unavailable" : issues.length || options.has_more ? "needs_repair" : "valid",
+    issues, has_more: options.has_more ?? false, ...(options.reason !== undefined ? { reason: options.reason } : {}) };
+}
+
+export function validationMessages(issues: readonly AnalysisValidationIssue[]): string {
+  return [...new Set(issues.map((issue) => issue.message))].join("；");
+}
+
+/** Diagnostics expose an offending scalar or shape, never a report or database row. */
+export function diagnosticValue(value: unknown): unknown {
+  if (value === undefined) return { type: "missing" };
+  if (typeof value === "number" && !Number.isFinite(value)) return { type: "number", value: String(value) };
+  if (typeof value === "string") return value.length > 160 ? value.slice(0, 160) + "…" : value;
+  if (Array.isArray(value)) return { type: "array", length: value.length };
+  if (value && typeof value === "object") return { type: "object", keys: Object.keys(value).slice(0, 12) };
+  return value;
+}
+
+// Period report structure and validation
 
 const ANALYSIS_KEYS = new Map(ANALYSIS_PERIOD_KEYS.map((key) => [createAnalysisTemplate(key).id, key]));
 
@@ -14,7 +81,7 @@ const narrativeDescription = "报告正文字符串，允许空字符串和纯�
 const text = Type.String({ description: narrativeDescription });
 const refs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12 });
 export const ANALYSIS_CATEGORY_RULES = "类别固定为 availability；每项对应程序选定的一个损失状态，机台排名使用 loss_hours，并且 states 仅包含该状态。本期损失小时来自完整状态汇总，不折算 Performance/Yield。";
-export const PeriodKeySchema = Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]);
+export const PeriodKeySchema = Type.Union([Type.Literal("day"), Type.Literal("week")]);
 const AnalysisKindSchema = Type.Union([Type.Literal("MT"), Type.Literal("ST")]);
 const AnalysisItemSchema = Type.Object({
   priority: Type.Integer({ minimum: 1, maximum: 3 }),
@@ -42,41 +109,11 @@ const AnalysisPeriodSchema = Type.Object({
 const reportSchema = (periodCount: number) => Type.Object({
   periods: Type.Array(AnalysisPeriodSchema, { minItems: periodCount, maxItems: periodCount }),
 }, { additionalProperties: false });
-export const AnalysisReportSchema = reportSchema(4);
+export const AnalysisReportSchema = reportSchema(ANALYSIS_PERIOD_KEYS.length);
 const AnalysisCandidateSchema = reportSchema(1);
 
 export type AnalysisReport = Static<typeof AnalysisReportSchema>;
 type AnalysisGroup = Static<typeof AnalysisGroupSchema>;
-
-export interface AnalysisValidationIssue {
-  readonly code: string;
-  readonly path: string;
-  readonly period?: PeriodKey;
-  readonly kind?: "MT" | "ST";
-  readonly priority?: number;
-  readonly item_index?: number;
-  readonly evidence_id?: string;
-  readonly expected: unknown;
-  readonly actual: unknown;
-  readonly message: string;
-  readonly hint: string;
-  readonly reason?: string;
-  readonly reasons?: readonly string[];
-}
-
-export class AnalysisValidationError extends Error {
-  readonly issues: readonly AnalysisValidationIssue[];
-  readonly has_more: boolean;
-  constructor(issues: readonly AnalysisValidationIssue[], hasMore = false) {
-    const summary = issues.slice(0, 3).map((issue) => [issue.code, issue.period, issue.kind, issue.path,
-      issue.evidence_id, issue.message].filter(Boolean).join(" / ").slice(0, 180)).join("；");
-    super(summary.slice(0, 420) + (issues.length > 1 || hasMore
-      ? `；详见 analysis_repair.issues（本次 ${issues.length} 条${hasMore ? "，还有更多" : ""}）。` : ""));
-    this.name = "AnalysisValidationError";
-    this.issues = issues;
-    this.has_more = hasMore;
-  }
-}
 
 export interface AnalysisExclusion {
   readonly period: PeriodKey;
@@ -91,26 +128,35 @@ export type AnalysisExclusionSummary = {
   readonly kind: "MT" | "ST";
   readonly priority: number;
   readonly codes: readonly string[];
+  readonly issues?: readonly AnalysisValidationIssue[];
 };
 export interface AnalysisPublication {
   readonly status: "completed" | "degraded";
   readonly exclusions: readonly AnalysisExclusionSummary[];
+  readonly periodStatus?: "completed" | "degraded";
+  readonly machines?: MachineAnalysisPublication;
+  readonly validation?: AnalysisValidationFeedback;
 }
 export interface AnalysisResult {
-  readonly report: AnalysisReport;
+  readonly report: AnalysisReport & { machine_groups?: MachineGroup[] };
   readonly rows: Record<PeriodKey, DashboardRow[]>;
   readonly status: "completed" | "degraded";
   readonly exclusions: readonly AnalysisExclusion[];
+  readonly periodStatus?: "completed" | "degraded";
+  readonly machines?: ReturnType<MachineAnalysisState["inspect"]>;
 }
 
-const ANALYSIS_PERIOD_NAMES: Record<PeriodKey, string> = { day: "日", week: "周", month: "月", quarter: "季度" };
-export function analysisExclusionSummary(exclusions: readonly Pick<AnalysisExclusion, "period" | "kind">[]): string {
+const ANALYSIS_PERIOD_NAMES: Record<PeriodKey, string> = { day: "日", week: "周" };
+export function analysisExclusionSummary(exclusions: readonly (Pick<AnalysisExclusion, "period" | "kind"> &
+  { readonly priority?: number; readonly issues?: readonly AnalysisValidationIssue[] })[]): string {
   const counts = new Map<string, number>();
   for (const entry of exclusions) {
     const label = ANALYSIS_PERIOD_NAMES[entry.period] + " " + entry.kind;
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
-  return "报告降级：" + [...counts].map(([label, count]) => label + " 剔除 " + count + " 条未通过证据校验的建议").join("；");
+  const reasons = exclusions.filter((entry) => entry.issues?.length).map((entry) =>
+    `${ANALYSIS_PERIOD_NAMES[entry.period]} ${entry.kind}${entry.priority !== undefined ? " 原第 " + entry.priority + " 条" : ""}：${validationMessages(entry.issues!)}`);
+  return "报告降级：" + [...counts].map(([label, count]) => label + " 剔除 " + count + " 条未通过证据校验的建议").concat(reasons).join("；");
 }
 
 /** Decode only structural fields; never guess repairs or echo report contents. */
@@ -331,11 +377,11 @@ export function inspectAnalysisCandidate(
     }
     candidate = parseReport({ periods: [input] }, AnalysisCandidateSchema);
     validateReport(candidate, context, evidence, [period]);
-    return { status: "valid" as const, issues: [], has_more: false, corrections: [], evidence_actions: [] };
+    return { ...validationFeedback([]), corrections: [], evidence_actions: [] };
   } catch (error) {
     if (!(error instanceof AnalysisValidationError)) throw error;
     const plan = analysisRepairPlan(context, evidence, candidate, error.issues, error.issues, { tool: "submit_analysis" }, false);
-    return { status: "needs_repair" as const, issues: error.issues, has_more: error.has_more,
+    return { ...validationFeedback(error.issues, { has_more: error.has_more }),
       corrections: plan.corrections.map((correction) => ({ ...correction, argument_path: correction.report_path ?? correction.path })),
       evidence_actions: plan.evidence_actions };
   }
@@ -381,7 +427,8 @@ export function applyAnalysisReport(
       warnings: [
         ...widget.warnings.filter((warning) => !warning.startsWith("本次分析暂不可用")),
         ...result.exclusions.filter((entry) => entry.period === key).map((entry) =>
-          ANALYSIS_PERIOD_NAMES[key] + " " + entry.kind + " 原第 " + entry.priority + " 条建议未通过证据校验，已剔除，请人工核实"),
+          (ANALYSIS_PERIOD_NAMES[key] + " " + entry.kind + " 原第 " + entry.priority + " 条建议未通过证据校验，已剔除；其余有效建议正常展示。原因：" +
+            validationMessages(entry.issues)).slice(0, 300)),
         ...report.groups.filter((group) => !group.items.length).map((group) =>
           (group.kind + " 未生成建议：" + group.no_findings_reason).slice(0, 300)),
         ...result.rows[key].filter((row) => typeof row["issue"] === "string" && row["issue"].includes("平台待维护/"))
@@ -413,16 +460,6 @@ export function pointerValue(value: unknown, path: string): unknown {
     if (!value || typeof value !== "object" || !Object.hasOwn(value, key)) return undefined;
     value = (value as Record<string, unknown>)[key];
   }
-  return value;
-}
-
-/** Diagnostics expose the offending scalar or shape, never a report or database row. */
-function diagnosticValue(value: unknown): unknown {
-  if (value === undefined) return { type: "missing" };
-  if (typeof value === "number" && !Number.isFinite(value)) return { type: "number", value: String(value) };
-  if (typeof value === "string") return value.length > 160 ? value.slice(0, 160) + "…" : value;
-  if (Array.isArray(value)) return { type: "array", length: value.length };
-  if (value && typeof value === "object") return { type: "object", keys: Object.keys(value).slice(0, 12) };
   return value;
 }
 
@@ -575,10 +612,10 @@ function analysisRepairPlan(
       if (issue.path.startsWith("/omitted_candidates")) instruction += " omitted_candidates 为可选字段;可省略此审计字段,填写时其中 item 也必须满足完整建议 Schema。";
     } else if (issue.code === "BASELINE_MISMATCH") {
       replacement = issue.expected;
-      instruction = "将该字段替换为 replacement 指定的本次运行基准编号,并完整重提四期报告。";
+      instruction = "将该字段替换为 replacement 指定的本次运行基准编号,并完整重提日、周两期报告。";
     } else if (issue.code === "PERIOD_COVERAGE") {
       choices = ANALYSIS_PERIOD_KEYS;
-      instruction = `完整提交四期报告；${issue.period} 当前出现 ${issue.actual} 次，必须恰好一次。periods 必须包含 choices 各一次，保留已核实的其他周期内容。`;
+      instruction = `完整提交日、周两期报告；${issue.period} 当前出现 ${issue.actual} 次，必须恰好一次。periods 必须包含 choices 各一次，保留已核实的其他周期内容。`;
     } else if (issue.code === "KIND_COVERAGE") {
       choices = ["MT", "ST"];
       instruction = `${issue.period} 的 groups 必须包含 MT、ST 各一组，${issue.kind} 当前出现 ${issue.actual} 次；修正分组后完整重提。`;
@@ -620,7 +657,7 @@ function analysisRepairPlan(
       }
     }
     if (issue.code === "REPAIR_TARGET_INVALID") instruction = submitTool === "submit_analysis"
-      ? "当前没有可局部修正的合法候选,或存在组外错误;调用 submit_analysis,提交完整四期、各期 MT/ST 两组。"
+      ? "当前没有可局部修正的合法候选,或存在组外错误;调用 submit_analysis,提交完整日、周两期、各期 MT/ST 两组。"
       : "从 repair_plan.targets 选择待修组,使用 pending_groups 中的原组,只修改出错字段;period、kind 和 group.kind 必须一致。";
     if (invalidTarget && submitTool === "repair_analysis_group" && targetAllowed && target &&
         record(issue.actual)["group_kind"] !== target.kind) {
@@ -637,7 +674,7 @@ function analysisRepairPlan(
   }
   return { submit_tool: submitTool,
     instruction: stopped ? "修正已停止,交由程序执行退出或降级;不要继续调用工具。" : submitTool === "submit_analysis"
-      ? "先修正本次列出的独立错误,再完整提交四期报告;不要调用局部修正工具。"
+      ? "先修正本次列出的独立错误,再完整提交日、周两期报告;不要调用局部修正工具。"
       : submitTool === "repair_analysis_group" ? "仅修正 targets 指定的现有组,复制 pending_groups 中原组并按 corrections 修改后调用局部修正;保留其他组。" : "当前没有待处理的校验错误。",
     targets: submitTool === "repair_analysis_group" ? targets : [], corrections, evidence_actions: stopped ? [] : actions };
 }
@@ -718,7 +755,11 @@ export class AnalysisRepairState {
     this.#lastAttempt = target ? { tool: "repair_analysis_group", target } : { tool: "submit_analysis" };
     this.#candidate = structuredClone(candidate);
     this.onEvent({ type: "analysis_candidate", report: this.#candidate });
-    try { return validateAnalysisReport(this.#candidate, this.context, this.evidence); }
+    try {
+      const result = validateAnalysisReport(this.#candidate, this.context, this.evidence);
+      this.#issues = []; this.#feedback = []; this.#hasMore = false;
+      return result;
+    }
     catch (error) {
       if (!(error instanceof AnalysisValidationError)) throw error;
       this.#issues = error.issues;
@@ -734,9 +775,9 @@ export class AnalysisRepairState {
       !this.#issues.some((issue) => issue.period === params.period && issue.kind === params.kind) ? "只能修正当前校验指出的周期和类型。" : null;
     if (invalid) {
       this.#reject([{ code: "REPAIR_TARGET_INVALID", path: "/group", period: params.period, kind: params.kind,
-        expected: this.#candidate ? this.modelContext().repair_plan.targets : "先用 submit_analysis 提交结构合法的完整四期报告",
+        expected: this.#candidate ? this.modelContext().repair_plan.targets : "先用 submit_analysis 提交结构合法的完整日、周两期报告",
         actual: { period: params.period, kind: params.kind, group_kind: params.group.kind }, message: invalid,
-        hint: !this.#candidate ? "调用 submit_analysis 完整提交四期报告；尚不能调用 repair_analysis_group。" : "按 repair_plan.submit_tool 和 targets 选择修正方式。" }]);
+        hint: !this.#candidate ? "调用 submit_analysis 完整提交日、周两期报告；尚不能调用 repair_analysis_group。" : "按 repair_plan.submit_tool 和 targets 选择修正方式。" }]);
       return undefined;
     }
     const next = structuredClone(this.#candidate!);
@@ -766,7 +807,7 @@ export class AnalysisRepairState {
     const groups = this.#candidate?.periods.flatMap((period) => period.groups.filter((group) =>
       this.#issues.some((issue) => issue.period === period.period && issue.kind === group.kind))
       .map((group) => ({ period: period.period, kind: group.kind, group }))) ?? [];
-    return { active: this.active, issues: this.#feedback, has_more: this.#hasMore, pending_groups: groups,
+    return { ...validationFeedback(this.#feedback, { has_more: this.#hasMore }), active: this.active, pending_groups: groups,
       repair_plan: analysisRepairPlan(this.context, this.evidence, this.#candidate, this.#feedback, this.#issues, this.#lastAttempt, !!this.#stopReason),
       remaining_repairs: Math.max(0, MAX_REPORT_REPAIRS - this.#failedRepairs),
       remaining_ms: this.#repairDeadline === undefined ? null : Math.max(0, this.#repairDeadline - Date.now()),
@@ -812,4 +853,356 @@ export class AnalysisRepairState {
       repair_plan: this.modelContext().repair_plan,
       repair_deadline: this.#repairDeadline, stop_reason: this.#stopReason ?? null });
   }
+}
+
+// Machine report structure, validation and publication feedback
+
+const rankingSchema = Type.Union([Type.Literal("best"), Type.Literal("worst")]);
+const MachineAdviceSchema = Type.Object({
+  machine: Type.String({ minLength: 1 }),
+  measure: Type.String({ minLength: 1, maxLength: 1200 }),
+  suggested_owner: Type.String({ minLength: 1, maxLength: 200 }),
+  evidence_reference: Type.Object({ evidence_id: Type.String({ minLength: 1 }), row_index: Type.Integer({ minimum: 0 }) }, { additionalProperties: false }),
+}, { additionalProperties: false });
+export const MachineGroupSchema = Type.Object({
+  kind: AnalysisKindSchema, ranking: rankingSchema, no_findings_reason: Type.String({ maxLength: 500 }),
+  items: Type.Array(MachineAdviceSchema, { maxItems: 10 }),
+}, { additionalProperties: false });
+const MachineGroupEnvelopeSchema = Type.Object({ ...MachineGroupSchema.properties,
+  items: Type.Array(Type.Unknown(), { maxItems: 10 }) }, { additionalProperties: false });
+export const MachineGroupsSchema = Type.Array(MachineGroupSchema, { minItems: 4, maxItems: 4 });
+export const MachineCandidateSchema = Type.Object({ machine_groups: Type.Array(MachineGroupSchema, { minItems: 2, maxItems: 2 }) }, { additionalProperties: false });
+export type MachineGroup = Static<typeof MachineGroupSchema>;
+type MachineAdvice = Static<typeof MachineAdviceSchema>;
+export type MachineAnalysisIssue = AnalysisValidationIssue & {
+  readonly period: "day";
+  readonly kind: MachineKind;
+  readonly ranking: MachineRanking;
+};
+type MachineAnalysisCoverage = { readonly kind: MachineKind; readonly ranking: MachineRanking;
+  readonly selected_machines: readonly string[]; readonly unavailable_machines: readonly string[] };
+export type MachineAnalysisPublication = {
+  readonly status: "completed" | "degraded";
+  readonly issues: readonly MachineAnalysisIssue[];
+  readonly interruption?: MachineAnalysisInterruption;
+  readonly coverage?: readonly MachineAnalysisCoverage[];
+};
+export type MachineAnalysisInterruption = { readonly status: "timed_out" | "failed"; readonly reason: string };
+type MachineAnalysisInspection = MachineAnalysisPublication & { readonly groups: MachineGroup[]; readonly coverage: readonly MachineAnalysisCoverage[] };
+export type MachineEvidence = Record<MachineKind, Evidence>;
+const keyFor = (kind: MachineKind, ranking: MachineRanking) => `${kind}-${ranking}`;
+
+/** Models return advice only. Selection, metrics and loss facts remain server-owned. */
+export class MachineAnalysisState {
+  readonly #records: MachineEvidence;
+  readonly #evidence: ReadonlyMap<string, Evidence>;
+  readonly #day: string;
+  readonly #candidates = new Map<string, { value: unknown; index: number; count: number }>();
+  #nextGroupIndex = 0;
+  #preparationIssues: readonly AnalysisValidationIssue[] = [];
+  constructor(records: MachineEvidence, evidence: ReadonlyMap<string, Evidence>, day: string) {
+    this.#records = records; this.#evidence = evidence; this.#day = day;
+  }
+
+  submit(input: unknown): void {
+    this.#candidates.clear();
+    this.#preparationIssues = [];
+    this.#nextGroupIndex = 0;
+    if (typeof input === "string") { try { input = JSON.parse(input); } catch { return; } }
+    if (!Array.isArray(input)) return;
+    this.#nextGroupIndex = input.length;
+    for (const [index, group] of input.entries()) {
+      if (!group || typeof group !== "object" || !MACHINE_KINDS.includes(group.kind) || !MACHINE_RANKINGS.includes(group.ranking)) continue;
+      const key = keyFor(group.kind, group.ranking);
+      // Duplicate groups cannot silently select one model answer.
+      const previous = this.#candidates.get(key);
+      this.#candidates.set(key, previous ? { ...previous, value: null, count: previous.count + 1 } : { value: group, index, count: 1 });
+    }
+  }
+
+  prepareGroup(input: unknown): MachineGroup {
+    this.#preparationIssues = [];
+    if (Value.Check(MachineGroupSchema, input)) return input;
+    const group = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const location = { period: "day" as const,
+      ...(MACHINE_KINDS.includes(group["kind"] as MachineKind) ? { kind: group["kind"] as MachineKind } : {}),
+      ...(MACHINE_RANKINGS.includes(group["ranking"] as MachineRanking) ? { ranking: group["ranking"] as MachineRanking } : {}) };
+    const issues: AnalysisValidationIssue[] = [];
+    if (Value.Check(MachineGroupEnvelopeSchema, group)) {
+      for (const [item_index, item] of group.items.entries()) {
+        if (Value.Check(MachineAdviceSchema, item)) continue;
+        const problems = item && typeof item === "object" && !Array.isArray(item) ? adviceStructureProblems(item) : [{ path: "",
+          expected: { fields: Object.keys(MachineAdviceSchema.properties) }, actual: diagnosticValue(item),
+          message: "机台建议必须为结构化对象", hint: "复制 pending_groups 中的原组，仅修正指定字段。" }];
+        const machine = item && typeof item === "object" && "machine" in item && typeof item.machine === "string" ? item.machine : undefined;
+        for (const problem of problems) issues.push({ ...location, ...problem, code: "MACHINE_ADVICE_STRUCTURE", path: `/items/${item_index}${problem.path}`,
+          item_index, ...(machine ? { machine } : {}) });
+      }
+    } else issues.push({ ...location, code: "MACHINE_GROUP_STRUCTURE", path: "/", expected: { fields: Object.keys(MachineGroupSchema.properties) },
+      actual: diagnosticValue(input), message: "修正的机台榜单结构不完整或字段类型无效", hint: "复制 machine_repair.pending_groups 中的目标组，按字段要求修正，保留其他内容。" });
+    this.#preparationIssues = issues;
+    throw new AnalysisValidationError(issues);
+  }
+
+  repair(group: MachineGroup): void {
+    this.#preparationIssues = [];
+    if (!this.inspect().issues.some((issue) => issue.kind === group.kind && issue.ranking === group.ranking)) {
+      this.#preparationIssues = [{ period: "day", kind: group.kind, ranking: group.ranking, code: "REPAIR_TARGET_INVALID", path: "/",
+        expected: this.modelContext().targets, actual: { kind: group.kind, ranking: group.ranking },
+        message: "只能修正 machine_repair.targets 指定的机台榜单组", hint: "选择 targets 指定的榜单组，保留已通过的其他组。" }];
+      throw new AnalysisValidationError(this.#preparationIssues);
+    }
+    const key = keyFor(group.kind, group.ranking);
+    this.#candidates.set(key, { value: structuredClone(group), index: this.#candidates.get(key)?.index ?? this.#nextGroupIndex++, count: 1 });
+  }
+
+  inspect(): MachineAnalysisInspection {
+    const issues: MachineAnalysisIssue[] = [];
+    const groups: MachineGroup[] = [];
+    const coverage: MachineAnalysisCoverage[] = [];
+    for (const kind of MACHINE_KINDS) for (const ranking of MACHINE_RANKINGS) {
+      const key = keyFor(kind, ranking);
+      const submitted = this.#candidates.get(key);
+      const candidate = submitted?.value;
+      const items: MachineAdvice[] = [];
+      const location = { period: "day" as const, kind, ranking };
+      const path = submitted ? `/machine_groups/${submitted.index}` : "/machine_groups";
+      const add = (issue: Omit<MachineAnalysisIssue, "period" | "kind" | "ranking">) => issues.push({ ...location, ...issue });
+      const record = this.#records[kind];
+      const selected = selectDailyMachines(record.rows, kind, ranking);
+      if (!Value.Check(MachineGroupEnvelopeSchema, candidate)) {
+        add({ code: "MACHINE_GROUP_STRUCTURE", path,
+          message: candidate === null ? "同一榜单被重复提交，无法确定采用哪组建议" : "榜单建议未提交或结构不完整",
+          expected: { kind, ranking, group_count: 1, fields: ["kind", "ranking", "no_findings_reason", "items"] },
+          actual: { group_count: submitted?.count ?? 0, group: diagnosticValue(candidate) },
+          hint: `提交且只提交一组 kind=${kind}、ranking=${ranking} 的完整建议，覆盖 selected 中的全部机台。` });
+      } else {
+        for (const [item_index, entry] of candidate.items.entries()) if (Value.Check(MachineAdviceSchema, entry) && !selected.some(({ row }) => row["machine"] === entry.machine)) {
+          add({ code: "MACHINE_NOT_SELECTED", path: `${path}/items/${item_index}/machine`, machine: entry.machine, item_index,
+            message: "建议机台不在程序选定的本类型本榜单中", expected: selected.map(({ row }) => row["machine"]), actual: entry.machine,
+            hint: "移除该榜外机台建议，只保留本类型本榜单 selected 指定的机台。" });
+        }
+        for (const { row, row_index } of selected) {
+          const machine = String(row["machine"]);
+          const matching = candidate.items.map((entry, item_index) => ({ entry, item_index }))
+            .filter(({ entry }) => entry && typeof entry === "object" && "machine" in entry && entry.machine === machine);
+          if (matching.length !== 1) {
+            add({ code: "MACHINE_COVERAGE", path: path + "/items", machine,
+              message: matching.length ? `重复提交了 ${matching.length} 条建议` : "缺少该机台的改善建议",
+              expected: { machine, count: 1 }, actual: { count: matching.length, item_indices: matching.map(({ item_index }) => item_index) },
+              hint: `为 ${machine} 保留且只保留一条完整建议，直接复制 selected 中对应的 evidence_reference。` });
+            continue;
+          }
+          const { entry: item, item_index } = matching[0]!;
+          const itemPath = `${path}/items/${item_index}`;
+          if (!Value.Check(MachineAdviceSchema, item) || !item.measure.trim() || !item.suggested_owner.trim()) {
+            const code = Value.Check(MachineAdviceSchema, item) ? "MACHINE_ADVICE_EMPTY" : "MACHINE_ADVICE_STRUCTURE";
+            for (const problem of adviceStructureProblems(item)) add({ code, ...problem, path: itemPath + problem.path, machine, item_index });
+            continue;
+          }
+          const reference = item.evidence_reference;
+          const actual = this.#evidence.get(reference.evidence_id);
+          const reasons: string[] = [];
+          if (!actual) reasons.push("引用的证据不存在");
+          else {
+            const sourceRow = actual.rows[reference.row_index];
+            if (actual.range?.start !== this.#day || actual.range.end !== this.#day || (sourceRow && sourceRow["day"] !== this.#day)) {
+              const actualDate = sourceRow && sourceRow["day"] !== this.#day ? sourceRow["day"] :
+                actual.range?.start === actual.range?.end ? actual.range?.start : `${actual.range?.start ?? "未记录"} 至 ${actual.range?.end ?? "未记录"}`;
+              reasons.push(`证据日期不匹配（应为 ${this.#day}，实际 ${actualDate ?? "未记录"}）`);
+            }
+            if (actual.owner?.period !== "day") reasons.push("引用的证据不属于日分析");
+            if (actual.source !== "daily_machines") reasons.push("引用的证据不是冻结机台指标");
+            if (actual.truncated) reasons.push("引用的证据不完整，已被截断");
+            if (!sourceRow) reasons.push(`引用的证据行不存在（行号 ${reference.row_index}）`);
+            else {
+              if (sourceRow["kind"] !== kind) reasons.push(`证据类型不匹配（应为 ${kind}，实际 ${sourceRow["kind"] ?? "未记录"}）`);
+              if (sourceRow["machine"] !== machine) reasons.push(`证据机台不匹配（应为 ${machineLabel(machine)}，实际 ${sourceRow["machine"] ? machineLabel(String(sourceRow["machine"])) : "未记录"}）`);
+            }
+            if (reference.row_index !== row_index && !reasons.length) reasons.push("证据行号与该机台的原始行不匹配");
+            if ((reference.evidence_id !== record.id || actual !== record) && !reasons.length) reasons.push("引用的证据不属于本次冻结的机台数据");
+          }
+          if (reasons.length) {
+            const sourceRow = actual?.rows[reference.row_index];
+            add({ code: "MACHINE_EVIDENCE_MISMATCH", path: itemPath + "/evidence_reference", machine, item_index,
+              evidence_id: reference.evidence_id, message: reasons.join("；"), reasons,
+              expected: { evidence_id: record.id, row_index, day: this.#day, kind, machine, source: "daily_machines", period: "day",
+                range: { start: this.#day, end: this.#day }, truncated: false, current_snapshot: true },
+              actual: { evidence_id: reference.evidence_id, row_index: reference.row_index, day: sourceRow?.["day"] ?? null,
+                kind: sourceRow?.["kind"] ?? null, machine: sourceRow?.["machine"] ?? null, source: actual?.source ?? null,
+                period: actual?.owner?.period ?? null, range: actual?.range ?? null, truncated: actual?.truncated ?? null, current_snapshot: actual === record },
+              hint: `将 evidence_reference 改为 ${JSON.stringify({ evidence_id: record.id, row_index })}，复用本业务日、本类型、本机台的 selected 原始引用，保留已核实的措施和责任职能。` });
+          } else items.push(structuredClone(item));
+        }
+      }
+      groups.push({ kind, ranking, no_findings_reason: Value.Check(MachineGroupSchema, candidate) ? candidate.no_findings_reason : "机台建议暂不可用", items });
+      const selectedMachines = selected.map(({ row }) => String(row["machine"]));
+      coverage.push({ kind, ranking, selected_machines: selectedMachines,
+        unavailable_machines: selectedMachines.filter((machine) => !items.some((item) => item.machine === machine)) });
+    }
+    return { groups, coverage, issues, status: issues.length ? "degraded" : "completed" };
+  }
+
+  modelContext() {
+    const result = this.inspect();
+    const targets = [...new Map(result.issues.map(({ kind, ranking }) => [keyFor(kind, ranking), { kind, ranking }])).values()];
+    return { ...validationFeedback([...this.#preparationIssues, ...result.issues]), targets,
+      pending_groups: targets.map(({ kind, ranking }) => ({ kind, ranking, group: this.#candidates.get(keyFor(kind, ranking))?.value ?? null })),
+      selected: machineSelectionContext(this.#records),
+      instruction: "只修正 targets 的组并调用 repair_machine_group；逐台复用 selected 中原始 evidence_reference，不重写排名、指标或损失事实。" };
+  }
+}
+
+function adviceStructureProblems(input: unknown) {
+  const item = input as Record<string, unknown>;
+  const problems: Pick<AnalysisValidationIssue, "path" | "expected" | "actual" | "message" | "hint">[] = [];
+  const add = (path: string, expected: unknown, actual: unknown, message: string, hint: string) =>
+    problems.push({ path, expected, actual: diagnosticValue(actual), message, hint });
+  if (typeof item["machine"] !== "string" || !item["machine"].length) add("/machine", "非空机台编号", item["machine"],
+    "缺少有效机台编号", "复制 selected 中的原始机台编号，不使用平台/机台显示标签替代。");
+  for (const [field, label, limit] of [["measure", "改善措施", 1200], ["suggested_owner", "建议责任职能", 200]] as const) {
+    const value = item[field];
+    if (typeof value !== "string" || !value.trim() || value.length > limit) {
+      add("/" + field, { type: "string", non_blank: true, maxLength: limit }, value,
+        typeof value === "string" && value.length > limit ? `${label}超过 ${limit} 字` : `缺少${label}`,
+        field === "measure" ? "为该机台填写针对短板的具体改善动作和验证指标。" : "填写建议责任职能，待人工确认，不编造姓名。");
+    }
+  }
+  const reference = item["evidence_reference"];
+  if (!reference || typeof reference !== "object" || Array.isArray(reference)) {
+    add("/evidence_reference", { evidence_id: "非空字符串", row_index: "非负整数" }, reference,
+      "证据引用缺少字段或字段类型无效", "复制 selected 中本机台的完整 evidence_reference。");
+  } else {
+    const ref = reference as Record<string, unknown>;
+    if (typeof ref["evidence_id"] !== "string" || !ref["evidence_id"].length) add("/evidence_reference/evidence_id", "非空证据编号", ref["evidence_id"],
+      "证据引用缺少有效的证据编号", "复制 selected 中本机台的 evidence_reference.evidence_id。");
+    if (typeof ref["row_index"] !== "number" || !Number.isInteger(ref["row_index"]) || ref["row_index"] < 0) add("/evidence_reference/row_index", "非负整数", ref["row_index"],
+      "证据引用缺少有效的原始行号", "复制 selected 中本机台的 evidence_reference.row_index，不使用排名代替。");
+    for (const field of Object.keys(ref).filter((field) => !["evidence_id", "row_index"].includes(field))) {
+      add("/evidence_reference/" + pointerToken(field), { allowed_fields: ["evidence_id", "row_index"] }, ref[field],
+        "证据引用含有不支持的字段", "删除该字段，只保留 evidence_id 和 row_index。");
+    }
+  }
+  for (const field of Object.keys(item).filter((field) => !Object.hasOwn(MachineAdviceSchema.properties, field))) {
+    add("/" + pointerToken(field), { allowed_fields: Object.keys(MachineAdviceSchema.properties) }, item[field],
+      "建议含有不支持的字段", "删除该字段，保留其他已核实内容。");
+  }
+  return problems;
+}
+
+export function machineSelectionContext(records: Partial<MachineEvidence>) {
+  return Object.entries(records).flatMap(([kind, record]) => MACHINE_RANKINGS.map((ranking) => ({
+    kind, ranking, selected: selectDailyMachines(record.rows, kind as MachineKind, ranking).map(({ row, row_index, rank }) => ({
+      machine: row["machine"], rank, oee: row["oee"], availability: row["availability"], dut_on: row["dut_on"],
+      test_time_performance: row["test_time_performance"], final_yield: row["final_yield"],
+      loss_and_bottleneck: machineLossAndBottleneck(row), loss_states: row["loss_states"],
+      evidence_reference: { evidence_id: record.id, row_index },
+    })),
+  })));
+}
+
+export function parseMachineCandidate(text: string): unknown {
+  const start = text.indexOf("{"), end = text.lastIndexOf("}");
+  if (start < 0 || end < start || !/^(?:\s*```)?\s*$/u.test(text.slice(end + 1))) return undefined;
+  try { return JSON.parse(text.slice(start, end + 1)); } catch { return undefined; }
+}
+
+export function inspectMachineCandidate(text: string, kind: MachineKind, records: MachineEvidence, evidence: ReadonlyMap<string, Evidence>, day: string) {
+  const input = parseMachineCandidate(text);
+  const envelope = Type.Object({ machine_groups: Type.Array(Type.Unknown(), { minItems: 2, maxItems: 2 }) }, { additionalProperties: false });
+  if (!Value.Check(envelope, input)) return validationFeedback([{
+    code: "MACHINE_GROUP_STRUCTURE", path: "/machine_groups", period: "day", kind,
+    expected: { type: "array", length: 2, kind, rankings: ["best", "worst"] }, actual: diagnosticValue(input && typeof input === "object" && "machine_groups" in input ? input.machine_groups : input),
+    message: "子任务未返回包含最佳、最差两组建议的合法 JSON", hint: `返回 {machine_groups:[${kind} 最佳组,${kind} 最差组]}，直接传结构化数组。`,
+  }]);
+  const state = new MachineAnalysisState(records, evidence, day);
+  state.submit(input.machine_groups);
+  const issues = state.inspect().issues.filter((issue) => issue.kind === kind);
+  return validationFeedback(issues);
+}
+
+const advicePrefix = MACHINE_ADVICE_UNAVAILABLE + "：";
+const machineWidgetGroups = new Map(MACHINE_KINDS.flatMap((kind) => MACHINE_RANKINGS.map((ranking) =>
+  [createMachineAnalysisTemplate(kind, ranking).id, { kind, ranking }] as const)));
+const groupLabel = ({ kind, ranking }: { kind: MachineKind; ranking: MachineRanking }) => `${kind} ${ranking === "best" ? "最佳" : "最差"}榜`;
+const bounded = (text: string) => text.length > 300 ? text.slice(0, 299) + "…" : text;
+const alert = (text: string) => bounded(advicePrefix + text);
+const reasonsForMachine = (issues: readonly MachineAnalysisIssue[], machine: string) =>
+  validationMessages(issues.filter((issue) => !issue.machine || issue.machine === machine)) || "缺少该机台的改善建议";
+
+function machineValidationAlerts(coverage: MachineAnalysisCoverage, issues: readonly MachineAnalysisIssue[]): string[] {
+  if (!issues.length) return [];
+  const failed = coverage.unavailable_machines;
+  return [
+    `${groupLabel(coverage)}：${failed.length}/${coverage.selected_machines.length} 台机台的建议未通过校验${failed.length ? "，对应建议暂不展示" : "，入榜建议均可用，额外的无效建议已忽略"}；排名、五项指标及短板已保留，其余有效建议正常展示。`,
+    ...failed.map((machine) => `${machineLabel(machine)}：${reasonsForMachine(issues, machine)}`),
+    ...issues.filter((issue) => issue.machine && !coverage.selected_machines.includes(issue.machine))
+      .map((issue) => `忽略榜外建议 ${machineLabel(issue.machine!)}：${issue.message}`),
+    ...(!coverage.selected_machines.length ? issues.filter((issue) => !issue.machine).map((issue) => issue.message) : []),
+  ];
+}
+
+const interruptionCause = (interruption: MachineAnalysisInterruption) =>
+  `${interruption.status === "timed_out" ? "分析超时" : "分析失败"}（${interruption.reason.replace(/\s+/gu, " ").slice(0, 160)}）`;
+const machineInterruptionAlert = (coverage: MachineAnalysisCoverage, interruption: MachineAnalysisInterruption) =>
+  `${groupLabel(coverage)}：${interruptionCause(interruption)}，${coverage.unavailable_machines.length}/${coverage.selected_machines.length} 台机台的建议暂不可用；排名、五项指标及短板已保留，已通过校验的建议正常展示。`;
+
+export function applyMachineAnalysis(state: DashboardState, result: MachineAnalysisInspection): DashboardState {
+  const analyzed = parseDashboardState({ ...state, widgets: state.widgets.map((widget) => {
+    const group = result.groups.find(({ kind, ranking }) => createMachineAnalysisTemplate(kind, ranking).id === widget.id);
+    if (!group) return widget;
+    const issues = result.issues.filter((issue) => issue.kind === group.kind && issue.ranking === group.ranking);
+    const coverage = result.coverage.find((entry) => entry.kind === group.kind && entry.ranking === group.ranking)!;
+    const warnings = machineValidationAlerts(coverage, issues).map(alert);
+    return { ...widget, data: widget.data.map((row) => {
+      const advice = group.items.find((item) => item.machine === row["machine"]);
+      return { ...row, action_and_owner: advice ? `改善措施：${advice.measure}\n建议责任人：${advice.suggested_owner}（职能建议，待人工确认）` :
+        bounded(`${advicePrefix}未通过校验（${reasonsForMachine(issues, String(row["machine"]))}）`) };
+    }), warnings: [...warnings, ...widget.warnings.filter((warning) => !warning.startsWith(MACHINE_ADVICE_UNAVAILABLE)),
+      ...(!widget.data.length && group.no_findings_reason ? [bounded(group.no_findings_reason)] : [])].slice(0, 20) };
+  }) });
+  return result.interruption ? machineAnalysisInterrupted(analyzed, result.interruption, result) : analyzed;
+}
+
+export function machineAnalysisFailure(
+  state: DashboardState, interruption: MachineAnalysisInterruption, previous?: MachineAnalysisPublication,
+): MachineAnalysisPublication {
+  return { status: "degraded", issues: previous?.issues ?? [], interruption,
+    coverage: previous?.coverage ?? state.widgets.flatMap((widget) => {
+      const group = machineWidgetGroups.get(widget.id);
+      return group ? [{ ...group, selected_machines: widget.data.map((row) => String(row["machine"])),
+        unavailable_machines: widget.data.filter((row) => String(row["action_and_owner"] ?? "").startsWith(MACHINE_ADVICE_UNAVAILABLE)).map((row) => String(row["machine"])) }] : [];
+    }) };
+}
+
+/** Preserve every accepted suggestion, and explain why the remaining rows could not be completed. */
+export function machineAnalysisInterrupted(state: DashboardState, interruption: MachineAnalysisInterruption, previous?: MachineAnalysisPublication): DashboardState {
+  const publication = machineAnalysisFailure(state, interruption, previous);
+  const cause = interruptionCause(interruption);
+  return parseDashboardState({ ...state, widgets: state.widgets.map((widget) => {
+    const group = machineWidgetGroups.get(widget.id);
+    if (!group) return widget;
+    const coverage = publication.coverage!.find((entry) => entry.kind === group.kind && entry.ranking === group.ranking)!;
+    if (!coverage.unavailable_machines.length && coverage.selected_machines.length) return widget;
+    return { ...widget, data: widget.data.map((row) => {
+      if (!coverage.unavailable_machines.includes(String(row["machine"]))) return row;
+      const issues = publication.issues.filter((issue) => issue.kind === group.kind && issue.ranking === group.ranking && (!issue.machine || issue.machine === row["machine"]));
+      return { ...row, action_and_owner: bounded(`${advicePrefix}${cause}${issues.length ? "；未通过校验（" + validationMessages(issues) + "）" : ""}`) };
+    }), warnings: [alert(machineInterruptionAlert(coverage, interruption)),
+      ...widget.warnings.filter((warning) => !warning.startsWith(MACHINE_ADVICE_UNAVAILABLE) || !warning.includes("尚未完成逐台分析")),
+    ].slice(0, 20) };
+  }) });
+}
+
+/** Summaries consume validator output; dashboard warning strings are never a data source. */
+export function machineAnalysisSummary(publication: MachineAnalysisPublication): string {
+  return MACHINE_KINDS.flatMap((kind) => MACHINE_RANKINGS.flatMap((ranking) => {
+    const issues = publication.issues.filter((issue) => issue.kind === kind && issue.ranking === ranking);
+    const coverage = publication.coverage?.find((entry) => entry.kind === kind && entry.ranking === ranking);
+    if (!coverage) return issues.map((issue) => `${groupLabel({ kind, ranking })} ${issue.machine ? machineLabel(issue.machine) + "：" : "："}${issue.message}`);
+    return [
+      ...(publication.interruption && (coverage.unavailable_machines.length || !coverage.selected_machines.length) ? [machineInterruptionAlert(coverage, publication.interruption)] : []),
+      ...machineValidationAlerts(coverage, issues),
+    ];
+  })).join("；");
 }

@@ -30,11 +30,15 @@ import { SubagentRunner, type SubagentResult } from "../../../agent/subagent.ts"
 import { NUMBER_DISPLAY_RULES } from "../../../agent/prompts.ts";
 import { minimumComparisonPeriod, selectLosses, summarizeDailyOee, type AnalysisLossCandidate } from "../calculate/index.ts";
 import { dashboardPeriods, ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../calculate/periods.ts";
-import { createAnalysisTemplate } from "../template.ts";
+import { createAnalysisTemplate, type MachineKind } from "../template.ts";
+import { dailyMachineSql } from "../calculate/daily-machines.ts";
 import type { DefaultDashboardAnalysisConfig } from "./index.ts";
 import {
   ANALYSIS_CATEGORY_RULES, AnalysisReportSchema, PeriodKeySchema, AnalysisRepairState, RepairAnalysisGroupSchema,
   applyAnalysisReport, inspectAnalysisCandidate, type AnalysisResult, type AnalysisPublication,
+  MachineAnalysisState, MachineGroupsSchema, MachineGroupSchema, applyMachineAnalysis,
+  inspectMachineCandidate, machineSelectionContext, validationFeedback,
+  type MachineEvidence, type MachineAnalysisInterruption, type AnalysisValidationFeedback,
 } from "./validation.ts";
 
 export interface Evidence {
@@ -45,7 +49,7 @@ export interface Evidence {
   readonly truncated: boolean;
   readonly sourceId?: string;
   readonly range?: DatePeriod;
-  readonly source?: "measure_loss" | "rank_machines";
+  readonly source?: "measure_loss" | "rank_machines" | "daily_machines";
   readonly lossScope?: LossScope;
   readonly rankingScope?: MachineRankingScope;
   readonly snapshot?: DataSnapshotDescriptor;
@@ -75,6 +79,7 @@ export interface AnalysisContext {
     readonly by_kind: Record<"MT" | "ST", readonly AnalysisLossCandidate[]>;
   }>;
   readonly dashboard: DashboardState;
+  readonly machines: MachineEvidence;
 }
 
 function normalize(row: Record<string, unknown>): DashboardRow {
@@ -186,7 +191,7 @@ export class AnalysisEvidence {
     return { sql, parameters, rows, truncated };
   }
 
-  context(state: DashboardState, throughDate: string): AnalysisContext {
+  context(state: DashboardState, throughDate: string, machineRows?: readonly DashboardRow[]): AnalysisContext {
     if (!this.artifacts) throw new Error("每日分析需要独立的数据快照存储");
     const periods = dashboardPeriods(throughDate);
     const source = this.query(getDefaultTestOeeSql(periods.syncStart, throughDate).sql, [], 800);
@@ -213,7 +218,14 @@ export class AnalysisEvidence {
       losses[key] = { evidence_id: loss.id, snapshot: loss.snapshot!,
         by_kind: { MT: selectLosses(loss.rows, "MT"), ST: selectLosses(loss.rows, "ST") } };
     }
-    return { throughDate, periods, comparisons, losses, dashboard: state };
+    const machines = Object.fromEntries((["MT", "ST"] as const).map((kind) => {
+      const record = machineRows ? { sql: dailyMachineSql(throughDate, kind), parameters: [],
+        rows: machineRows.filter((row) => row["kind"] === kind), truncated: false } : this.#read(dailyMachineSql(throughDate, kind), [], 100_000);
+      if (record.truncated) throw new Error("机台日指标证据被截断");
+      return [kind, this.#save({ ...record, source: "daily_machines", range: periods.day,
+        owner: { period: "day", agentId: "baseline" } })];
+    })) as MachineEvidence;
+    return { throughDate, periods, comparisons, losses, machines, dashboard: state };
   }
 
   /** Only the shared standard measurement path can mark report loss references. */
@@ -269,7 +281,7 @@ function evidenceOwner(params: object, scope?: AnalysisEvidenceScope): EvidenceO
     return { period: scope.period, agentId: scope.agentId };
   }
   const period = "period" in params ? params.period : undefined;
-  if (!ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：day、week、month 或 quarter");
+  if (!ANALYSIS_PERIOD_KEYS.includes(period as PeriodKey)) throw new Error("每日补查必须指定 period：day 或 week");
   return { period: period as PeriodKey, agentId: "root" };
 }
 
@@ -379,6 +391,15 @@ function summary(evidence: Evidence) {
   };
 }
 
+export function machineAnalysisPrompt(kind: MachineKind, records: MachineEvidence, day: string): string {
+  return `你是每日 OEE 机台改善分析员，只调查 ${day} 业务日 ${kind} 最佳和最差机台，不能调查其他类型、周期或任务的证据。
+程序已计算选台、排名、五项百分数指标、主损失和最低子项，不能改动或重算这些事实。逐台根据短板及状态提出具体改善动作和验证指标，建议责任人只写职能，待人工确认，不编造姓名。最佳榜也要改善短板；有依据时补充保持表现及经验推广，不能凭排名推断根因或最佳实践。推测写待验证。
+最终只返回 JSON：{"machine_groups":[{"kind":"${kind}","ranking":"best","no_findings_reason":"","items":[{"machine":"实际机台","measure":"动作及验证指标","suggested_owner":"建议责任职能","evidence_reference":{"evidence_id":"真实编号","row_index":0}}]},{"kind":"${kind}","ranking":"worst","no_findings_reason":"","items":[]}]}。
+两榜都覆盖 selected 的每台机台各一次，直接复制对应 evidence_reference；无入榜机台时 items=[] 并说明原因。不要提交其他字段、指标或整份每日报告。工具补查不传 period；来源已足够时无需补查。措施简洁，每台一至两句。
+${NUMBER_DISPLAY_RULES}
+冻结机台证据：${JSON.stringify(machineSelectionContext({ [kind]: records[kind] }))}`;
+}
+
 export function analysisPrompt(context: AnalysisContext, period?: PeriodKey): string {
   const child = period !== undefined;
   const keys = period ? [period] : ANALYSIS_PERIOD_KEYS;
@@ -390,16 +411,16 @@ export function analysisPrompt(context: AnalysisContext, period?: PeriodKey): st
   const role = child ? `你是每日 OEE 分析的子 Agent,只调查 ${period} 周期,向主 Agent 返回候选结果。
 只能读取本周期的初始证据和本任务新增证据;不得调查其他周期或读取其他任务的快照。周期由服务端绑定,execute_sql、measure_loss 和排名工具均不填写 period。
 你没有报告提交、修正、发布或继续委派的权限。最终回复只返回一个本周期的 JSON 对象,不加 Markdown 代码块或整份 periods 外层。
-输出字段为 period、comparison、minimum_evidence、history_evidence、groups;groups 包含 MT/ST 两组,组和建议字段按下方结构要求填写。` : `你是每日 OEE 分析的主 Agent,负责汇总日、周、月、季四期候选、补齐必要证据并提交报告。
+输出字段为 period、comparison、minimum_evidence、history_evidence、groups;groups 包含 MT/ST 两组,组和建议字段按下方结构要求填写。` : `你是每日 OEE 分析的主 Agent,负责汇总日、周两期候选、补齐必要证据并提交报告。
 程序已并行完成四个子任务,结果在动态上下文 subagent_results 中;你不能再次委派。可读取本次运行全部证据,但报告引用仍须归属对应周期。
-补查时,execute_sql、measure_loss 和排名工具必须填写 period=day/week/month/quarter。最终交付是调用 submit_analysis 提交 {periods:[四期对象]},仅回复正文不算提交。`;
+补查时,execute_sql、measure_loss 和排名工具必须填写 period=day/week。最终交付是调用 submit_analysis 提交 {periods:[日、周两期对象],machine_groups:[MT最佳,MT最差,ST最佳,ST最差]}；机台子任务为 machines_mt/machines_st,仅回复正文不算提交。`;
   const workflow = child ? `1. 读取 test-oee-calculator Skill 及任务所需参考文档;先看本周期 periods、comparisons、losses 和动态证据目录。
 2. 直接复用程序提供的完整损失汇总。建议优先覆盖 MT/ST 入选状态并沿用其排名;已有损失不因 OEE 无法计算而失去分析价值。
 3. 对准备返回的每项建议,复用或查询对应单个状态的机台排名;只有判断所需事实不足时,再补查机台明细、历史或组成项。
 4. 返回精简的本周期候选 JSON,保留真实证据编号和原始行号。数据或额度不足时,返回已有证据支持的内容,将限制写入 comparison 或 no_findings_reason,不增加其他字段,及时结束。
 最多调用 12 次工具;实际可用额度以动态 remaining_tool_calls 为准。` : `1. 逐项检查 subagent_results 的 name、status、text_truncated 和 validation。completed 且未截断、validation.status=valid 的候选直接复用,不额外安排复核。
-2. validation.status=needs_repair 时,先按 issues、corrections 和 evidence_actions 修正候选引用再组装;这些路径相对于该子任务的 {periods:[候选]}。预检不代表已提交,此时不要调用 repair_analysis_group。对失败、截断或缺少必要证据的周期,先查动态 evidence 目录复用已冻结证据;仅在确实缺少时补查。中途输出不能当作完整结论。
-3. 组装四期及各期 MT/ST 两组,直接调用 submit_analysis,不先用自由文本复述整份报告。
+2. validation.status=needs_repair 时,先读取 issues 中的 path、expected、actual、message、hint,按修正建议及 corrections、evidence_actions 修正后再组装。日周路径相对于 {periods:[候选]},机台路径相对于子任务原始 {machine_groups:[两组]}，不能将入榜排名当作数组下标。预检不代表已提交,此时不要调用 repair_analysis_group。对失败、截断或缺少必要证据的周期,先查动态 evidence 目录复用已冻结证据;仅在确实缺少时补查。中途输出不能当作完整结论。
+3. 组装日、周两期及各期 MT/ST 两组,直接调用 submit_analysis,不先用自由文本复述整份报告。
 4. 若提交退回,先读 analysis_repair.repair_plan,按 submit_tool 选择完整提交或局部修正,再按 corrections 定位字段。只修正 targets 指定的组,复制 pending_groups 原组并保留其他合规内容;有 pending_groups 也不能覆盖 submit_tool 的完整重提要求。优先复用 evidence_actions 中的编号,仅按 query 指引补查。
 提交返回 accepted=true 即完成,不需要再次确认。remaining_repairs 是剩余失败修正额度;成功修正一组但其他组仍有错误时继续修正,不消耗失败额度。修正止损、证据降级和发布由程序负责。
 主子 Agent 合计最多调用 60 次工具,最后 8 次留给主 Agent;实际剩余额度以动态 remaining_tool_calls 为准。`;
@@ -410,7 +431,7 @@ ${role}
 ${workflow}
 
 【结构与验收:必须满足】
-${child ? "候选只包含分配的一个周期。" : "periods 必须包含 day、week、month、quarter 各一次。"}每个周期包含 period、comparison、minimum_evidence、history_evidence、groups;groups 中 MT/ST 各一组。
+${child ? "候选只包含分配的一个周期。" : "periods 必须包含 day、week 各一次。"}每个周期包含 period、comparison、minimum_evidence、history_evidence、groups;groups 中 MT/ST 各一组。
 每组包含 kind、no_findings_reason、evidence_ids、items;items 可有 0-3 项。每项包含 priority、category、issue、measure、suggested_owner、evidence_ids、machine_evidence_ids、loss_reference,不添加额外字段。
 ${ANALYSIS_CATEGORY_RULES}priority 为 1-3 整数;证据数组各有 1-12 个非空编号。loss_reference 必填且非 null,row_index 为非负整数。
 验收只检查结构和证据。允许少报入选状态、重复状态、重复或调整优先级;正文只要求字符串类型,允许空串或纯空白,措辞、内部标记、自写 TOP3 和机台分布表述不参与验收。
@@ -422,7 +443,7 @@ ${JSON.stringify({ period: period ?? "day", comparison: "本期与最低点、�
       items: [{ priority: 1, category: "availability", issue: "事实和待验证原因", measure: "动作与验证指标", suggested_owner: "建议责任职能",
         evidence_ids: ["<losses.evidence_id>", "<排名编号>"], machine_evidence_ids: ["<排名编号>"], loss_reference: { evidence_id: "<losses.evidence_id>", row_index: 0 } }] },
     { kind: "ST", no_findings_reason: "无建议时说明证据限制", evidence_ids: ["<current.evidence_id>", "<losses.evidence_id>"], items: [] }] })}
-${child ? "最终只返回上述单周期对象,不包 periods,不加 Markdown。" : "主 Agent 调用 submit_analysis({periods: [day候选对象, week候选对象, month候选对象, quarter候选对象]});必须传实际对象数组,上述名称不是字符串值。"}
+${child ? "最终只返回上述单周期对象,不包 periods,不加 Markdown。" : "主 Agent 调用 submit_analysis({periods:[day候选对象,week候选对象],machine_groups:[四个机台榜单组]});必须传实际对象。机台组含 kind、ranking(best/worst)、no_findings_reason、items；每项含 machine、measure、suggested_owner、evidence_reference:{evidence_id,row_index}，复用机器子任务候选。每台措施和责任职能必填，覆盖 machine_repair.selected 每榜全部机台，不重复，不改指标。日周问题按 analysis_repair 修正；机台问题按 machine_repair.targets 调用 repair_machine_group，仅传完整目标组。"}
 提交前逐项检查:所有字段齐全且无额外字段;每期 MT/ST 各一组;每项都有 category=availability;组级 evidence_ids 包含 current 和完整 losses;每项 loss_reference 对应入选原始行,损失编号与排名编号均加入该项 evidence_ids;证据数组各 1-12 项。item_index 是建议数组下标,priority 是显示优先级,row_index 是快照原始行号,三者不可互换。
 ${child ? "" : "局部修正参数为 {period,kind,group},group 是完整目标组。omitted_candidates 可省略;填写时每个 item 也必须满足完整建议 Schema,不能把缺字段或空 machine_evidence_ids 的无效 item 放入其中。"}
 
@@ -443,7 +464,7 @@ Python 只调用一次 emit_result,例如 emit_result(summary='覆盖核查', me
 每次请求都会刷新证据目录、remaining_tool_calls 和沙箱状态;上下文压缩后以这些服务端数据为准,不重新生成已存在的证据。${child ? "" : "主 Agent 还会收到 subagent_results、report_accepted 和 analysis_repair。"}
 
 【统计口径】
-本期范围以 periods 为准:最新业务日、最近完整周、当月累计、当季累计。最低点使用 comparisons.minimum;历史参考从年初到本期之前,使用 comparisons.history。没有可计算基准时说明限制,不虚构对比。
+本期范围以 periods 为准:最新业务日、最近完整周。最低点使用 comparisons.minimum;历史参考从年初到本期之前,使用 comparisons.history。没有可计算基准时说明限制,不虚构对比。
 means 为原始比率,1 表示 100%,不截断上下界。daily_test_oee 是该类型 OEE 可计算日的等权平均;四个组成项也在相同可计算日上等权平均,不能将组成项均值相乘代替 OEE。
 覆盖不同的期间宜比较日均或同覆盖值;日均值写明实际分母,避免直接比较覆盖不同的损失总小时。
 
@@ -465,13 +486,14 @@ export async function runAnalysisAgent(
   onEvent: (event: Record<string, unknown>) => void,
   onReport: (result: AnalysisResult) => void,
   signal?: AbortSignal, deadline = Date.now() + config.timeoutMs,
+  onCheckpoint?: (result: AnalysisResult) => void,
 ): Promise<void> {
   const lifetime = AbortSignal.any([AbortSignal.timeout(Math.max(0, deadline - Date.now())), ...(signal ? [signal] : [])]);
   assertModelInLocalCatalog(config.agentDir, { provider: config.provider, model: config.model });
   const interpreter = await CodeInterpreterRuntime.create({ ...config.codeInterpreter, projectRoot: config.cwd });
   try {
     lifetime.throwIfAborted();
-    await runSession(config, context, evidence, interpreter, onEvent, onReport, lifetime, deadline);
+    await runSession(config, context, evidence, interpreter, onEvent, onReport, lifetime, deadline, onCheckpoint);
   } finally {
     interpreter.dispose();
   }
@@ -482,6 +504,7 @@ async function runSession(
   interpreter: CodeInterpreterRuntime, onEvent: (event: Record<string, unknown>) => void,
   onReport: (result: AnalysisResult) => void,
   signal: AbortSignal, deadline: number,
+  onCheckpoint?: (result: AnalysisResult) => void,
 ): Promise<void> {
   const modelRuntime = await ModelRuntime.create({
     authPath: path.join(config.agentDir, "auth.json"), modelsPath: path.join(config.agentDir, "models.json"),
@@ -499,8 +522,12 @@ async function runSession(
   const toolBudget = new AnalysisToolCallBudget();
   let accepted = false;
   let childResults: (SubagentResult & {
-    validation: ReturnType<typeof inspectAnalysisCandidate> | { status: "unavailable"; reason: string };
+    validation: AnalysisValidationFeedback;
   })[] = [];
+  const machineAnalysis = new MachineAnalysisState(context.machines, evidence.records, context.throughDate);
+  let periodResult: AnalysisResult | undefined;
+  let machineInterruption: MachineAnalysisInterruption | undefined;
+  let machineRepairs = 0;
   let turnId = 0;
   const toolStartedAt = new Map<string, number>();
   let exhausted = false;
@@ -517,8 +544,12 @@ async function runSession(
       }, Math.max(0, repair.repairDeadline! - Date.now()));
     }
   });
+  const combinedValidation = () => {
+    const periods = repair.modelContext();
+    return validationFeedback([...periods.issues, ...machineAnalysis.modelContext().issues], { has_more: periods.has_more });
+  };
   const failureFeedback = () => {
-    const details = { accepted: false, ...repair.modelContext() };
+    const details = { accepted: false, ...repair.modelContext(), machine_repair: machineAnalysis.modelContext(), validation: combinedValidation() };
     return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
   };
   const reportFeedback = new Map<string, ReturnType<typeof failureFeedback>>();
@@ -527,13 +558,15 @@ async function runSession(
       { role: "custom", customType: "sql_web.analysis.context", display: false, timestamp: Date.now(),
         content: JSON.stringify({ throughDate: context.throughDate, remaining_tool_calls: MAX_ANALYSIS_TOOL_CALLS - toolBudget.used,
           losses: context.losses, subagent_results: childResults, report_accepted: accepted, analysis_repair: repair.modelContext(),
+          machine_repair: machineAnalysis.modelContext(),
+          validation: combinedValidation(),
           code_interpreter: interpreter.status, evidence: evidence.catalog() }) },
       ...event.messages.filter((message) => message.role !== "custom" || message.customType !== "sql_web.analysis.context")
         .map((message) => message.role === "toolResult" && reportFeedback.has(message.toolCallId)
           ? { ...message, ...reportFeedback.get(message.toolCallId)!, isError: true }
           : message.role === "toolResult" && message.isError ? {
           ...message, content: message.content.map((part) => part.type === "text" ? {
-            ...part, text: ["submit_analysis", "repair_analysis_group"].includes(message.toolName)
+            ...part, text: ["submit_analysis", "repair_analysis_group", "repair_machine_group"].includes(message.toolName)
               ? part.text.split("\n\nReceived arguments:")[0]!
               : part.text.split("\n\nReceived arguments:")[0]!.slice(0, 2000),
           } : part),
@@ -554,9 +587,9 @@ async function runSession(
       return undefined;
     });
     pi.on("tool_result", (event) => {
-      if (!["submit_analysis", "repair_analysis_group"].includes(event.toolName)) return;
+      if (!["submit_analysis", "repair_analysis_group", "repair_machine_group"].includes(event.toolName)) return;
       const details = event.details as { accepted?: boolean } | undefined;
-      if (details?.accepted === false || (event.isError && repair.active)) {
+      if (details?.accepted === false || (event.isError && (repair.active || machineAnalysis.modelContext().issues.length > 0))) {
         return { isError: true, ...failureFeedback() };
       }
       return undefined;
@@ -574,10 +607,20 @@ async function runSession(
   if (errors.length) throw new Error(errors.map((error) => error.error).join("; "));
   const subagents = new SubagentRunner({
     cwd: config.cwd, agentDir: config.agentDir, catalog, parent: () => parent, signal, deadline,
-    maxTasksPerBatch: ANALYSIS_PERIOD_KEYS.length,
+    maxTasksPerBatch: 4, maxResultCharacters: 32000,
     tryConsumeTool: () => toolBudget.take(true), remainingTools: () => toolBudget.remainingForChildren,
     onEvent: (event) => onEvent({ ...event, ...(event["type"] === "tool_call" ? { number: toolBudget.used } : {}) }),
     prepareBatch: () => (agentId, task) => {
+      if (task.name === "machines_mt" || task.name === "machines_st") {
+        const kind = task.name === "machines_mt" ? "MT" : "ST";
+        const scope: AnalysisEvidenceScope = { period: "day", agentId, baselineIds: [context.machines[kind].id] };
+        return {
+          systemPrompt: machineAnalysisPrompt(kind, context.machines, context.throughDate),
+          tools: createAnalysisTools(evidence, interpreter, scope), skillOptions: createAnalysisSkillOptions(evidence, scope),
+          context: () => ({ throughDate: context.throughDate, selected: machineSelectionContext({ [kind]: context.machines[kind] }),
+            evidence: evidence.catalog(scope), code_interpreter: interpreter.status }),
+        };
+      }
       if (!ANALYSIS_PERIOD_KEYS.includes(task.name as PeriodKey)) throw new Error("无效的分析周期");
       const period = task.name as PeriodKey;
       const scope = evidence.scope(context, period, agentId);
@@ -591,26 +634,62 @@ async function runSession(
     },
   });
   const output = (details: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(details) }], details });
+  const withMachines = (result: AnalysisResult): AnalysisResult => {
+    const machines = { ...machineAnalysis.inspect(), ...(machineInterruption ? { interruption: machineInterruption } : {}) };
+    return { ...result, report: { ...result.report, machine_groups: machines.groups }, machines,
+      periodStatus: result.status, status: result.status === "degraded" || machines.status === "degraded" ? "degraded" : "completed" };
+  };
   const accept = (result: AnalysisResult): void => {
     signal.throwIfAborted();
-    onReport(result);
+    const combined = withMachines(result);
+    onReport(combined);
     accepted = true;
     if (repairTimer) clearTimeout(repairTimer);
-    onEvent({ type: "analysis_accepted", turnId, report: result.report, status: result.status, exclusions: result.exclusions });
+    onEvent({ type: "analysis_accepted", turnId, report: combined.report, status: combined.status, exclusions: result.exclusions,
+      machine_issues: combined.machines!.issues });
   };
   const submitResult = (result: AnalysisResult | undefined) => {
-    if (result) { accept(result); return output({ accepted: true, status: result.status }); }
-    return output({ accepted: false, ...repair.modelContext() });
+    if (result) periodResult = result;
+    if (result && machineAnalysis.inspect().status === "completed") {
+      accept(result); return output({ accepted: true, status: result.status, validation: validationFeedback(result.exclusions.flatMap((entry) => entry.issues)) });
+    }
+    if (result) {
+      onCheckpoint?.(withMachines(result));
+      onEvent({ type: "machine_validation_failed", issues: machineAnalysis.inspect().issues, turnId });
+    }
+    if (result && !repairTimer) repairTimer = setTimeout(() => {
+      repair.stop("机台建议修正时间预算已耗尽"); parent.abortCompaction(); void parent.abort().catch(() => {});
+    }, Math.max(0, Math.min(120_000, deadline - Date.now() - 10_000)));
+    return failureFeedback();
   };
   const tools = [
     ...createAnalysisTools(evidence, interpreter),
     defineTool({
-      name: "submit_analysis", label: "提交四期分析报告", executionMode: "sequential",
-      description: "提交完整日、周、月、季四期报告,每期 MT/ST 两组。仅校验结构和证据,通过即结束;退回时读取 analysis_repair.repair_plan,严格按 submit_tool 选完整重提或局部修正,按 corrections 和 evidence_actions 修正。正文允许为空,入选状态覆盖、去重和优先级排序不参与验收。",
-      parameters: AnalysisReportSchema, prepareArguments: (input) => repair.prepareReport(input),
+      name: "submit_analysis", label: "提交日周及机台分析报告", executionMode: "sequential",
+      description: "提交日周两期及四组机台改善报告。仅校验结构和证据,通过即结束;退回时读取统一 validation.issues 的 path、expected、actual、message、hint。日周按 analysis_repair.repair_plan 选完整重提或局部修正,机台按 machine_repair.targets 修正。正文允许为空,入选状态覆盖、去重和优先级排序不参与验收。",
+      parameters: Type.Object({ ...AnalysisReportSchema.properties, machine_groups: MachineGroupsSchema }, { additionalProperties: false }),
+      prepareArguments: (input) => {
+        const value = input as { periods?: unknown; machine_groups?: unknown };
+        machineAnalysis.submit(value?.machine_groups);
+        const report = repair.prepareReport({ periods: value?.periods });
+        return { ...report, machine_groups: machineAnalysis.inspect().groups };
+      },
       async execute(_id, params) {
         signal.throwIfAborted();
-        return submitResult(repair.submit(params));
+        return submitResult(repair.submit({ periods: params.periods }));
+      },
+    }),
+    defineTool({
+      name: "repair_machine_group", label: "修正指定机台榜单的建议", executionMode: "sequential",
+      description: "按 machine_repair.targets 修正一个完整机台建议组，保留其他组。每台填写 measure、suggested_owner、evidence_reference，引用 selected 的原始编号和行号。",
+      parameters: MachineGroupSchema, prepareArguments: (input) => machineAnalysis.prepareGroup(input),
+      async execute(_id, params) {
+        signal.throwIfAborted();
+        machineAnalysis.repair(params);
+        onEvent({ type: "machine_group_repair", kind: params.kind, ranking: params.ranking });
+        const result = submitResult(periodResult);
+        if (!accepted && ++machineRepairs >= 8) repair.stop("机台建议修正次数已达上限，保留合规建议和实测指标");
+        return result;
       },
     }),
     defineTool({
@@ -644,7 +723,7 @@ async function runSession(
     } else if (event.type === "message_end" && event.message.role === "assistant") {
       modelError = event.message.stopReason === "error" ? event.message.errorMessage ?? "模型请求失败" : undefined;
       onEvent({ type: "assistant", message: event.message, turnId, outputTokens: event.message.usage.output,
-        phase: event.message.content.some((part) => part.type === "toolCall" && ["submit_analysis", "repair_analysis_group"].includes(part.name)) ? "submission"
+        phase: event.message.content.some((part) => part.type === "toolCall" && ["submit_analysis", "repair_analysis_group", "repair_machine_group"].includes(part.name)) ? "submission"
           : event.message.content.some((part) => part.type === "toolCall") ? "investigation" : "aggregation" });
     } else if (event.type === "tool_execution_end") {
       const toolStart = toolStartedAt.get(event.toolCallId);
@@ -652,7 +731,7 @@ async function runSession(
       // Argument preparation can fail before the extension's tool_result hook runs.
       // Preserve the same server-owned diagnosis in the event log and next model request.
       let result = event.result;
-      if (event.isError && repair.active && ["submit_analysis", "repair_analysis_group"].includes(event.toolName)) {
+      if (event.isError && (repair.active || machineAnalysis.modelContext().issues.length > 0) && ["submit_analysis", "repair_analysis_group", "repair_machine_group"].includes(event.toolName)) {
         const feedback = failureFeedback();
         reportFeedback.set(event.toolCallId, feedback);
         result = { ...event.result, ...feedback };
@@ -678,13 +757,16 @@ async function runSession(
     if (!toolBudget.take()) throw new Error("已达到 60 次工具调用上限");
     onEvent({ type: "tool_call", name: "subagent", toolCallId: callId, number: toolBudget.used, turnId: 0, source: "program" });
     try {
-      const results = await subagents.run(callId, { tasks: ANALYSIS_PERIOD_KEYS.map((period) => ({
+      const results = await subagents.run(callId, { tasks: [...ANALYSIS_PERIOD_KEYS.map((period) => ({
         name: period, task: "只调查 " + period + " 周期的 MT/ST 入选损失状态,使用本周期的本期、最低点和历史证据。最终返回一个本周期候选 JSON 对象,包含比较、MT/ST 建议及真实证据引用;不提交整份报告。",
-      })) }, signal);
+      })), ...(["MT", "ST"] as const).map((kind) => ({ name: "machines_" + kind.toLowerCase(),
+        task: `只分析 ${kind} 昨日机台最佳和最差榜单，逐台提出改善措施、建议责任职能，返回 machine_groups 两组 JSON，引用初始冻结机台证据。` }))] }, signal);
       childResults = results.map((result) => {
         const validation = result.status !== "completed" || result.text_truncated
-          ? { status: "unavailable" as const, reason: result.text_truncated ? "子任务输出已截断" : "子任务未成功完成：" + result.status }
-          : inspectAnalysisCandidate(result.text, result.name as PeriodKey, context, evidence.records);
+          ? validationFeedback([], { reason: result.text_truncated ? "子任务输出已截断" : "子任务未成功完成：" + result.status })
+          : result.name.startsWith("machines_")
+            ? inspectMachineCandidate(result.text, result.name === "machines_mt" ? "MT" : "ST", context.machines, evidence.records, context.throughDate)
+            : inspectAnalysisCandidate(result.text, result.name as PeriodKey, context, evidence.records);
         onEvent({ type: "analysis_candidate_checked", agentId: result.agent_id, period: result.name, validation });
         return { ...result, validation };
       });
@@ -697,10 +779,10 @@ async function runSession(
     }
     signal.throwIfAborted();
     try {
-      await session.prompt("四期子任务已结束。读取 subagent_results,先检查每项 status、text_truncated 和 validation;valid 候选直接复用,needs_repair 候选先按预检诊断修正引用,失败或缺少必要证据的周期先复用目录再按需补查。组装日/周/月/季及各期 MT/ST 两组,调用 submit_analysis;不要先用正文复述报告。");
+      await session.prompt("四个子任务已结束。读取 subagent_results，检查 status、text_truncated 和 validation；复用 valid 候选，修正 needs_repair 引用。组装 periods 的 day/week 两期和 machine_groups 的 MT/ST 各 best/worst 四组，调用 submit_analysis。机台建议逐台使用 machine_repair.selected 的 evidence_reference；不要先用正文复述。");
       // Only models stopping with prose need another prompt; tool-result repairs happen within a prompt.
       for (let promptRepair = 0; !accepted && !exhausted && !modelError && !signal.aborted && !repair.stopReason && promptRepair < 2; promptRepair += 1) {
-        await session.prompt("尚未接受报告。读取 analysis_repair.repair_plan,严格按 submit_tool 选择下一步;复制 pending_groups 原组按 corrections 修改,优先复用 evidence_actions 的真实证据,仅 query 时补查。无合法候选或组外错误必须 submit_analysis 完整提交四期。若没有诊断,直接提交完整四期。仅正文回复不算提交,不改写无关正文。");
+        await session.prompt("尚未接受报告。日周错误按 analysis_repair.repair_plan 选择完整提交或 repair_analysis_group；机台错误按 machine_repair.targets 逐组调用 repair_machine_group，复用 selected 的 evidence_reference，保留其他合规建议。无合法日周候选时 submit_analysis 完整提交 periods 和 machine_groups。仅正文回复不算提交。");
       }
     } catch (error) {
       signal.throwIfAborted();
@@ -709,7 +791,13 @@ async function runSession(
     }
     if (!accepted) {
       signal.throwIfAborted();
-      if (repair.active) {
+      if (periodResult) {
+        const reason = modelError ?? repair.stopReason ?? (exhausted ? "已达到工具调用上限" : undefined);
+        if (reason && machineAnalysis.inspect().status === "degraded") {
+          machineInterruption = { status: /超时|时间预算|时限/u.test(reason) ? "timed_out" : "failed", reason };
+        }
+        accept(periodResult);
+      } else if (repair.active) {
         repair.stop(exhausted ? "已达到 60 次工具调用上限" : modelError ?? "模型未完成有效报告修正");
         const degraded = repair.degrade();
         onEvent({ type: "analysis_repair_stopped", reason: repair.stopReason, exclusions: degraded.exclusions });
@@ -737,20 +825,32 @@ export async function analyzeCards(
   database: DatabaseSync, state: DashboardState, throughDate: string,
   config: DefaultDashboardAnalysisConfig, runDir: string, onResult: (state: DashboardState, quality: AnalysisPublication) => void,
   signal?: AbortSignal, deadline = Date.now() + config.timeoutMs,
+  onCheckpoint?: (state: DashboardState, quality: AnalysisPublication) => void,
+  machineRows?: readonly DashboardRow[],
 ): Promise<void> {
   const log = (name: string, event: unknown): void => {
     appendFileSync(path.join(runDir, name + ".jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event as object }) + "\n", { mode: 0o600 });
   };
   const artifacts = new SessionArtifactStore(runDir, "analysis-data");
   const evidence = new AnalysisEvidence(database, (record) => log("evidence", record), artifacts);
-  const context = evidence.context(state, throughDate);
+  const context = evidence.context(state, throughDate, machineRows);
   writeFileSync(path.join(runDir, "context.json"), JSON.stringify(context), { mode: 0o600 });
-  await runAnalysisAgent(config, context, evidence, (event) => log("events", event), (result) => {
-    writeFileSync(path.join(runDir, "report.json"), JSON.stringify(result.report, null, 2), { mode: 0o600 });
+  const publishResult = (result: AnalysisResult, checkpoint = false): void => {
+    const prefix = checkpoint ? "checkpoint-" : "";
+    writeFileSync(path.join(runDir, prefix + "report.json"), JSON.stringify(result.report, null, 2), { mode: 0o600 });
     const quality: AnalysisPublication = { status: result.status, exclusions: result.exclusions.map((entry) => ({
-      period: entry.period, kind: entry.kind, priority: entry.priority, codes: [...new Set(entry.issues.map((issue) => issue.code))],
-    })) };
-    writeFileSync(path.join(runDir, "report-quality.json"), JSON.stringify(quality, null, 2), { mode: 0o600 });
-    onResult(applyAnalysisReport(state, result), quality);
-  }, signal, deadline);
+      period: entry.period, kind: entry.kind, priority: entry.priority, codes: [...new Set(entry.issues.map((issue) => issue.code))], issues: entry.issues,
+    })), periodStatus: result.periodStatus ?? result.status,
+      validation: validationFeedback([...result.exclusions.flatMap((entry) => entry.issues), ...(result.machines?.issues ?? [])],
+        result.machines?.interruption ? { reason: result.machines.interruption.reason } : {}),
+      ...(result.machines ? { machines: { status: result.machines.status, issues: result.machines.issues,
+        coverage: result.machines.coverage,
+        ...(result.machines.interruption ? { interruption: result.machines.interruption } : {}) } } : {}) };
+    writeFileSync(path.join(runDir, prefix + "report-quality.json"), JSON.stringify(quality, null, 2), { mode: 0o600 });
+    const analyzed = applyAnalysisReport(state, result);
+    const completed = result.machines ? applyMachineAnalysis(analyzed, result.machines) : analyzed;
+    (checkpoint ? onCheckpoint : onResult)?.(completed, quality);
+  };
+  await runAnalysisAgent(config, context, evidence, (event) => log("events", event), (result) => publishResult(result),
+    signal, deadline, (result) => publishResult(result, true));
 }

@@ -284,10 +284,15 @@ function createHeader(widget: DashboardWidget): HTMLElement {
 
 function appendWarnings(card: HTMLElement, widget: DashboardWidget): void {
   if (!widget.warnings.length) return;
+  const analysisFailed = widget.warnings.some((warning) => /未通过(?:证据)?校验|校验未通过|分析超时|分析失败|本次分析暂不可用/u.test(warning));
   const details = document.createElement("details");
   details.className = "metric-warning";
+  if (analysisFailed) {
+    details.classList.add("metric-analysis-warning");
+    details.setAttribute("open", "");
+  }
   const summary = document.createElement("summary");
-  summary.textContent = `数据提醒 ${widget.warnings.length}`;
+  summary.textContent = analysisFailed ? `分析异常 · ${widget.warnings.length} 条提醒` : `数据提醒 ${widget.warnings.length}`;
   const list = document.createElement("ul");
   for (const warning of widget.warnings) {
     const item = document.createElement("li");
@@ -295,7 +300,8 @@ function appendWarnings(card: HTMLElement, widget: DashboardWidget): void {
     list.append(item);
   }
   details.append(summary, list);
-  card.append(details);
+  if (analysisFailed) card.insertBefore(details, card.children[1] ?? null);
+  else card.append(details);
 }
 
 function createTable(widget: RenderedTable["widget"]): RenderedTable {

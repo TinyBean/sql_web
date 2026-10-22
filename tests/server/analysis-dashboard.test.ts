@@ -15,9 +15,10 @@ import type { DashboardState } from "../../src/shared/dashboard.ts";
 
 const now = new Date("2026-10-20T01:00:00.000Z");
 const ids = ["improvement-actions-day-2026", "improvement-actions-week-2026",
-  "improvement-actions-month-2026", "improvement-actions-quarter-2026"];
+  "machine-improvement-mt-best-2026", "machine-improvement-mt-worst-2026",
+  "machine-improvement-st-best-2026", "machine-improvement-st-worst-2026"];
 
-test("analysis dashboard selects day/week/month/quarter cards by ID and isolates every returned snapshot", () => {
+test("analysis dashboard selects day/week and machine cards by ID and isolates every returned snapshot", () => {
   const original = createDefaultDashboard(now);
   const source = { ...original, dateRange: { start: "2026-01-01", end: "2026-10-19" },
     widgets: original.widgets.map((widget, index) => ids.includes(widget.id) ? {
@@ -33,7 +34,7 @@ test("analysis dashboard selects day/week/month/quarter cards by ID and isolates
   assert.equal(typeof definition.update, "function");
   const state = definition.loadInitial();
   assert.deepEqual(state, { ...source, widgets: ids.map((id) => source.widgets.find((widget) => widget.id === id)) });
-  assert.deepEqual(state.widgets.map((widget) => widget.kind), Array(4).fill("table"));
+  assert.deepEqual(state.widgets.map((widget) => widget.kind), Array(6).fill("table"));
   const first = state.widgets[0]!;
   assert.equal(first.kind, "table");
   if (first.kind !== "table") return;
@@ -65,7 +66,7 @@ test("analysis projection retains its layout and encoding and rejects absent or 
   assert.throws(() => projectAnalysisDashboard({ ...source, widgets: [wrongType, ...others] }), /所需卡片/u);
 });
 
-test("registered analysis dashboard follows default publication and falls back to four waiting cards", (t) => {
+test("registered analysis dashboard follows default publication and falls back to six waiting cards", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: now.getTime() });
   const root = mkdtempSync(path.join(tmpdir(), "analysis-dashboard-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -75,7 +76,7 @@ test("registered analysis dashboard follows default publication and falls back t
   assert.deepEqual(registry.list().map(({ id, title }) => ({ id, title })), [
     { id: "default", title: "OEE综合看板" }, { id: "analysis", title: "OEE分析看板" },
   ]);
-  assert.equal(registry.loadInitial().widgets.length, 13);
+  assert.equal(registry.loadInitial().widgets.length, 15);
   assert.equal(typeof registry.list().find((definition) => definition.id === "analysis")?.update, "function");
   assert.deepEqual(registry.loadInitial("analysis"), empty);
   assert.ok(empty.widgets.every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("等待每日任务"))));
@@ -105,7 +106,7 @@ test("analysis updates only this run's published projection and carries analysis
   assert.equal(success.status, "completed");
   assert.equal(success.published, true);
   assert.equal(success.dataAsOf, context.now.toISOString());
-  assert.deepEqual(success.details, { sourceDashboardId: "default", widgetCount: 4 });
+  assert.deepEqual(success.details, { sourceDashboardId: "default", widgetCount: 6 });
   assert.deepEqual(definition.loadInitial(), projectAnalysisDashboard(source));
   assert.deepEqual(events, ["daily.dashboard.published"]);
 

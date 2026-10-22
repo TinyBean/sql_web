@@ -5,7 +5,9 @@ import path from "node:path";
 import type { AppLogger } from "../../../logger.ts";
 import { parseDashboardState, type DashboardState } from "../../../../shared/dashboard.ts";
 import type { DefaultDashboardWorkerRequest } from "./worker.ts";
-import { analysisUnavailable, analysisExclusionSummary, type AnalysisPublication, type AnalysisExclusionSummary } from "./validation.ts";
+import { analysisUnavailable, analysisExclusionSummary, machineAnalysisFailure, machineAnalysisInterrupted,
+  machineAnalysisSummary, validationFeedback, type AnalysisPublication, type AnalysisExclusionSummary,
+  type MachineAnalysisInterruption } from "./validation.ts";
 
 export interface DefaultDashboardAnalysisConfig {
   readonly cwd: string;
@@ -35,6 +37,9 @@ export interface DefaultDashboardResult {
   readonly analysisExclusions?: readonly AnalysisExclusionSummary[];
   readonly analysisRunId: string;
   readonly analysisArtifactDir: string;
+  readonly periodAnalysisStatus?: "completed" | "degraded";
+  readonly machineAnalysis?: NonNullable<AnalysisPublication["machines"]>;
+  readonly validation?: NonNullable<AnalysisPublication["validation"]>;
 }
 
 export async function generateDefaultDashboard(
@@ -56,7 +61,9 @@ export async function generateDefaultDashboard(
   };
   let quality: AnalysisPublication = { status: "completed", exclusions: [] };
   const saveOutcome = (status: string, reason: string | null): void => writeFileSync(
-    path.join(runDir, "run.json"), JSON.stringify({ ...metadata, status, reason, analysisExclusions: quality.exclusions, durationMs: Date.now() - started }, null, 2), { mode: 0o600 },
+    path.join(runDir, "run.json"), JSON.stringify({ ...metadata, status, reason, analysisExclusions: quality.exclusions,
+      ...(quality.machines ? { machineAnalysis: quality.machines } : {}), ...(quality.validation ? { validation: quality.validation } : {}),
+      durationMs: Date.now() - started }, null, 2), { mode: 0o600 },
   );
   saveOutcome("running", null);
   logger.info("daily.analysis.started", { ...metadata, runDir });
@@ -64,7 +71,9 @@ export async function generateDefaultDashboard(
     let base: DashboardState | undefined;
     let baseReadyAt: number | undefined;
     let analyzed: DashboardState | undefined;
+    let checkpoint: { state: DashboardState; quality: AnalysisPublication } | undefined;
     let failure: string | null = null;
+    let failureValidation: AnalysisPublication["validation"];
     let timedOut = false;
     let stderr = "";
     let killTimer: NodeJS.Timeout | undefined;
@@ -99,6 +108,11 @@ export async function generateDefaultDashboard(
           const deadline = "deadline" in message && typeof message.deadline === "number" ? message.deadline : Date.now() + config.analysis.timeoutMs;
           timer = setTimeout(timeout, Math.max(0, deadline - Date.now()));
           logger.info("daily.analysis.base_ready", { runId, throughDate });
+        } else if (message.type === "checkpoint" && "state" in message && "quality" in message && base) {
+          const supplied = message.quality as AnalysisPublication;
+          if (!supplied || !["completed", "degraded"].includes(supplied.status) || !Array.isArray(supplied.exclusions)) throw new Error("无效的分析检查点");
+          checkpoint = { state: parseDashboardState(message.state), quality: supplied };
+          logger.info("daily.analysis.checkpoint", { runId, throughDate, status: supplied.status });
         } else if (message.type === "analysis" && "state" in message && base) {
           if ("quality" in message) {
             const supplied = message.quality as AnalysisPublication;
@@ -111,6 +125,7 @@ export async function generateDefaultDashboard(
           timer = setTimeout(stop, 2000);
         } else if (message.type === "failure" && "reason" in message) {
           failure = String(message.reason);
+          if ("validation" in message) failureValidation = message.validation as NonNullable<AnalysisPublication["validation"]>;
           stop();
         } else throw new Error("分析子进程消息顺序无效");
       } catch (error) {
@@ -133,13 +148,43 @@ export async function generateDefaultDashboard(
           reject(new Error(reason));
           return;
         }
+        if (!analyzed && checkpoint) {
+          const interruption: MachineAnalysisInterruption = { status: timedOut ? "timed_out" : "failed",
+            reason: failure ?? "分析进程退出，未完成机台建议修正" };
+          analyzed = machineAnalysisInterrupted(checkpoint.state, interruption, checkpoint.quality.machines);
+          quality = { ...checkpoint.quality, status: "degraded", machines: machineAnalysisFailure(checkpoint.state, interruption, checkpoint.quality.machines),
+            validation: validationFeedback(checkpoint.quality.validation?.issues ?? [
+              ...checkpoint.quality.exclusions.flatMap((entry) => entry.issues ?? []), ...(checkpoint.quality.machines?.issues ?? []),
+            ], { has_more: checkpoint.quality.validation?.has_more ?? false, reason: interruption.reason }) };
+          // A validated period report survives later machine repair failures/timeouts.
+          writeFileSync(path.join(runDir, "report.json"), readFileSync(path.join(runDir, "checkpoint-report.json")), { mode: 0o600 });
+          writeFileSync(path.join(runDir, "report-quality.json"), JSON.stringify(quality, null, 2), { mode: 0o600 });
+        }
         const analysisStatus = analyzed ? quality.status : timedOut ? "timed_out" : "failed";
-        const analysisReason = analyzed ? (quality.status === "degraded" ? analysisExclusionSummary(quality.exclusions) : null) : failure ?? "分析子进程未提交有效报告 (" + (signal ?? code) + ")";
+        if (!analyzed) {
+          const interruption: MachineAnalysisInterruption = { status: timedOut ? "timed_out" : "failed",
+            reason: failure ?? "分析进程未提交有效报告 (" + (signal ?? code) + ")" };
+          quality = { ...quality, machines: machineAnalysisFailure(base, interruption), validation: validationFeedback(failureValidation?.issues ?? [], {
+            has_more: failureValidation?.has_more ?? false, reason: interruption.reason,
+          }) };
+        }
+        const publishedState = analyzed ?? machineAnalysisInterrupted(analysisUnavailable(base,
+          `${timedOut ? "分析超时" : "分析失败"}：${quality.machines!.interruption!.reason}`), quality.machines!.interruption!, quality.machines);
+        const analysisReason = analyzed ? (quality.status === "degraded" ? [
+          ...(quality.exclusions.length ? [analysisExclusionSummary(quality.exclusions)] : []),
+          ...(quality.machines?.status === "degraded" ? [machineAnalysisSummary(quality.machines)] : []),
+        ].join("；") : null) : `${timedOut ? "分析超时" : "分析失败"}：${quality.machines!.interruption!.reason}；${machineAnalysisSummary(quality.machines!)}`;
         saveOutcome(analysisStatus, analysisReason);
         logger.info("daily.analysis.completed", { runId, analysisStatus, analysisReason, durationMs: Date.now() - started, runDir });
+        if (analysisStatus !== "completed") logger.warn("daily.analysis.warning", {
+          runId, throughDate, analysisStatus, analysisReason, validation: quality.validation, machineAnalysis: quality.machines, runDir,
+        });
         resolve({
-          state: analyzed ?? analysisUnavailable(base, analysisReason!),
+          state: publishedState,
           analysisStatus, analysisReason, analysisExclusions: quality.exclusions, analysisRunId: runId, analysisArtifactDir: runDir,
+          ...(quality.validation ? { validation: quality.validation } : {}),
+          ...(quality.machines ? { machineAnalysis: quality.machines } : {}),
+          ...(analyzed ? { periodAnalysisStatus: quality.periodStatus ?? quality.status } : {}),
         });
       } catch (error) { reject(error); }
     });
@@ -190,7 +235,7 @@ function summarizeAgentEvents(events: readonly Event[], startedAt: number, ended
       const parts = Array.isArray(message["content"]) ? message["content"].map(object) : [];
       const names = parts.filter((part) => part["type"] === "toolCall").map((part) => part["name"]);
       // Older workers labelled draft submissions as investigation; keep their original metrics.
-      const legacyPhase = names.includes("finalize_analysis") ? "review" : (names.includes("submit_analysis") || names.includes("repair_analysis_group"))
+      const legacyPhase = names.includes("finalize_analysis") ? "review" : names.some((name) => ["submit_analysis", "repair_analysis_group", "repair_machine_group"].includes(String(name)))
         ? (draft ? "review" : "draft") : draft ? "review_investigation" : "investigation";
       const phase = event["phase"] === "aggregation" || event["phase"] === "submission" ? event["phase"] : legacyPhase;
       if (Number(usage["output"] ?? 0) || Number(usage["input"] ?? 0) || parts.length || message["stopReason"] === "error") {
@@ -262,11 +307,11 @@ export function summarizeAnalysisEvents(events: readonly Event[], startedAt: num
     }
     for (const [phase, ms] of Object.entries(entry.phaseMs)) phaseMs[phase] = (phaseMs[phase] ?? 0) + ms;
   }
-  const validationEvents = events.filter((event) => event["type"] === "analysis_validation_failed");
+  const validationEvents = events.filter((event) => ["analysis_validation_failed", "machine_validation_failed"].includes(String(event["type"])));
   // Baseline workers recorded rejections only as tool errors; include their repair window too.
   const submissionFailures = events.filter((event) => event["type"] === "tool_result" && event["isError"] &&
     (event["agentId"] === undefined || event["agentId"] === "root") &&
-    ["submit_analysis", "repair_analysis_group", "finalize_analysis"].includes(String(event["name"])));
+    ["submit_analysis", "repair_analysis_group", "repair_machine_group", "finalize_analysis"].includes(String(event["name"])));
   const acceptedEvent = events.findLast((event) => event["type"] === "analysis_accepted");
   const firstFailureAt = timestamp((validationEvents[0] ?? submissionFailures[0])?.["at"]);
   const validationCodes: Record<string, number> = {};
@@ -277,6 +322,8 @@ export function summarizeAnalysisEvents(events: readonly Event[], startedAt: num
     ...root, schemaVersion: 2,
     validation: { failures: validationEvents.length || submissionFailures.length, codes: validationCodes,
       groupRepairs: events.filter((event) => event["type"] === "analysis_group_repair").length,
+      machineGroupRepairs: events.filter((event) => event["type"] === "machine_group_repair").length,
+      machineIssues: Array.isArray(acceptedEvent?.["machine_issues"]) ? acceptedEvent["machine_issues"].length : 0,
       repairMs: Number.isFinite(firstFailureAt) ? Math.max(0, (timestamp(acceptedEvent?.["at"]) || endedAt) - firstFailureAt) : 0,
       degraded: acceptedEvent?.["status"] === "degraded",
       exclusions: Array.isArray(acceptedEvent?.["exclusions"]) ? acceptedEvent["exclusions"].length : 0 },

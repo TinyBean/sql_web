@@ -100,3 +100,5 @@ FROM samples AS d
 ```
 
 将 e.* 替换为工具返回的 SQL 片段，再交给 execute_sql。Availability 抽查提供 tool_name、step、lot_id、final_state，使用对应来源的 kindExpression、availabilityStateExpression 和 idlePredicate。
+
+- 每日机台改善榜：以目标业务日的单机台、同 MT/ST 指标独立取最佳/最差各 10 台；最高榜降序，最低榜升序，均按原始精度、机台编号处理并列。零值参与，NULL 不参与；不足展示实际数量，两榜允许重叠。同一机台的 MT/ST 记录分别处理，不采用极值机台表的合并口径。主损失为该机台同类型同日非运行状态累计小时最大项，并列按状态名称；短板取四个子项最小值，并列全部展示。

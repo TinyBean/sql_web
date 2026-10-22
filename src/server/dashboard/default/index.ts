@@ -1,10 +1,11 @@
 import type { DashboardState } from "../../../shared/dashboard.ts";
+import type { JsonObject } from "../../../shared/contracts.ts";
 import { formatDisplayNumber } from "../../../shared/number-format.ts";
 import type { AppLogger } from "../../logger.ts";
 import type { DashboardDefinition } from "../index.ts";
 import { readDashboardSnapshot, writeDashboardSnapshot } from "../snapshot-store.ts";
 import { skippedNotification, type NotificationDispatcher, type NotificationResult, type NotificationEmail } from "../email.ts";
-import { createDefaultDashboard, validateDefaultDashboard, createAnalysisTemplate } from "./template.ts";
+import { createDefaultDashboard, validateDefaultDashboard, createAnalysisTemplate, createMachineAnalysisTemplates, fillCardTemplate } from "./template.ts";
 import { dashboardPeriods } from "./calculate/periods.ts";
 import type { DefaultDashboardAnalysisConfig, generateDefaultDashboard } from "./analysis/index.ts";
 import { analysisExclusionSummary, type AnalysisPublication } from "./analysis/validation.ts";
@@ -12,7 +13,25 @@ import { analysisExclusionSummary, type AnalysisPublication } from "./analysis/v
 export function readDefaultDashboard(filePath?: string, logger?: Pick<AppLogger, "info" | "error">): DashboardState {
   if (!filePath) return createDefaultDashboard();
   try {
-    return readDashboardSnapshot(filePath, validateDefaultDashboard);
+    const state = readDashboardSnapshot(filePath);
+    if (state.widgets.length === 13) {
+      const template = createDefaultDashboard(new Date(state.dataAsOf));
+      const legacyIds = [...template.widgets.slice(0, 11).map((widget) => widget.id),
+        "improvement-actions-month-2026", "improvement-actions-quarter-2026"];
+      if (state.widgets.every((widget, index) => widget.id === legacyIds[index] &&
+        widget.kind === (template.widgets[index]?.kind ?? "table"))) {
+        const upgraded = { ...state, widgets: [...state.widgets.slice(0, 11), ...createMachineAnalysisTemplates()] };
+        validateDefaultDashboard(upgraded);
+        return upgraded;
+      }
+    }
+    validateDefaultDashboard(state);
+    // Add platform labels to earlier publications without changing their file or raw machine IDs.
+    const machineTemplates = new Map(createMachineAnalysisTemplates().map((widget) => [widget.id, widget]));
+    return { ...state, widgets: state.widgets.map((widget) => {
+      const template = machineTemplates.get(widget.id);
+      return template ? fillCardTemplate(template, widget) : widget;
+    }) };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       logger?.info("dashboard.default.fallback", { reason: "missing", filePath });
@@ -121,7 +140,7 @@ export function createDefaultDashboardDefinition(
               notification = await notify({
                 messageType: DAILY_IMPROVEMENT_NOTIFICATION,
                 buildEmail: () => createDailyImprovementEmail(state, context.throughDate, {
-                  status: details.analysisStatus === "degraded" ? "degraded" : "completed", exclusions: details.analysisExclusions ?? [],
+                  status: details.periodAnalysisStatus ?? (details.analysisStatus === "degraded" ? "degraded" : "completed"), exclusions: details.analysisExclusions ?? [],
                 }),
               }, context);
             } catch {
@@ -141,7 +160,7 @@ export function createDefaultDashboardDefinition(
           status: hasWarnings ? "completed_with_warnings" : "completed",
           published: true, dataAsOf: state.dataAsOf,
           reason: details.analysisReason ?? notificationReason,
-          details: { ...details, ...(notification ? { notification } : {}) },
+          details: JSON.parse(JSON.stringify({ ...details, ...(notification ? { notification } : {}) })) as JsonObject,
         };
       },
     } : {}),

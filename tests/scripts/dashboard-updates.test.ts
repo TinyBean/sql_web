@@ -190,7 +190,7 @@ test("shared registration loads initial snapshots without requiring an update ag
   const registry = createDashboardRegistry();
   assert.deepEqual(registry.list().map((definition) => definition.id), ["default", "analysis"]);
   assert.equal(registry.list()[0]?.update, undefined);
-  assert.equal(registry.loadInitial().widgets.length, 13);
+  assert.equal(registry.loadInitial().widgets.length, 15);
 });
 
 test("daily analysis refresh follows one default publication and skips old same-day data after a failed rerun", async (t) => {

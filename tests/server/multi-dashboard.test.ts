@@ -75,8 +75,53 @@ test("boards pin separate baselines and revisions, including identical card IDs,
   const reset = restarted.apply(sessionId, { action: "reset", baseRevision: 1 }, "default").dashboard;
   assert.deepEqual(reset, { ...original[0]!.state, revision: 2 });
   assert.equal(restarted.loadOrPreview(sessionId, "analysis").revision, 1);
-  assert.equal(restarted.loadOrPreview(sessionId, "analysis").widgets.length, 3);
+  assert.equal(restarted.loadOrPreview(sessionId, "analysis").widgets.length, 5);
   assert.throws(() => restarted.loadOrPreview(sessionId), /必须指定/u);
+});
+
+test("saved analysis copies gain platform labels without replacing pinned facts, edits, revisions or files", async (t) => {
+  const { values, identities, artifacts, store } = fixture(t);
+  store.initialize(sessionId, values);
+  const filename = path.join(artifacts.rootDir, sessionId, "dashboard.json");
+  const savedState = (state: SessionDashboard["state"], oee: number, legacy: boolean) => ({ ...state,
+    widgets: state.widgets.map((widget) => widget.kind !== "table" || !widget.id.startsWith("machine-improvement-") ? widget : {
+      ...widget, title: "保留的机台分析标题", size: "medium" as const,
+      encoding: { columns: widget.encoding.columns.map((column) => legacy && column.key === "machine_label" ? { key: "machine", label: "机台" } : column) },
+      data: [{ kind: widget.id.includes("-mt-") ? "MT" : "ST", rank: 1,
+        machine: widget.id.includes("-mt-") ? "ADH001" : "ST-UNKNOWN", oee, action_and_owner: "保留的改善建议和责任人",
+        ...(!legacy ? { machine_label: widget.id.includes("-mt-") ? "T5773/ADH001" : "平台待维护/ST-UNKNOWN" } : {}) }],
+    }),
+  });
+  const baseline = savedState(values[1]!.state, 35, true);
+  const current = { ...savedState(values[1]!.state, 42, true), revision: 7 };
+  const document = { schemaVersion: 2, dashboards: [
+    { id: "default", title: values[0]!.title, baseline: savedState(values[0]!.state, 60, false), current: { ...savedState(values[0]!.state, 60, false), revision: 4 } },
+    { id: "analysis", title: values[1]!.title, baseline, current },
+  ] };
+  const original = JSON.stringify(document); writeFileSync(filename, original);
+  const reopened = new SessionDashboardStore(artifacts, () => { throw new Error("saved data must not reload the latest dashboard"); }, identities);
+  for (const state of [reopened.loadOrPreview(sessionId, "analysis"), reopened.loadOrInitialize(sessionId, "analysis")]) {
+    assert.equal(state.revision, 7); assert.equal(state.dataAsOf, current.dataAsOf);
+    assert.deepEqual(state.dateRange, current.dateRange);
+    for (const widget of state.widgets.slice(2)) {
+      assert.equal(widget.kind, "table"); if (widget.kind !== "table") continue;
+      assert.equal(widget.size, "medium"); assert.equal(widget.title, "保留的机台分析标题");
+      assert.equal(widget.encoding.columns.length, 10);
+      assert.deepEqual(widget.encoding.columns[2], { key: "machine_label", label: "平台/机台" });
+      const row = widget.data[0]!;
+      assert.equal(row["oee"], 42); assert.equal(row["action_and_owner"], "保留的改善建议和责任人");
+      assert.equal(row["machine_label"], row["machine"] === "ADH001" ? "T5773/ADH001" : "平台待维护/ST-UNKNOWN");
+    }
+  }
+  assert.equal(readFileSync(filename, "utf8"), original, "viewing an old session must not rewrite its snapshot");
+  assert.equal(reopened.loadOrPreview(sessionId, "default").widgets[11]!.data[0]!["oee"], 60);
+  const tools = createDashboardTools(reopened, sessionId);
+  const reply = await tools[0]!.execute("read", { dashboard_ids: ["analysis"], include_data: true }, undefined, undefined, undefined as never);
+  assert.match(JSON.stringify(reply.content), /T5773\/ADH001/u);
+  const reset = reopened.apply(sessionId, { action: "reset", baseRevision: 7 }, "analysis").dashboard;
+  assert.equal(reset.revision, 8); assert.equal(reset.widgets[2]!.data[0]!["oee"], 35);
+  assert.equal(reset.widgets[2]!.data[0]!["machine_label"], "T5773/ADH001");
+  assert.equal(reopened.loadOrPreview(sessionId, "default").revision, 4);
 });
 
 test("dashboard tools read summaries or full data and submit changes to explicitly selected boards", async (t) => {
@@ -121,7 +166,7 @@ test("legacy snapshots keep their original binding and bytes until their first e
     () => [{ id: "analysis", title: "OEE分析看板" }]);
   assert.deepEqual(old.listOrInitialize(sessionId).map((item) => item.id), ["analysis"]);
   assert.equal(readFileSync(filename, "utf8"), legacy);
-  assert.equal(old.apply(sessionId, { action: "reset", baseRevision: 3 }, "analysis").dashboard.widgets.length, 4);
+  assert.equal(old.apply(sessionId, { action: "reset", baseRevision: 3 }, "analysis").dashboard.widgets.length, 6);
   const document = JSON.parse(readFileSync(filename, "utf8"));
   assert.equal(document.schemaVersion, 2);
   assert.equal(document.dashboards[0].id, "analysis");

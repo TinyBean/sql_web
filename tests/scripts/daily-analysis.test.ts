@@ -10,7 +10,9 @@ import test, { type TestContext } from "node:test";
 import { Value } from "typebox/value";
 import { AnalysisEvidence, type AnalysisContext, analysisPrompt, runAnalysisAgent, analysisBudget, createAnalysisTools, evidenceOutput } from "../../src/server/dashboard/default/analysis/agent.ts";
 import { ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../../src/server/dashboard/default/calculate/periods.ts";
-import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, inspectAnalysisCandidate, parseAnalysisReport, validateAnalysisReport, type AnalysisReport, AnalysisRepairState, pointerValue } from "../../src/server/dashboard/default/analysis/validation.ts";
+import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, inspectAnalysisCandidate, parseAnalysisReport,
+  validateAnalysisReport, type AnalysisReport, AnalysisRepairState, pointerValue, machineSelectionContext, type MachineGroup,
+} from "../../src/server/dashboard/default/analysis/validation.ts";
 
 import { NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
 
@@ -192,22 +194,22 @@ test("parallel SQL evidence registration is atomic and queued cancellations do n
     agents[index]!.find((tool) => tool.name === "execute_sql")!.execute("same-call-id", params, signal, undefined, undefined as never);
   const results = await Promise.all(agents.map((_, index) => query(index, { sql: `SELECT ${index} AS value` })));
   const details = results.map((result) => JSON.parse(result.content.find((part) => part.type === "text")!.text));
-  assert.equal(new Set(details.map((entry) => entry.evidence_id)).size, 4);
-  assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 4);
-  assert.deepEqual(details.map((entry) => evidence.records.get(entry.evidence_id)!.rows[0]!["value"]), [0, 1, 2, 3]);
+  assert.equal(new Set(details.map((entry) => entry.evidence_id)).size, 2);
+  assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 2);
+  assert.deepEqual(details.map((entry) => evidence.records.get(entry.evidence_id)!.rows[0]!["value"]), [0, 1]);
   const duplicate = await Promise.allSettled([query(0, { sql: "SELECT 4", save_as: "duplicate" }), query(1, { sql: "SELECT 5", save_as: "duplicate" })]);
   assert.deepEqual(duplicate.map((result) => result.status), ["fulfilled", "fulfilled"]);
   await assert.rejects(query(0, { sql: "SELECT 8", save_as: "duplicate" }), /已固定/u);
   for (const [index, scope] of scopes.entries()) {
     assert.ok(evidence.catalog(scope).every((record) => record.owner?.period === scope.period));
     assert.ok(evidence.catalog(scope).some((record) => record.evidence_id === details[index].evidence_id));
-    assert.ok(!evidence.catalog(scope).some((record) => record.evidence_id === details[(index + 1) % 4].evidence_id));
+    assert.ok(!evidence.catalog(scope).some((record) => record.evidence_id === details[(index + 1) % 2].evidence_id));
   }
   let release!: () => void;
   const gate = evidence.withEvidenceWrite(() => new Promise<void>((resolve) => { release = resolve; }));
   await Promise.resolve();
   const abort = new AbortController();
-  const cancelled = query(2, { sql: "SELECT 6", save_as: "cancelled" }, abort.signal);
+  const cancelled = query(1, { sql: "SELECT 6", save_as: "cancelled" }, abort.signal);
   abort.abort(); release();
   await gate;
   await assert.rejects(cancelled, /abort/iu);
@@ -251,26 +253,26 @@ test("period evidence whitelists protect Python reads, initial context and newly
   }
   const initialReads = readNames.length;
   let denial: string | undefined;
-  for (const name of [context.comparisons.month.current.snapshot!.name, evidence.records.get("q1")!.snapshot!.name, "unknown-secret"]) {
+  for (const name of [context.comparisons.week.current.snapshot!.name, evidence.records.get("q1")!.snapshot!.name, "unknown-secret"]) {
     await assert.rejects(run(0, "code_interpreter", { snapshot: name, code: "emit_result(summary='read')" }), (error: unknown) => {
       assert.ok(error instanceof Error);
       denial ??= error.message;
       assert.equal(error.message, denial);
       assert.ok(!error.message.includes(name));
-      assert.ok(!error.message.includes(context.comparisons.quarter.current.snapshot!.name));
+      assert.ok(!error.message.includes(context.comparisons.week.current.snapshot!.name));
       return true;
     });
   }
   assert.equal(readNames.length, initialReads, "denied reads never reach Python or snapshot resolution");
   const queries = await Promise.all(agents.map((_, index) => run(index, "execute_sql", { sql: "SELECT 1 AS marker", save_as: "same-name" })));
   const details = queries.map((result) => JSON.parse(result.content.find((part) => part.type === "text")!.text));
-  assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 4);
+  assert.equal(new Set(details.map((entry) => entry.snapshot.name)).size, 2);
   for (const [index, scope] of scopes.entries()) {
     assert.equal(evidence.catalog(scope).length, 5);
     assert.equal(evidence.catalog(scope).at(-1)!.evidence_id, details[index].evidence_id);
     await run(index, "code_interpreter", { snapshot: details[index].snapshot.name, code: "emit_result(summary='read')" });
-    await assert.rejects(run(index, "code_interpreter", { snapshot: details[(index + 1) % 4].snapshot.name, code: "emit_result(summary='read')" }), /当前子任务/u);
-    await assert.rejects(run(index, "execute_sql", { period: "month", sql: "SELECT 1" }), /服务端绑定/u);
+    await assert.rejects(run(index, "code_interpreter", { snapshot: details[(index + 1) % 2].snapshot.name, code: "emit_result(summary='read')" }), /当前子任务/u);
+    await assert.rejects(run(index, "execute_sql", { period: "day", sql: "SELECT 1" }), /服务端绑定/u);
   }
   const samePeriodOtherTask = evidence.scope(context, "week", "another-week-agent");
   assert.throws(() => evidence.assertSnapshotAccess(details[0].snapshot.name, samePeriodOtherTask), /当前子任务/u);
@@ -305,11 +307,11 @@ test("stringified report structures are decoded before strict validation without
     return true;
   });
   const invalid = structuredClone(report);
-  invalid.periods[2]!.groups[1]!.items[0]!.priority = "invalid" as unknown as number;
+  invalid.periods[1]!.groups[1]!.items[0]!.priority = "invalid" as unknown as number;
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   assert.throws(() => repair.prepareReport(invalid), (error: unknown) => {
     assert.ok(error instanceof AnalysisValidationError);
-    assert.equal(error.issues[0]?.path, "/periods/2/groups/1/items/0/priority");
+    assert.equal(error.issues[0]?.path, "/periods/1/groups/1/items/0/priority");
     assert.equal(repair.modelContext().issues[0]?.path, error.issues[0]?.path);
     return true;
   });
@@ -423,7 +425,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   assert.match(String(analyzed.widgets[10]?.data[0]?.["suggested_owner"]), /工艺工程/u);
   const original = createDefaultDashboard();
   assert.deepEqual(analyzed.widgets.map((w) => [w.id, w.size]), original.widgets.map((w) => [w.id, w.size]));
-  for (const widget of analyzed.widgets.slice(9)) {
+  for (const widget of analyzed.widgets.slice(9, 11)) {
     assert.equal(widget.kind, "table");
     if (widget.kind !== "table") continue;
     assert.deepEqual(widget.encoding.columns, [
@@ -434,7 +436,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
     assert.ok(!widget.warnings.some((w) => w.startsWith("本次分析暂不可用")));
   }
   // The single latest business day is fully covered; longer periods still report missing days.
-  for (const widget of analyzed.widgets.slice(10)) {
+  for (const widget of analyzed.widgets.slice(10, 11)) {
     assert.ok(widget.warnings.some((w) => w.includes("缺")));
   }
   const reject = (mutate: (value: AnalysisReport) => void, expected: RegExp): void => {
@@ -445,7 +447,7 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.evidence_ids = ["invalid"]; }, /证据不存在/u);
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.loss_reference!.row_index = 1; }, /同类型/u);
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.loss_reference!.row_index = 999; }, /同类型/u);
-  reject((r) => { periodEntry(r, "month").groups[0]!.items[0] = structuredClone(item); }, /本周期/u);
+  reject((r) => { periodEntry(r, "day").groups[0]!.items[0] = structuredClone(item); }, /本周期/u);
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.category = "yield" as "availability"; }, /结构无效/u);
   reject((r) => { periodEntry(r, "week").groups[0]!.items[0]!.priority = 4; }, /结构无效/u);
   reject((r) => { r.periods.pop(); }, /结构无效/u);
@@ -456,30 +458,14 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
     target.evidence_ids.push(ordinarySql.id);
     target.loss_reference = { evidence_id: ordinarySql.id, row_index: 0 };
   }, /measure_loss/u);
-  const monthLoss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, {
-    start_date: context.periods.month.start, end_date: context.periods.month.end,
-  }), { period: "month", agentId: "root" });
-  assert.deepEqual(context.periods.month, context.periods.quarter);
-  const overlapping = structuredClone(report);
-  for (const period of overlapping.periods.filter((entry) => entry.period === "month" || entry.period === "quarter")) {
-    const target = period.groups[0]!.items[0]!;
-    target.category = "availability";
-    addRanking(target, context, evidence, period.period, "MT", "loss_hours", ["Conversion"]);
-    target.evidence_ids.push(monthLoss.id);
-    target.loss_reference = { evidence_id: monthLoss.id, row_index: 0 };
-  }
-  assert.throws(() => validateAnalysisReport(overlapping, context, evidence.records), /不属于本周期/u);
-  const quarterLoss = evidence.recordLoss(measureLoss(evidence.queries, artifacts, {
-    start_date: context.periods.quarter.start, end_date: context.periods.quarter.end,
-  }), { period: "quarter", agentId: "root" });
-  const quarterItem = periodEntry(overlapping, "quarter").groups[0]!.items[0]!;
-  const monthItem = periodEntry(overlapping, "month").groups[0]!.items[0]!;
-  monthItem.loss_reference = { evidence_id: context.losses.month.evidence_id, row_index: 0 };
-  quarterItem.evidence_ids = [context.comparisons.quarter.current.id, context.losses.quarter.evidence_id, quarterLoss.id, ...quarterItem.machine_evidence_ids];
-  quarterItem.loss_reference = { evidence_id: context.losses.quarter.evidence_id, row_index: 0 };
-  const validated = validateAnalysisReport(overlapping, context, evidence.records);
-  assert.equal(validated.rows.month[0]?.["loss_hours"], 7.5);
-  assert.equal(validated.rows.quarter[0]?.["loss_hours"], 7.5, "matching ranges still require separate period evidence");
+  const wrongOwner = evidence.recordLoss(measureLoss(evidence.queries, artifacts, {
+    start_date: context.periods.week.start, end_date: context.periods.week.end,
+  }), { period: "day", agentId: "root" });
+  reject((r) => {
+    const target = periodEntry(r, "week").groups[0]!.items[0]!;
+    target.evidence_ids.push(wrongOwner.id);
+    target.loss_reference = { evidence_id: wrongOwner.id, row_index: 0 };
+  }, /不属于本周期/u);
   assert.throws(() => evidence.query("DELETE FROM oee_availability"), /只读/u);
   assert.throws(() => evidence.query("ATTACH DATABASE ':memory:' AS another"));
   assert.throws(() => evidence.query("PRAGMA query_only=OFF"));
@@ -521,7 +507,7 @@ test("reports accept unrestricted narrative strings while preserving structured 
   }
   for (const internal of [
     "q11", "（q11/q13）", "第 0 行", "row 0", "row_index=0", "evidence_ids",
-    "measure_loss(week/month)", "execute_sql", "hours_per_kind_available_day", "observed_days",
+    "measure_loss(week/day)", "execute_sql", "hours_per_kind_available_day", "observed_days",
   ]) {
     const copy = structuredClone(report);
     copy.periods[0]!.groups[0]!.items[0]!.measure = "下周复查 " + internal;
@@ -543,9 +529,14 @@ test("unavailable models publish new metrics and empty analysis, without creatin
       assert.equal(state.dateRange?.end, "2026-01-12");
       const expectedOee = (40 * 21_600 / 30_600 + 2 * 40 * 43_200 / 52_200) / 3;
       assert.ok(Math.abs(Number(state.widgets[1]?.data[0]?.["overall_oee_percent"]) - expectedOee) < 1e-10);
-      for (const widget of state.widgets.slice(9)) {
+      for (const widget of state.widgets.slice(9, 11)) {
         assert.deepEqual(widget.data, []);
         assert.ok(widget.warnings.some((warning) => warning.includes("本次分析暂不可用")));
+      }
+      for (const widget of state.widgets.slice(11)) {
+        assert.ok(widget.warnings.some((warning) => warning.includes("分析失败")));
+        assert.ok(!widget.warnings.some((warning) => warning.includes("尚未完成逐台分析")));
+        assert.ok(widget.data.every((row) => String(row["action_and_owner"]).includes("分析失败")));
       }
     },
   })]);
@@ -583,7 +574,65 @@ test("parent terminates a blocked child after base delivery and waits for proces
   assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
   const pid = Number(readFileSync(path.join(result.analysisArtifactDir, "pid"), "utf8"));
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-  assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
+  assert.ok(result.state.widgets.slice(9, 11).every((widget) => widget.data.length === 0));
+  assert.match(result.analysisReason!, /分析超时/u);
+  assert.ok(result.state.widgets.slice(11).every((widget) => widget.warnings.some((warning) => warning.includes("分析超时"))));
+  assert.equal(result.machineAnalysis?.interruption?.status, "timed_out");
+});
+
+test("parent watchdog publishes the validated checkpoint when a machine repair worker blocks", { timeout: 10000 }, async (t) => {
+  const { config, directory } = fixture(t, 1500);
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  const base = calculatedDashboard(database, "2026-01-12"); database.close();
+  const checkpoint = { ...base, widgets: base.widgets.map((widget) => widget.id !== createAnalysisTemplate("day").id ? widget : {
+    ...widget, warnings: [], data: [{ kind: "MT", priority: 1, issue: "换线损失待核查", measure: "核查换线记录", suggested_owner: "测试工程", loss_hours: 2.5 }],
+  }) };
+  writeFileSync(path.join(directory, "base.json"), JSON.stringify(base));
+  writeFileSync(path.join(directory, "checkpoint.json"), JSON.stringify(checkpoint));
+  const worker = path.join(directory, "checkpoint-blocked.mjs");
+  writeFileSync(worker, `import {readFileSync,writeFileSync} from 'node:fs';
+    process.once('message', request => {
+      writeFileSync(request.runDir + '/pid', String(process.pid));
+      writeFileSync(request.runDir + '/checkpoint-report.json', JSON.stringify({periods:[],machine_groups:[]}));
+      const quality={status:'degraded',exclusions:[],periodStatus:'completed',machines:{status:'degraded',issues:[]}};
+      process.send({type:'base',state:JSON.parse(readFileSync(request.config.cwd+'/base.json','utf8'))},()=>{
+        process.send({type:'checkpoint',quality,state:JSON.parse(readFileSync(request.config.cwd+'/checkpoint.json','utf8'))},()=>{while(true){}});
+      });
+    });`);
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "checkpoint-watchdog", pathToFileURL(worker));
+  assert.equal(result.analysisStatus, "degraded"); assert.equal(result.periodAnalysisStatus, "completed");
+  assert.deepEqual(result.state.widgets.slice(0, 11), checkpoint.widgets.slice(0, 11));
+  assert.ok(result.state.widgets.slice(11).every((widget) => widget.warnings.some((warning) => warning.includes("分析超时"))));
+  assert.match(result.analysisReason!, /MT 最佳榜.*分析超时/u);
+  assert.equal(result.machineAnalysis?.interruption?.status, "timed_out");
+  assert.match(createDailyImprovementEmail(result.state, "2026-01-12").text, /换线损失待核查/u);
+  const pid = Number(readFileSync(path.join(result.analysisArtifactDir, "pid"), "utf8"));
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  assert.ok(existsSync(path.join(result.analysisArtifactDir, "report.json")));
+});
+
+test("fatal worker validation errors preserve structured issues in the command result and run record", { timeout: 10000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const issue = { code: "BASELINE_MISMATCH", path: "/periods/0/minimum_evidence", period: "day",
+    expected: "frozen-minimum", actual: "wrong-evidence", message: "最低点证据引用不匹配", hint: "复用初始上下文指定的证据编号。" };
+  const failure = { type: "failure", reason: issue.message, validation: { status: "unavailable", issues: [issue], has_more: false, reason: issue.message } };
+  writeFileSync(path.join(directory, "base.json"), JSON.stringify(createDefaultDashboard()));
+  writeFileSync(path.join(directory, "failure.json"), JSON.stringify(failure));
+  const worker = path.join(directory, "validation-failure.mjs");
+  writeFileSync(worker, `import {readFileSync} from 'node:fs';
+    process.once('message', request => {
+      process.send({type:'base',state:JSON.parse(readFileSync(request.config.cwd+'/base.json','utf8'))},()=>{
+        process.send(JSON.parse(readFileSync(request.config.cwd+'/failure.json','utf8')),()=>process.disconnect());
+      });
+    });`);
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "fatal-validation", pathToFileURL(worker));
+  assert.equal(result.analysisStatus, "failed");
+  assert.equal(result.validation?.status, "unavailable");
+  assert.deepEqual(result.validation?.issues, [issue]);
+  const saved = JSON.parse(readFileSync(path.join(result.analysisArtifactDir, "run.json"), "utf8"));
+  assert.deepEqual(saved.validation, result.validation);
+  assert.equal(saved.validation.issues[0].expected, "frozen-minimum");
+  assert.equal(saved.validation.issues[0].actual, "wrong-evidence");
 });
 
 test("invalid timeout settings fail early", (t) => {
@@ -613,8 +662,8 @@ test("empty current periods and missing minima retain nulls and allow empty no-f
   for (const period of result.report.periods) for (const group of period.groups) assert.equal(group.no_findings_reason, reason);
   const analyzed = applyAnalysisReport(base, result);
   assert.equal(analyzed.widgets[1]?.data[0]?.["overall_oee_percent"], null);
-  assert.ok(analyzed.widgets.slice(9).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
-  for (const widget of analyzed.widgets.slice(9)) for (const kind of ["MT", "ST"]) {
+  assert.ok(analyzed.widgets.slice(9, 11).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
+  for (const widget of analyzed.widgets.slice(9, 11)) for (const kind of ["MT", "ST"]) {
     assert.ok(widget.warnings.includes((kind + " 未生成建议：" + reason).slice(0, 300)));
   }
   report.periods[0]!.groups[0]!.no_findings_reason = " ";
@@ -705,7 +754,7 @@ test("measured losses remain analysable without DUT or calculable OEE and preser
 });
 
 async function mockModel(t: TestContext, directory: string, responder: (body: Record<string, unknown>) => unknown,
-  options: { contextWindow?: number; maxTokens?: number; firstPromptTokens?: number; tokenUsageRequest?: number;
+  options: { autoMachineResponses?: boolean; contextWindow?: number; maxTokens?: number; firstPromptTokens?: number; tokenUsageRequest?: number;
     promptTokensFor?: (body: Record<string, unknown>) => number | undefined } = {}): Promise<Server> {
   let requests = 0;
   const errors: unknown[] = [];
@@ -718,11 +767,16 @@ async function mockModel(t: TestContext, directory: string, responder: (body: Re
       const needsSkill = tools && !tools.some((tool) => tool.function.name === "test_oee_calculator__rank_machines");
       const skillPath = needsSkill ? /<location>([^<]+)<\/location>/u.exec(modelMessages(body).map((message) => message.content).join("\n"))?.[1] : undefined;
       assert.ok(!needsSkill || skillPath, "analysis must advertise its OEE Skill");
-      const result = needsSkill ? [toolCall(0, "read", { path: skillPath })] : await responder(body);
+      const childData = needsSkill || !tools ? undefined : modelContext(body).child;
+      const machineReply = options.autoMachineResponses !== false && childData?.selected ? JSON.stringify({ machine_groups: childData.selected.map((group: { kind: "MT" | "ST"; ranking: "best" | "worst"; selected: { machine: string; evidence_reference: { evidence_id: string; row_index: number } }[] }) => ({
+        kind: group.kind, ranking: group.ranking, no_findings_reason: group.selected.length ? "" : "无可计算机台",
+        items: group.selected.map(({ machine, evidence_reference }) => ({ machine, measure: "核查最低子项并比较调整后的同口径指标", suggested_owner: "测试工程", evidence_reference })),
+      })) }) : undefined;
+      const result = needsSkill ? [toolCall(0, "read", { path: skillPath })] : machineReply ?? await responder(body);
       if (result instanceof Error) { response.writeHead(400); response.end(JSON.stringify({ error: { message: result.message } })); return; }
       const calls = typeof result === "string" ? null : result;
       if (!needsSkill) requests += 1;
-      const promptTokens = needsSkill ? undefined : options.promptTokensFor?.(body) ??
+      const promptTokens = needsSkill || machineReply ? undefined : options.promptTokensFor?.(body) ??
         (requests === (options.tokenUsageRequest ?? 1) ? options.firstPromptTokens : undefined);
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: ' + JSON.stringify({
@@ -782,7 +836,15 @@ function savedContext(runDir: string): AnalysisContext {
   return JSON.parse(readFileSync(path.join(runDir, "context.json"), "utf8")) as AnalysisContext;
 }
 
-function lossReport(runDir: string): AnalysisReport {
+function machineGroupsFor(context: AnalysisContext): MachineGroup[] {
+  return machineSelectionContext(context.machines).map(({ kind, ranking, selected }) => ({
+    kind: kind as "MT" | "ST", ranking, no_findings_reason: selected.length ? "" : "无可计算机台",
+    items: selected.map(({ machine, evidence_reference }) => ({ machine: String(machine),
+      measure: "核查该机台最低子项相关记录，试行调整并按次日同口径子项验证", suggested_owner: "测试工程", evidence_reference })),
+  }));
+}
+
+function lossReport(runDir: string): AnalysisReport & { machine_groups: MachineGroup[] } {
   const context = savedContext(runDir);
   const report = reportFor(context);
   const records = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -801,7 +863,7 @@ function lossReport(runDir: string): AnalysisReport {
       item.machine_evidence_ids = [ranking.id]; item.evidence_ids.push(ranking.id);
     }
   }
-  return report;
+  return { ...report, machine_groups: machineGroupsFor(context) };
 }
 
 function childLossResponse(body: Record<string, unknown>, runDir: string): unknown {
@@ -869,8 +931,7 @@ test("ephemeral model repairs evidence and accepts unrestricted prose without an
   assert.ok(!("verification" in JSON.parse(readFileSync(path.join(runDir, "report.json"), "utf8"))));
   assert.equal(result.state.widgets[9]?.data[0]?.["loss_hours"], 2.5);
   assert.equal(result.state.widgets[10]?.data[0]?.["loss_hours"], 2.5);
-  assert.equal(result.state.widgets[11]?.data[0]?.["loss_hours"], 7.5);
-  assert.equal(result.state.widgets[12]?.data[0]?.["loss_hours"], 7.5);
+  assert.ok(result.state.widgets.slice(11).every((widget) => widget.data.length > 0));
   const events = readFileSync(path.join(runDir, "events.jsonl"), "utf8");
   assert.match(events, /read 仅允许/u);
   assert.match(events, /只读/u);
@@ -881,7 +942,7 @@ test("ephemeral model repairs evidence and accepts unrestricted prose without an
   assert.ok(!readdirSync(path.join(directory, ".data")).includes("sessions"));
 });
 
-test("daily orchestration starts four isolated periods concurrently before the parent submits once", { timeout: 30_000 }, async (t) => {
+test("daily orchestration starts day/week and MT/ST machine tasks concurrently before the parent submits once", { timeout: 30_000 }, async (t) => {
   const { config, directory } = fixture(t);
   const runDir = path.join(config.analysis.artifactDir, "subagent-report");
   let rootTurns = 0;
@@ -894,7 +955,7 @@ test("daily orchestration starts four isolated periods concurrently before the p
     if (!root) {
       if (businessToolResults(body).length === 0) {
         started += 1;
-        if (started === 4) release();
+        if (started === 2) release();
         await allStarted;
       }
       const response = childLossResponse(body, runDir);
@@ -902,9 +963,9 @@ test("daily orchestration starts four isolated periods concurrently before the p
       return response;
     }
     rootTurns += 1;
-    assert.equal(completed, 4);
+    assert.equal(completed, 2);
     const children = root.subagent_results as SubagentResult[];
-    assert.deepEqual(children.map((entry) => entry.name), [...ANALYSIS_PERIOD_KEYS]);
+    assert.deepEqual(children.map((entry) => entry.name), [...ANALYSIS_PERIOD_KEYS, "machines_mt", "machines_st"]);
     assert.deepEqual(children.map((entry) => entry.status), ["completed", "completed", "completed", "completed"]);
     const tools = body["tools"] as { function: { name: string; parameters: { required?: string[] } } }[];
     assert.ok(!tools.some((tool) => ["subagent", "get_analysis_draft", "finalize_analysis"].includes(tool.function.name)));
@@ -914,15 +975,15 @@ test("daily orchestration starts four isolated periods concurrently before the p
   });
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "subagent-report");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
-  assert.equal(started, 4);
+  assert.equal(started, 2);
   assert.equal(rootTurns, 1);
   assertNumericCardsUnchanged(result.state, runDir);
   const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
   assert.equal(Object.keys(metrics.agents).length, 5);
   assert.equal(metrics.tools.measure_loss, undefined, "preselected losses need no duplicate model queries");
   const initialLosses = Object.values(savedContext(runDir).losses);
-  assert.equal(initialLosses.length, 4);
-  assert.equal(new Set(initialLosses.map((loss) => loss.evidence_id)).size, 4);
+  assert.equal(initialLosses.length, 2);
+  assert.equal(new Set(initialLosses.map((loss) => loss.evidence_id)).size, 2);
   assert.equal(metrics.tools.subagent.calls, 1);
   assert.equal(metrics.tools.submit_analysis.calls, 1);
   assert.ok(metrics.delegationMs > 0);
@@ -946,7 +1007,7 @@ test("parent receives candidate evidence errors before its first submission and 
       for (const group of candidate.groups) for (const item of group.items) {
         const ranking = records.find((entry) => entry.source === "rank_machines" && entry.owner.period === period && entry.rankingScope.kind === group.kind);
         assert.ok(ranking);
-        item.machine_evidence_ids = [period === "quarter" ? context.losses[period].evidence_id : ranking.id];
+        item.machine_evidence_ids = [period === "week" ? context.losses[period].evidence_id : ranking.id];
         item.evidence_ids.push(...item.machine_evidence_ids);
       }
       return "本周期调查完成，返回候选：\n\n```json\n" + JSON.stringify(candidate) + "\n```";
@@ -955,13 +1016,20 @@ test("parent receives candidate evidence errors before its first submission and 
     assert.equal(root.analysis_repair.active, false, "preflight does not spend report repair attempts");
     const candidates = root.subagent_results;
     assert.deepEqual(candidates.map((entry: { validation: { status: string } }) => entry.validation.status),
-      ["valid", "valid", "valid", "needs_repair"]);
-    const diagnostic = candidates[3].validation;
+      ["valid", "needs_repair", "valid", "valid"]);
+    const diagnostic = candidates[1].validation;
     assert.equal(diagnostic.issues.length, 2);
     assert.ok(diagnostic.issues.every((issue: { code: string; actual: string }) =>
       issue.code === "RANKING_SOURCE_MISMATCH" && issue.actual === "measure_loss"));
     assert.ok(diagnostic.evidence_actions.every((action: { action: string; evidence_ids: string[] }) =>
       action.action === "reuse" && action.evidence_ids.length === 1));
+    for (const candidate of candidates) {
+      assert.ok(Array.isArray(candidate.validation.issues));
+      assert.equal(typeof candidate.validation.has_more, "boolean");
+      for (const issue of candidate.validation.issues) {
+        for (const key of ["code", "path", "message", "expected", "actual", "hint"]) assert.ok(Object.hasOwn(issue, key), key);
+      }
+    }
     return [toolCall(0, "submit_analysis", lossReport(runDir))];
   });
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
@@ -981,7 +1049,7 @@ for (const failure of ["failed", "truncated"] as const) {
     await mockModel(t, directory, (body) => {
       const { root, child } = modelContext(body);
       if (!root) {
-        if (child.periods.week) return failure === "failed" ? new Error("week investigation failed") : "不完整结论".repeat(4000);
+        if (child.periods.week) return failure === "failed" ? new Error("week investigation failed") : "不完整结论".repeat(8000);
         return childLossResponse(body, runDir);
       }
       rootTurns += 1;
@@ -1017,7 +1085,7 @@ test("unsuccessful parent fallback uses two repair prompts then publishes only n
   assert.equal(result.analysisStatus, "failed");
   assert.equal(rootTurns, 3);
   assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
-  assert.ok(result.state.widgets.slice(9).every((widget) => !widget.data.length));
+  assert.ok(result.state.widgets.slice(9, 11).every((widget) => !widget.data.length));
   assert.equal(existsSync(path.join(result.analysisArtifactDir, "report.json")), false);
 });
 
@@ -1054,7 +1122,7 @@ test("ephemeral analysis compacts context and restores child results and scoped 
       const ranking = records.find((entry) => entry.source === "rank_machines" && entry.owner.period === period.period && entry.rankingScope.kind === group.kind);
       group.items[0]!.machine_evidence_ids = [ranking.id]; group.items[0]!.evidence_ids.push(ranking.id);
     }
-    return [toolCall(0, "submit_analysis", report)];
+    return [toolCall(0, "submit_analysis", { ...report, machine_groups: machineGroupsFor(savedContext(runDir)) })];
   }, { contextWindow: 1_000_000, maxTokens: 131072, firstPromptTokens: 230000, tokenUsageRequest: 5 });
   const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "compaction-test");
   assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
@@ -1114,7 +1182,7 @@ for (const stop of ["abort", "timeout"] as const) {
         pending.push(resolve);
         if (pending.length === 4) started();
       });
-    });
+    }, { autoMachineResponses: false });
     t.after(() => pending.forEach((resolve) => resolve("cancelled")));
     const database = new DatabaseSync(config.databasePath, { readOnly: true });
     connections.push(database);
@@ -1147,7 +1215,7 @@ test("tool budget includes malformed calls and terminates at sixty without a rep
   assert.match(result.analysisReason ?? "", /60 次/u);
   const events = readFileSync(path.join(result.analysisArtifactDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(events.filter((event) => event.type === "tool_call").length, 60);
-  assert.ok(result.state.widgets.slice(9).every((widget) => widget.data.length === 0));
+  assert.ok(result.state.widgets.slice(9, 11).every((widget) => widget.data.length === 0));
 });
 
 test("loss views preserve original row references and compute scoped statistics without summing coverage", () => {
@@ -1266,10 +1334,10 @@ test("parallel metrics isolate repeated IDs and exclude orchestration waits from
   assert.deepEqual(metrics.pending, []);
 });
 
-function addQuarterlyLosses(databasePath: string): void {
+function addWeeklyLosses(databasePath: string): void {
   const database = new DatabaseSync(databasePath);
-  for (const [state, hours] of [["Assistance", 6], ["HangUp", 4]] as const) {
-    database.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES('MT-01','P-LOT',?,'5000','2026-01-01',?)")
+  for (const [state, hours] of [["Conversion", 5], ["Assistance", 6], ["HangUp", 4]] as const) {
+    database.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES('MT-01','P-LOT',?,'5000','2026-01-05',?)")
       .run(state, hours * 3600);
   }
   database.close();
@@ -1277,12 +1345,12 @@ function addQuarterlyLosses(databasePath: string): void {
 
 function mixedValidationFixture(t: TestContext) {
   const { config, connections } = fixture(t);
-  addQuarterlyLosses(config.databasePath);
+  addWeeklyLosses(config.databasePath);
   const database = new DatabaseSync(config.databasePath, { readOnly: true }); connections.push(database);
   const evidence = new AnalysisEvidence(database, undefined, new SessionArtifactStore(path.dirname(config.databasePath), "mixed-validation"));
   const context = evidence.context(calculatedDashboard(database, "2026-01-12"), "2026-01-12");
   const report = reportFor(context, evidence);
-  const group = periodEntry(report, "quarter").groups[0]!;
+  const group = periodEntry(report, "week").groups[0]!;
   const mixed = group.items[2]!;
   const dut = evidence.records.get(mixed.machine_evidence_ids[0]!)!;
   evidence.records.set("q133", { ...dut, id: "q133" });
@@ -1304,11 +1372,11 @@ test("report acceptance permits partial selections, repeated states and arbitrar
   group.items[2]!.machine_evidence_ids = ["q133"];
   const original = structuredClone(report);
   const partial = structuredClone(report);
-  periodEntry(partial, "quarter").groups[0]!.items.pop();
-  assert.equal(validateAnalysisReport(partial, context, evidence.records).rows.quarter.length, 3);
+  periodEntry(partial, "week").groups[0]!.items.pop();
+  assert.equal(validateAnalysisReport(partial, context, evidence.records).rows.week.length, 3);
 
   const repeated = structuredClone(report);
-  const repeatedGroup = periodEntry(repeated, "quarter").groups[0]!;
+  const repeatedGroup = periodEntry(repeated, "week").groups[0]!;
   repeatedGroup.items = [structuredClone(group.items[0]!), structuredClone(group.items[1]!), structuredClone(group.items[0]!)];
   for (const [index, item] of repeatedGroup.items.entries()) {
     item.priority = index === 2 ? 1 : 3;
@@ -1317,9 +1385,9 @@ test("report acceptance permits partial selections, repeated states and arbitrar
     item.suggested_owner = "责任职能 " + index;
   }
   const result = validateAnalysisReport(repeated, context, evidence.records);
-  assert.deepEqual(result.rows.quarter.filter((row) => row["kind"] === "MT").map((row) => row["priority"]), [1, 3, 3]);
-  for (const [index, item] of periodEntry(result.report, "quarter").groups[0]!.items.entries()) {
-    const row = result.rows.quarter.find((entry) => String(entry["issue"]).startsWith("建议 " + index + "\n"))!;
+  assert.deepEqual(result.rows.week.filter((row) => row["kind"] === "MT").map((row) => row["priority"]), [1, 3, 3]);
+  for (const [index, item] of periodEntry(result.report, "week").groups[0]!.items.entries()) {
+    const row = result.rows.week.find((entry) => String(entry["issue"]).startsWith("建议 " + index + "\n"))!;
     const source = repeatedGroup.items[index]!;
     const hours = evidence.records.get(source.loss_reference.evidence_id)!.rows[source.loss_reference.row_index]!["loss_hours"];
     assert.equal(item.priority, source.priority);
@@ -1341,7 +1409,7 @@ test("empty ranking evidence and empty groups do not restrict machine distributi
   item.issue = "少数机台损失集中，TOP3 需要核查";
   const rankingId = item.machine_evidence_ids[0]!;
   evidence.records.set(rankingId, { ...evidence.records.get(rankingId)!, rows: [] });
-  assert.ok(validateAnalysisReport(report, context, evidence.records).rows.quarter.some((row) => String(row["issue"]).includes(item.issue)));
+  assert.ok(validateAnalysisReport(report, context, evidence.records).rows.week.some((row) => String(row["issue"]).includes(item.issue)));
   for (const entry of report.periods) {
     entry.comparison = "机台损失分散";
     for (const entryGroup of entry.groups) {
@@ -1383,18 +1451,18 @@ test("report shape, period and kind coverage and evidence-array bounds remain ma
   assert.ok(validationIssues(() => validateAnalysisReport(duplicateKind, context, evidence.records)).some((issue) => issue.code === "KIND_COVERAGE"));
 });
 
-test("mixed quarterly MT advice identifies q135 and original array positions without modifying the candidate", (t) => {
+test("mixed weekly MT advice identifies q135 and original array positions without modifying the candidate", (t) => {
   const { report, context, evidence } = mixedValidationFixture(t);
   const original = structuredClone(report);
   let issues = validationIssues(() => validateAnalysisReport(report, context, evidence.records));
   assert.equal(issues.length, 1);
-  assert.deepEqual(issues[0], { code: "METRIC_CATEGORY_MISMATCH", path: "/periods/3/groups/0/items/2/machine_evidence_ids/1",
-    period: "quarter", kind: "MT", priority: 3, item_index: 2, evidence_id: "q135", expected: ["loss_hours"],
+  assert.deepEqual(issues[0], { code: "METRIC_CATEGORY_MISMATCH", path: "/periods/1/groups/0/items/2/machine_evidence_ids/1",
+    period: "week", kind: "MT", priority: 3, item_index: 2, evidence_id: "q135", expected: ["loss_hours"],
     actual: { category: "availability", metric: "final_yield" }, message: "损失问题必须引用损失小时机台排名",
     hint: "复用该损失状态的 loss_hours 排名。" });
   assert.deepEqual(report, original);
-  report.periods.reverse(); periodEntry(report, "quarter").groups.reverse();
-  periodEntry(report, "quarter").groups[1]!.items.reverse();
+  report.periods.reverse(); periodEntry(report, "week").groups.reverse();
+  periodEntry(report, "week").groups[1]!.items.reverse();
   issues = validationIssues(() => validateAnalysisReport(report, context, evidence.records));
   const metricIssue = issues.find((issue) => issue.code === "METRIC_CATEGORY_MISMATCH")!;
   assert.equal(metricIssue.path, "/periods/0/groups/1/items/0/machine_evidence_ids/1");
@@ -1417,7 +1485,7 @@ test("validation collects independent errors, skips missing-reference dependenci
   assert.ok(issues.filter((issue) => issue.evidence_id === "q135").every((issue) => issue.code === "EVIDENCE_MISSING"));
   evidence.records.set("q135", { ...ranking, truncated: true });
   assert.ok(validationIssues(() => validateAnalysisReport(report, context, evidence.records)).some((issue) => issue.code === "EVIDENCE_TRUNCATED"));
-  evidence.records.set("q135", { ...ranking, owner: { period: "month", agentId: "test" } });
+  evidence.records.set("q135", { ...ranking, owner: { period: "day", agentId: "test" } });
   assert.ok(validationIssues(() => validateAnalysisReport(report, context, evidence.records)).some((issue) => issue.code === "EVIDENCE_PERIOD_MISMATCH"));
 });
 
@@ -1426,8 +1494,8 @@ test("group repair reuses rankings, preserves other groups and renders TOP3 once
   const events: Record<string, unknown>[] = [];
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, (event) => events.push(event));
   assert.equal(repair.submit(report), undefined);
-  assert.equal(repair.needsEvidence("quarter"), false);
-  const preserved = structuredClone(report.periods.filter((period) => period.period !== "quarter"));
+  assert.equal(repair.needsEvidence("week"), false);
+  const preserved = structuredClone(report.periods.filter((period) => period.period !== "week"));
   const next = structuredClone(group);
   next.items[2]!.issue = "HangUp（挂起）损失偏高，核实挂起发生原因。".repeat(120);
   next.items[2]!.measure = next.items[2]!.measure.repeat(120);
@@ -1436,14 +1504,14 @@ test("group repair reuses rankings, preserves other groups and renders TOP3 once
   const original = structuredClone(next);
   const omitted = ["移除与挂起损失不匹配的良率排名。".repeat(120), "", " \t "]
     .map((reason) => ({ item: structuredClone(group.items[2]!), reason }));
-  const result = repair.repair(repair.prepareGroup({ period: "quarter", kind: "MT", group: next, omitted_candidates: omitted }));
+  const result = repair.repair(repair.prepareGroup({ period: "week", kind: "MT", group: next, omitted_candidates: omitted }));
   assert.ok(result); assert.equal(result.status, "completed");
   assert.deepEqual(next, original);
   // Rendered copies may gain platform labels, so compare against normal validation of the originals.
-  const expectedReport = structuredClone(report); periodEntry(expectedReport, "quarter").groups[0] = next;
+  const expectedReport = structuredClone(report); periodEntry(expectedReport, "week").groups[0] = next;
   assert.deepEqual(result.report, validateAnalysisReport(expectedReport, context, evidence.records).report);
-  assert.deepEqual(report.periods.filter((period) => period.period !== "quarter"), preserved);
-  assert.equal((result.rows.quarter[2]!["issue"] as string).match(/TOP3/gu)?.length, 2, "one loss ranking summary with its aggregate share");
+  assert.deepEqual(report.periods.filter((period) => period.period !== "week"), preserved);
+  assert.equal((result.rows.week[2]!["issue"] as string).match(/TOP3/gu)?.length, 2, "one loss ranking summary with its aggregate share");
   assert.deepEqual(validateAnalysisReport(result.report, context, evidence.records).report, result.report);
   assert.deepEqual(events.find((event) => event["type"] === "analysis_group_repair")!["omitted_candidates"], omitted);
 });
@@ -1454,22 +1522,22 @@ test("degradation discards only invalid evidence items, keeps submitted prioriti
   const result = degradeAnalysisReport(report, context, evidence.records);
   assert.equal(result.status, "degraded"); assert.equal(result.exclusions.length, 1);
   assert.equal(result.exclusions[0]!.priority, 3);
-  assert.equal(result.rows.quarter.length, 3);
-  assert.deepEqual(periodEntry(result.report, "quarter").groups[0]!.items.map((item) => item.priority), [1, 2]);
-  assert.match(periodEntry(result.report, "quarter").comparison, /周期趋势判断暂未提供/u);
+  assert.equal(result.rows.week.length, 3);
+  assert.deepEqual(periodEntry(result.report, "week").groups[0]!.items.map((item) => item.priority), [1, 2]);
+  assert.match(periodEntry(result.report, "week").comparison, /周期趋势判断暂未提供/u);
   assert.deepEqual(report, original);
   const middleInvalid = structuredClone(report);
-  periodEntry(middleInvalid, "quarter").groups[0]!.items[2]!.machine_evidence_ids = ["q133"];
-  periodEntry(middleInvalid, "quarter").groups[0]!.items[1]!.machine_evidence_ids = ["q135"];
+  periodEntry(middleInvalid, "week").groups[0]!.items[2]!.machine_evidence_ids = ["q133"];
+  periodEntry(middleInvalid, "week").groups[0]!.items[1]!.machine_evidence_ids = ["q135"];
   const middleResult = degradeAnalysisReport(middleInvalid, context, evidence.records);
-  assert.deepEqual(periodEntry(middleResult.report, "quarter").groups[0]!.items.map((item) => item.priority), [1, 3]);
-  assert.ok(middleResult.rows.quarter.every((row) => typeof row["loss_hours"] === "number"));
-  for (const item of periodEntry(report, "quarter").groups[0]!.items) item.machine_evidence_ids = ["q135"];
+  assert.deepEqual(periodEntry(middleResult.report, "week").groups[0]!.items.map((item) => item.priority), [1, 3]);
+  assert.ok(middleResult.rows.week.every((row) => typeof row["loss_hours"] === "number"));
+  for (const item of periodEntry(report, "week").groups[0]!.items) item.machine_evidence_ids = ["q135"];
   const empty = degradeAnalysisReport(report, context, evidence.records);
   assert.equal(empty.exclusions.length, 3);
-  assert.equal(periodEntry(empty.report, "quarter").groups[0]!.items.length, 0);
-  assert.match(periodEntry(empty.report, "quarter").groups[0]!.no_findings_reason, /暂无可展示建议/u);
-  periodEntry(report, "quarter").minimum_evidence = "missing";
+  assert.equal(periodEntry(empty.report, "week").groups[0]!.items.length, 0);
+  assert.match(periodEntry(empty.report, "week").groups[0]!.no_findings_reason, /暂无可展示建议/u);
+  periodEntry(report, "week").minimum_evidence = "missing";
   assert.throws(() => degradeAnalysisReport(report, context, evidence.records), /最低点/u);
   assert.throws(() => degradeAnalysisReport({ periods: [] }, context, evidence.records), /结构/u);
 });
@@ -1482,47 +1550,47 @@ test("repair budgets ignore unrelated rewrites and regenerated IDs, preserve can
   const next = structuredClone(group); next.items[2]!.measure = "只改写措施而未修正类别。";
   evidence.records.set("q136", { ...evidence.records.get("q135")!, id: "q136" });
   next.items[2]!.machine_evidence_ids[1] = "q136"; next.items[2]!.evidence_ids.push("q136");
-  assert.equal(repair.repair({ period: "quarter", kind: "MT", group: next }), undefined);
+  assert.equal(repair.repair({ period: "week", kind: "MT", group: next }), undefined);
   assert.match(repair.stopReason!, /连续出现两次/u);
   assert.equal(repair.degrade().status, "degraded");
   const malformed = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   malformed.submit(report);
-  assert.throws(() => malformed.prepareGroup({ period: "quarter", kind: "MT", group: "broken" }), /结构|JSON/u);
+  assert.throws(() => malformed.prepareGroup({ period: "week", kind: "MT", group: "broken" }), /结构|JSON/u);
   assert.equal(malformed.degrade().exclusions.length, 1);
   const short = new AnalysisRepairState(context, evidence.records, Date.now() + 5000, () => {});
   short.submit(report); assert.match(short.stopReason!, /时间预算/u);
   assert.equal(short.degrade().status, "degraded");
 });
 
-function quarterlyMixedReport(runDir: string): AnalysisReport {
+function weeklyMixedReport(runDir: string): AnalysisReport {
   const report = lossReport(runDir);
   const records = readFileSync(path.join(runDir, "evidence.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  const group = periodEntry(report, "quarter").groups[0]!;
-  const ranking = records.find((entry) => entry.owner?.period === "quarter" && entry.rankingScope?.kind === "MT" &&
+  const group = periodEntry(report, "week").groups[0]!;
+  const ranking = records.find((entry) => entry.owner?.period === "week" && entry.rankingScope?.kind === "MT" &&
     entry.rankingScope.metric === "loss_hours" && entry.rankingScope.states[0] === "Conversion");
   group.items[2]!.machine_evidence_ids.push(ranking.id); group.items[2]!.evidence_ids.push(ranking.id);
   return report;
 }
 
-function childWithQuarterlyRankings(body: Record<string, unknown>, runDir: string) {
+function childWithWeeklyRankings(body: Record<string, unknown>, runDir: string) {
   return childLossResponse(body, runDir);
 }
 
 test("the parent repairs one group after compaction without any supplemental queries", { timeout: 30000 }, async (t) => {
   const { config, directory } = fixture(t);
-  addQuarterlyLosses(config.databasePath);
+  addWeeklyLosses(config.databasePath);
   const runDir = path.join(config.analysis.artifactDir, "localized-repair");
   let turn = 0; let summaries = 0;
   await mockModel(t, directory, (body) => {
-    if (!body["tools"]) { summaries += 1; return "依据服务端 analysis_repair 修正季度 MT 的第三条。"; }
+    if (!body["tools"]) { summaries += 1; return "依据服务端 analysis_repair 修正周 MT 的第三条。"; }
     const { root } = modelContext(body);
-    if (!root) return childWithQuarterlyRankings(body, runDir);
+    if (!root) return childWithWeeklyRankings(body, runDir);
     turn += 1;
-    if (turn === 1) return [toolCall(0, "submit_analysis", quarterlyMixedReport(runDir))];
+    if (turn === 1) return [toolCall(0, "submit_analysis", weeklyMixedReport(runDir))];
     const repair = root.analysis_repair;
     assert.equal(repair.pending_groups.length, 1, JSON.stringify(repair) + JSON.stringify(businessToolResults(body)));
     // The SDK needs history exceeding keepRecentTokens before a summary can be generated.
-    if (turn === 2) return "准备依据服务端候选修正季度 MT 的第三条。" + " preparation-note".repeat(6000);
+    if (turn === 2) return "准备依据服务端候选修正周 MT 的第三条。" + " preparation-note".repeat(6000);
     assert.ok(summaries > 0);
     assert.equal(repair.issues[0].code, "LOSS_STATE_MISMATCH");
     assert.equal(repair.issues[0].priority, 3);
@@ -1538,7 +1606,7 @@ test("the parent repairs one group after compaction without any supplemental que
   assertNumericCardsUnchanged(result.state, runDir);
   const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
   assert.equal(metrics.tools.submit_analysis.calls, 1); assert.equal(metrics.tools.repair_analysis_group.calls, 1);
-  assert.equal(metrics.tools.test_oee_calculator__rank_machines.calls, 12);
+  assert.equal(metrics.tools.test_oee_calculator__rank_machines.calls, 6);
   assert.equal(metrics.validation.failures, 1); assert.equal(metrics.validation.groupRepairs, 1);
   const rejected = readFileSync(path.join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line))
     .find((event) => event.type === "tool_result" && event.name === "submit_analysis");
@@ -1549,14 +1617,14 @@ test("the parent repairs one group after compaction without any supplemental que
 for (const mode of ["repeated", "stall"] as const) {
   test("the parent publishes a validated degraded report after " + mode + " repair", { timeout: 20000 }, async (t) => {
     const { config, directory } = fixture(t, mode === "stall" ? 13000 : 20000);
-    addQuarterlyLosses(config.databasePath);
+    addWeeklyLosses(config.databasePath);
     const runId = "degraded-" + mode; const runDir = path.join(config.analysis.artifactDir, runId);
     let turn = 0;
     await mockModel(t, directory, (body) => {
       const { root } = modelContext(body);
-      if (!root) return childWithQuarterlyRankings(body, runDir);
+      if (!root) return childWithWeeklyRankings(body, runDir);
       turn += 1;
-      if (turn === 1) return [toolCall(0, "submit_analysis", quarterlyMixedReport(runDir))];
+      if (turn === 1) return [toolCall(0, "submit_analysis", weeklyMixedReport(runDir))];
       if (mode === "stall") return new Promise(() => {});
       assert.equal(root.analysis_repair.pending_groups.length, 1, JSON.stringify(root.analysis_repair) + JSON.stringify(businessToolResults(body)));
       const pending = root.analysis_repair.pending_groups[0];
@@ -1567,12 +1635,18 @@ for (const mode of ["repeated", "stall"] as const) {
     const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
     assert.equal(result.analysisStatus, "degraded", result.analysisReason ?? "");
     assert.equal(result.analysisExclusions?.length, 1);
-    assert.match(result.analysisReason!, /季度 MT.*1 条/u);
+    assert.match(result.analysisReason!, /周 MT.*1 条/u);
     assertNumericCardsUnchanged(result.state, runDir);
-    assert.ok(result.state.widgets[12]!.warnings.some((warning) => warning.includes("已剔除")));
-    assert.equal(result.state.widgets[12]!.data.length, 3);
+    assert.ok(result.state.widgets[10]!.warnings.some((warning) => warning.includes("已剔除")));
+    assert.equal(result.state.widgets[10]!.data.length, 3);
     assert.equal(JSON.parse(readFileSync(path.join(runDir, "run.json"), "utf8")).status, "degraded");
-    assert.equal(JSON.parse(readFileSync(path.join(runDir, "report-quality.json"), "utf8")).exclusions.length, 1);
+    const quality = JSON.parse(readFileSync(path.join(runDir, "report-quality.json"), "utf8"));
+    assert.equal(quality.exclusions.length, 1);
+    assert.equal(result.validation?.status, "needs_repair");
+    assert.deepEqual(quality.validation, result.validation);
+    assert.deepEqual(quality.validation.issues, quality.exclusions[0].issues);
+    assert.ok(quality.validation.issues.every((issue: { expected?: unknown; actual?: unknown; hint?: string }) =>
+      Object.hasOwn(issue, "expected") && Object.hasOwn(issue, "actual") && !!issue.hint));
     assert.ok(Date.now() - started < config.analysis.timeoutMs);
     assert.equal(turn, 2);
   });
@@ -1584,15 +1658,15 @@ test("three changing repair failures exhaust the correction budget without waiti
   repair.submit(report);
   const next = structuredClone(group);
   next.items[2]!.machine_evidence_ids = ["missing"];
-  repair.repair({ period: "quarter", kind: "MT", group: next });
+  repair.repair({ period: "week", kind: "MT", group: next });
   assert.equal(repair.stopReason, undefined);
-  next.items[2]!.machine_evidence_ids = [context.comparisons.quarter.current.id];
-  repair.repair({ period: "quarter", kind: "MT", group: next });
+  next.items[2]!.machine_evidence_ids = [context.comparisons.week.current.id];
+  repair.repair({ period: "week", kind: "MT", group: next });
   assert.equal(repair.stopReason, undefined);
   const otherStateRanking = group.items[0]!.machine_evidence_ids[0]!;
   next.items[2]!.machine_evidence_ids = [otherStateRanking];
   next.items[2]!.evidence_ids.push(otherStateRanking);
-  repair.repair({ period: "quarter", kind: "MT", group: next });
+  repair.repair({ period: "week", kind: "MT", group: next });
   assert.match(repair.stopReason!, /三次/u);
   assert.equal(repair.modelContext().remaining_repairs, 0);
   assert.equal(repair.degrade().exclusions.length, 1);
@@ -1602,45 +1676,45 @@ test("loss-state repair requests evidence only when no compatible ranking is alr
   const { report, group, context, evidence } = mixedValidationFixture(t);
   group.items[2]!.machine_evidence_ids = ["q133"];
   const item = group.items[0]!; item.category = "availability";
-  const range = context.periods.quarter;
+  const range = context.periods.week;
   const loss = evidence.recordLoss(measureLoss(evidence.queries, evidence.artifacts!, {
     start_date: range.start, end_date: range.end, states: ["Conversion"],
-  }), { period: "quarter", agentId: "test" });
+  }), { period: "week", agentId: "test" });
   item.evidence_ids.push(loss.id);
-  const canonicalLoss = evidence.records.get(context.losses.quarter.evidence_id)!;
-  for (const [id, record] of evidence.records) if (record.owner?.period === "quarter" && record.rankingScope?.kind === "MT" && record.rankingScope.states[0] === "Conversion") {
+  const canonicalLoss = evidence.records.get(context.losses.week.evidence_id)!;
+  for (const [id, record] of evidence.records) if (record.owner?.period === "week" && record.rankingScope?.kind === "MT" && record.rankingScope.states[0] === "Conversion") {
     evidence.records.set(id, { ...record, rankingScope: { ...record.rankingScope, states: ["Assistance"] } });
   }
-  addRanking(item, context, evidence, "quarter", "MT", "loss_hours", ["Assistance"]);
+  addRanking(item, context, evidence, "week", "MT", "loss_hours", ["Assistance"]);
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   assert.equal(repair.submit(report), undefined);
   assert.ok(repair.modelContext().issues.some((issue) => issue.code === "LOSS_STATE_MISMATCH"));
   assert.equal(repair.canInspectSnapshot(" " + canonicalLoss.snapshot!.name.toUpperCase() + " "), true);
   assert.equal(repair.canInspectSnapshot("unknown-loss-snapshot"), false);
   assert.equal(repair.canInspectSnapshot(evidence.records.get("q135")!.snapshot!.name), false);
-  assert.equal(repair.needsEvidence("quarter"), true);
+  assert.equal(repair.needsEvidence("week"), true);
   assert.equal(repair.needsEvidence("day"), false);
   const replacement = structuredClone(item);
-  addRanking(replacement, context, evidence, "quarter", "MT", "loss_hours", ["Conversion"]);
-  assert.equal(repair.needsEvidence("quarter"), false);
+  addRanking(replacement, context, evidence, "week", "MT", "loss_hours", ["Conversion"]);
+  assert.equal(repair.needsEvidence("week"), false);
 });
 
 test("repairing one group does not count an untouched group's error as a repeated failure", (t) => {
   const { report, context, evidence } = mixedValidationFixture(t);
-  const st = periodEntry(report, "quarter").groups[1]!;
+  const st = periodEntry(report, "week").groups[1]!;
   const stRankings = [...st.items[0]!.machine_evidence_ids];
   st.items[0]!.machine_evidence_ids = ["missing-st-ranking"];
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   repair.submit(report);
-  const mt = structuredClone(periodEntry(report, "quarter").groups[0]!);
+  const mt = structuredClone(periodEntry(report, "week").groups[0]!);
   mt.items[2]!.machine_evidence_ids = ["q133"];
-  assert.equal(repair.repair({ period: "quarter", kind: "MT", group: mt }), undefined);
+  assert.equal(repair.repair({ period: "week", kind: "MT", group: mt }), undefined);
   assert.equal(repair.stopReason, undefined);
   const fixedSt = structuredClone(st); fixedSt.items[0]!.machine_evidence_ids = stRankings;
-  assert.equal(repair.repair({ period: "quarter", kind: "ST", group: fixedSt })?.status, "completed");
+  assert.equal(repair.repair({ period: "week", kind: "ST", group: fixedSt })?.status, "completed");
 });
 
-test("all eight groups can be repaired without charging successful groups against the failed repair allowance", (t) => {
+test("all four period groups can be repaired without charging successful groups against the failed repair allowance", (t) => {
   const { context, evidence } = mixedValidationFixture(t);
   const original = reportFor(context, evidence);
   const candidate = structuredClone(original);
@@ -1650,7 +1724,7 @@ test("all eight groups can be repaired without charging successful groups agains
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   assert.equal(repair.submit(candidate), undefined);
   const targets = original.periods.flatMap((period) => period.groups.map((group) => ({ period: period.period, kind: group.kind, group })));
-  assert.equal(repair.modelContext().pending_groups.length, 8);
+  assert.equal(repair.modelContext().pending_groups.length, 4);
   for (const [index, target] of targets.entries()) {
     const result = repair.repair(target);
     if (index < targets.length - 1) assert.equal(result, undefined);
@@ -1663,12 +1737,12 @@ test("all eight groups can be repaired without charging successful groups agains
 test("candidate preflight shares publication evidence checks and never modifies candidate text", (t) => {
   const { context, evidence } = mixedValidationFixture(t);
   const original = reportFor(context, evidence);
-  const candidate = structuredClone(periodEntry(original, "quarter"));
+  const candidate = structuredClone(periodEntry(original, "week"));
   const item = candidate.groups[0]!.items[0]!;
   const correctId = item.machine_evidence_ids[0]!;
-  item.machine_evidence_ids = [context.losses.quarter.evidence_id];
+  item.machine_evidence_ids = [context.losses.week.evidence_id];
   const text = JSON.stringify(candidate);
-  const checked = inspectAnalysisCandidate(text, "quarter", context, evidence.records);
+  const checked = inspectAnalysisCandidate(text, "week", context, evidence.records);
   assert.equal(checked.status, "needs_repair");
   assert.equal(checked.issues.length, 1);
   assert.equal(checked.issues[0]!.code, "RANKING_SOURCE_MISMATCH");
@@ -1677,7 +1751,7 @@ test("candidate preflight shares publication evidence checks and never modifies 
   assert.equal(checked.evidence_actions[0]!.action, "reuse");
   assert.equal(JSON.stringify(candidate), text);
   const publication = structuredClone(original);
-  publication.periods[3] = candidate;
+  publication.periods[1] = candidate;
   assert.throws(() => validateAnalysisReport(publication, context, evidence.records), (error: unknown) => {
     assert.ok(error instanceof AnalysisValidationError);
     assert.deepEqual(error.issues.map(({ path: _path, ...issue }) => issue),
@@ -1685,18 +1759,18 @@ test("candidate preflight shares publication evidence checks and never modifies 
     return true;
   });
   item.machine_evidence_ids = [correctId];
-  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "quarter", context, evidence.records).status, "valid");
-  assert.equal(inspectAnalysisCandidate("调查完成。\n```json\n" + JSON.stringify(candidate) + "\n```", "quarter", context, evidence.records).status, "valid");
-  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate) + "\n" + JSON.stringify(candidate), "quarter", context, evidence.records).issues[0]!.code, "STRUCTURE_INVALID");
-  item.machine_evidence_ids = [periodEntry(original, "month").groups[0]!.items[0]!.machine_evidence_ids[0]!];
-  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "quarter", context, evidence.records).issues[0]!.code, "EVIDENCE_PERIOD_MISMATCH");
-  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "week", context, evidence.records).issues[0]!.code, "PERIOD_COVERAGE");
-  const invalid = inspectAnalysisCandidate("private invalid text", "quarter", context, evidence.records);
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "week", context, evidence.records).status, "valid");
+  assert.equal(inspectAnalysisCandidate("调查完成。\n```json\n" + JSON.stringify(candidate) + "\n```", "week", context, evidence.records).status, "valid");
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate) + "\n" + JSON.stringify(candidate), "week", context, evidence.records).issues[0]!.code, "STRUCTURE_INVALID");
+  item.machine_evidence_ids = [periodEntry(original, "day").groups[0]!.items[0]!.machine_evidence_ids[0]!];
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "week", context, evidence.records).issues[0]!.code, "EVIDENCE_PERIOD_MISMATCH");
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "day", context, evidence.records).issues[0]!.code, "PERIOD_COVERAGE");
+  const invalid = inspectAnalysisCandidate("private invalid text", "week", context, evidence.records);
   assert.equal(invalid.issues[0]!.code, "STRUCTURE_INVALID");
   assert.doesNotMatch(JSON.stringify(invalid), /private invalid text/u);
   Reflect.deleteProperty(candidate.groups[0]!.items[0]!, "category");
-  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "quarter", context, evidence.records).issues[0]!.reason, "required");
-  assert.throws(() => parseAnalysisReport({ periods: [periodEntry(original, "quarter")] }), AnalysisValidationError);
+  assert.equal(inspectAnalysisCandidate(JSON.stringify(candidate), "week", context, evidence.records).issues[0]!.reason, "required");
+  assert.throws(() => parseAnalysisReport({ periods: [periodEntry(original, "week")] }), AnalysisValidationError);
 });
 
 test("structure feedback identifies independent fields, escaped paths and exact constraints without echoing prose", (t) => {
@@ -1752,7 +1826,7 @@ test("structure diagnostics expose allowed period values and numeric bounds", (t
   const issues = validationIssues(() => parseAnalysisReport(report));
   assert.equal(issues.length, 2, "literal union branches are one independent error and must not propose an arbitrary period");
   assert.deepEqual(issues.find((entry) => entry.path === "/periods/1/period")!.expected,
-    { enum: ["day", "week", "month", "quarter"] });
+    { enum: ["day", "week"] });
   assert.deepEqual(issues.find((entry) => entry.path.endsWith("/priority"))!.expected,
     { type: "integer", minimum: 1, maximum: 3 });
 });
@@ -1762,7 +1836,7 @@ test("repair routing requires a complete submission without a candidate or with 
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   Reflect.deleteProperty(report.periods[0]!.groups[0]!.items[0]!, "category");
   assert.throws(() => repair.prepareReport(report), AnalysisValidationError);
-  assert.equal(repair.repair({ period: "quarter", kind: "MT", group }), undefined);
+  assert.equal(repair.repair({ period: "week", kind: "MT", group }), undefined);
   const feedback = repair.modelContext();
   assert.equal(feedback.issues[0]!.code, "REPAIR_TARGET_INVALID");
   assert.equal(feedback.repair_plan.submit_tool, "submit_analysis");
@@ -1770,12 +1844,12 @@ test("repair routing requires a complete submission without a candidate or with 
   assert.deepEqual(feedback.repair_plan.targets, []);
   report.periods[0]!.groups[0]!.items[0]!.category = "availability";
   const mixed = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
-  periodEntry(report, "quarter").minimum_evidence = "missing-baseline";
+  periodEntry(report, "week").minimum_evidence = "missing-baseline";
   mixed.submit(report);
   assert.ok(mixed.modelContext().pending_groups.length);
   assert.equal(mixed.modelContext().repair_plan.submit_tool, "submit_analysis");
   assert.equal(mixed.modelContext().repair_plan.corrections.find((entry) => entry.code === "BASELINE_MISMATCH")!.replacement,
-    context.comparisons.quarter.minimum.id);
+    context.comparisons.week.minimum.id);
   mixed.stop("test stop");
   assert.equal(mixed.modelContext().repair_plan.submit_tool, null);
   assert.deepEqual(mixed.modelContext().repair_plan.evidence_actions, []);
@@ -1789,20 +1863,20 @@ test("malformed local patches retain the candidate and expose both patch and unr
   const invalid = structuredClone(group);
   Reflect.deleteProperty(invalid.items[2]!, "measure");
   const omitted = structuredClone(group.items[2]!); omitted.machine_evidence_ids = [];
-  assert.throws(() => repair.prepareGroup({ period: "quarter", kind: "MT", group: invalid,
+  assert.throws(() => repair.prepareGroup({ period: "week", kind: "MT", group: invalid,
     omitted_candidates: [{ item: omitted, reason: "" }] }), AnalysisValidationError);
   const feedback = repair.modelContext();
   assert.equal(feedback.repair_plan.submit_tool, "repair_analysis_group");
   assert.deepEqual(feedback.pending_groups, saved);
   const field = feedback.repair_plan.corrections.find((entry) => entry.path === "/group/items/2/measure")!;
   assert.equal(field.argument_path, "/group/items/2/measure");
-  assert.equal(field.report_path, "/periods/3/groups/0/items/2/measure");
+  assert.equal(field.report_path, "/periods/1/groups/0/items/2/measure");
   assert.match(feedback.repair_plan.corrections.find((entry) => entry.path.startsWith("/omitted_candidates"))!.instruction, /可省略/u);
   const evidenceFix = feedback.repair_plan.corrections.find((entry) => entry.code === "METRIC_CATEGORY_MISMATCH")!;
   assert.equal(evidenceFix.argument_path, "/group/items/2/machine_evidence_ids/1");
   assert.ok(evidenceFix.choices!.includes("q133"));
   const fixed = structuredClone(group); fixed.items[2]!.machine_evidence_ids = ["q133"];
-  assert.equal(repair.repair(repair.prepareGroup({ period: "quarter", kind: "MT", group: fixed }))?.status, "completed");
+  assert.equal(repair.repair(repair.prepareGroup({ period: "week", kind: "MT", group: fixed }))?.status, "completed");
 });
 
 test("invalid repair targets list allowed groups and mismatched group kinds have an exact correction", (t) => {
@@ -1811,18 +1885,18 @@ test("invalid repair targets list allowed groups and mismatched group kinds have
   repair.submit(report);
   repair.repair({ period: "day", kind: "MT", group });
   let plan = repair.modelContext().repair_plan;
-  assert.deepEqual(plan.targets, [{ period: "quarter", kind: "MT" }]);
+  assert.deepEqual(plan.targets, [{ period: "week", kind: "MT" }]);
   assert.equal(plan.submit_tool, "repair_analysis_group");
   assert.equal(plan.corrections[0]!.report_path, undefined);
   assert.ok(plan.corrections.some((entry) => entry.code === "METRIC_CATEGORY_MISMATCH"));
-  assert.ok(plan.evidence_actions.every((entry) => entry.period === "quarter"));
+  assert.ok(plan.evidence_actions.every((entry) => entry.period === "week"));
   const mismatch = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   mismatch.submit(report);
-  mismatch.repair({ period: "quarter", kind: "MT", group: { ...group, kind: "ST" } });
+  mismatch.repair({ period: "week", kind: "MT", group: { ...group, kind: "ST" } });
   plan = mismatch.modelContext().repair_plan;
   assert.equal(plan.corrections[0]!.replacement, "MT");
   assert.equal(plan.corrections[0]!.argument_path, "/group/kind");
-  assert.equal(plan.corrections[0]!.report_path, "/periods/3/groups/0/kind");
+  assert.equal(plan.corrections[0]!.report_path, "/periods/1/groups/0/kind");
 });
 
 test("loss feedback explains invalid original rows and supplies all legitimate candidates without choosing one", (t) => {
@@ -1837,17 +1911,17 @@ test("loss feedback explains invalid original rows and supplies all legitimate c
   assert.ok(issue.reasons!.some((reason) => reason.includes("priority")));
   const fix = feedback.repair_plan.corrections.find((entry) => entry.code === "LOSS_REFERENCE_MISMATCH")!;
   assert.equal(fix.replacement, undefined);
-  assert.deepEqual(fix.choices, context.losses.quarter.by_kind.MT.map((entry) => ({
-    evidence_id: context.losses.quarter.evidence_id, row_index: entry.row_index, state_group: entry.state_group, loss_hours: entry.loss_hours,
+  assert.deepEqual(fix.choices, context.losses.week.by_kind.MT.map((entry) => ({
+    evidence_id: context.losses.week.evidence_id, row_index: entry.row_index, state_group: entry.state_group, loss_hours: entry.loss_hours,
   })));
-  assert.equal(repair.needsEvidence("quarter"), false);
+  assert.equal(repair.needsEvidence("week"), false);
   assert.equal(group.items[0]!.loss_reference.row_index, 999999);
 });
 
 test("loss diagnostics distinguish source, date, filtering, kind, state and numeric failures", (t) => {
   const { report, group, context, evidence } = mixedValidationFixture(t);
   group.items[2]!.machine_evidence_ids = ["q133"];
-  const source = evidence.records.get(context.losses.quarter.evidence_id)!;
+  const source = evidence.records.get(context.losses.week.evidence_id)!;
   const rowIndex = group.items[0]!.loss_reference.row_index;
   const changes: [string, (entry: typeof source) => void][] = [
     ["来源", (entry) => { Reflect.set(entry, "source", "rank_machines"); }],
@@ -1869,14 +1943,14 @@ test("loss diagnostics distinguish source, date, filtering, kind, state and nume
 test("using loss evidence as a machine ranking recommends a compatible ranking rather than changing the loss selection", (t) => {
   const { report, group, context, evidence } = mixedValidationFixture(t);
   group.items[2]!.machine_evidence_ids = ["q133"];
-  const loss = context.losses.quarter.evidence_id;
+  const loss = context.losses.week.evidence_id;
   group.items[0]!.machine_evidence_ids = [loss];
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   repair.submit(report);
   const fix = repair.modelContext().repair_plan.corrections.find((entry) => entry.code === "RANKING_SOURCE_MISMATCH")!;
   assert.ok(fix.choices?.length);
   assert.ok(fix.choices.every((id) => typeof id === "string" && evidence.records.get(id)?.source === "rank_machines"));
-  assert.equal(repair.needsEvidence("quarter"), false);
+  assert.equal(repair.needsEvidence("week"), false);
 });
 
 test("ranking guidance and acquisition guard agree and refresh when compatible evidence becomes available", (t) => {
@@ -1887,37 +1961,37 @@ test("ranking guidance and acquisition guard agree and refresh when compatible e
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, (event) => events.push(event));
   repair.submit(report);
   let plan = repair.modelContext().repair_plan;
-  assert.equal(repair.needsEvidence("quarter"), false);
+  assert.equal(repair.needsEvidence("week"), false);
   assert.ok(plan.evidence_actions.some((action) => action.action === "reuse" && action.evidence_ids?.includes("q133")));
   assert.deepEqual(events.at(-1)!["repair_plan"], plan);
-  for (const [id, entry] of evidence.records) if (entry.owner?.period === "quarter" && entry.rankingScope?.kind === "MT" && entry.rankingScope.states[0] === "HangUp") {
+  for (const [id, entry] of evidence.records) if (entry.owner?.period === "week" && entry.rankingScope?.kind === "MT" && entry.rankingScope.states[0] === "HangUp") {
     evidence.records.set(id, { ...entry, rankingScope: { ...entry.rankingScope, states: ["Assistance"] } });
   }
   plan = repair.modelContext().repair_plan;
   const action = plan.evidence_actions.find((entry) => entry.action === "query")!;
   assert.ok(action);
-  assert.equal(repair.needsEvidence("quarter"), true); assert.equal(repair.needsEvidence("day"), false);
+  assert.equal(repair.needsEvidence("week"), true); assert.equal(repair.needsEvidence("day"), false);
   const { period, ...params } = action.arguments!;
-  assert.equal(period, "quarter"); assert.equal(action.tool, "test_oee_calculator__rank_machines");
+  assert.equal(period, "week"); assert.equal(action.tool, "test_oee_calculator__rank_machines");
   assert.equal(Value.Check(rankMachinesParameters, params), true);
   assert.ok(!("basis" in params)); assert.match(action.instruction, /Skill/u);
   repair.repair({ period: "day", kind: "MT", group });
-  assert.equal(repair.needsEvidence("quarter"), true, "an invalid repair target cannot hide the candidate's missing evidence");
-  assert.ok(repair.modelContext().repair_plan.evidence_actions.some((entry) => entry.action === "query" && entry.period === "quarter"));
+  assert.equal(repair.needsEvidence("week"), true, "an invalid repair target cannot hide the candidate's missing evidence");
+  assert.ok(repair.modelContext().repair_plan.evidence_actions.some((entry) => entry.action === "query" && entry.period === "week"));
   const measurement = rankMachines(createOeeSkillRuntime(evidence.queries, evidence.artifacts!),
     params as Parameters<typeof rankMachines>[1], undefined, evidence.machineRankingCache);
-  const added = evidence.recordMachineRanking(measurement, { period: "quarter", agentId: "root" });
-  assert.equal(repair.needsEvidence("quarter"), false);
+  const added = evidence.recordMachineRanking(measurement, { period: "week", agentId: "root" });
+  assert.equal(repair.needsEvidence("week"), false);
   assert.ok(repair.modelContext().repair_plan.evidence_actions.some((entry) => entry.evidence_ids?.includes(added.id)));
   const fixed = structuredClone(group); fixed.items[2]!.machine_evidence_ids = [added.id]; fixed.items[2]!.evidence_ids.push(added.id);
-  assert.equal(repair.repair({ period: "quarter", kind: "MT", group: fixed })?.status, "completed");
-  assert.deepEqual(report, original); assert.deepEqual(item, original.periods[3]!.groups[0]!.items[2]);
+  assert.equal(repair.repair({ period: "week", kind: "MT", group: fixed })?.status, "completed");
+  assert.deepEqual(report, original); assert.deepEqual(item, original.periods[1]!.groups[0]!.items[2]);
 });
 
 test("repair pointers follow reordered arrays and do not treat repeated priorities as item indices", (t) => {
   const { report, context, evidence } = mixedValidationFixture(t);
-  report.periods.reverse(); const quarter = periodEntry(report, "quarter"); quarter.groups.reverse();
-  const group = quarter.groups[1]!; group.items.reverse();
+  report.periods.reverse(); const week = periodEntry(report, "week"); week.groups.reverse();
+  const group = week.groups[1]!; group.items.reverse();
   group.items.forEach((item) => { item.priority = 1; });
   const repair = new AnalysisRepairState(context, evidence.records, Date.now() + 600000, () => {});
   repair.submit(report);
@@ -1929,15 +2003,15 @@ test("repair pointers follow reordered arrays and do not treat repeated prioriti
 
 for (const mode of ["structure", "ranking"] as const) test("model follows structured " + mode + " feedback in one correction", { timeout: 30000 }, async (t) => {
   const { config, directory } = fixture(t);
-  addQuarterlyLosses(config.databasePath);
+  addWeeklyLosses(config.databasePath);
   const runId = "guided-" + mode; const runDir = path.join(config.analysis.artifactDir, runId);
   let turn = 0;
   await mockModel(t, directory, (body) => {
     const { root } = modelContext(body);
-    if (!root) return childWithQuarterlyRankings(body, runDir);
+    if (!root) return childWithWeeklyRankings(body, runDir);
     turn += 1;
     if (turn === 1) {
-      const report = mode === "ranking" ? quarterlyMixedReport(runDir) : lossReport(runDir);
+      const report = mode === "ranking" ? weeklyMixedReport(runDir) : lossReport(runDir);
       if (mode === "structure") Reflect.deleteProperty(report.periods[0]!.groups[0]!.items[0]!, "category");
       return [toolCall(0, "submit_analysis", report)];
     }
@@ -1992,4 +2066,120 @@ test("initial main and child prompt examples conform to the report schema", (t) 
     assert.doesNotThrow(() => parseAnalysisReport({ periods: ANALYSIS_PERIOD_KEYS.map((key) => ({ ...sample, period: key })) }));
     if (!period) assert.ok(prompt.includes("repair_plan") && prompt.includes("omitted_candidates"));
   }
+});
+
+test("machine advice repairs one selected group without resubmitting validated day/week reports", { timeout: 30000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runDir = path.join(config.analysis.artifactDir, "machine-repair");
+  let turns = 0;
+  await mockModel(t, directory, (body) => {
+    const { root } = modelContext(body);
+    if (!root) return childLossResponse(body, runDir);
+    turns += 1;
+    if (turns === 1) {
+      const report = lossReport(runDir);
+      report.machine_groups[0]!.items[0]!.evidence_reference = report.machine_groups[2]!.items[0]!.evidence_reference;
+      return [toolCall(0, "submit_analysis", report)];
+    }
+    assert.equal(root.analysis_repair.active, false);
+    assert.deepEqual(root.machine_repair.targets, [{ kind: "MT", ranking: "best" }]);
+    assert.equal(root.machine_repair.issues[0].code, "MACHINE_EVIDENCE_MISMATCH");
+    assert.equal(root.validation.status, "needs_repair");
+    assert.deepEqual(root.validation.issues, root.machine_repair.issues);
+    const issue = root.validation.issues[0];
+    assert.match(issue.path, /^\/machine_groups\/0\/items\/0\/evidence_reference$/u);
+    assert.equal(issue.expected.kind, "MT"); assert.equal(issue.actual.kind, "ST");
+    assert.match(issue.hint, /evidence_reference/u);
+    assert.ok(existsSync(path.join(runDir, "checkpoint-report.json")));
+    return [toolCall(0, "repair_machine_group", machineGroupsFor(savedContext(runDir))[0])];
+  });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "machine-repair");
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assert.equal(turns, 2);
+  assert.equal(result.state.widgets[9]!.data[0]!["loss_hours"], 2.5);
+  for (const card of result.state.widgets.slice(11)) {
+    assert.ok(card.data.length > 0);
+    assert.ok(card.data.every((row) => String(row["action_and_owner"]).includes("建议责任人：测试工程")));
+  }
+  const metrics = JSON.parse(readFileSync(path.join(runDir, "metrics.json"), "utf8"));
+  assert.equal(metrics.tools.submit_analysis.calls, 1);
+  assert.equal(metrics.tools.repair_machine_group.calls, 1);
+  assert.equal(metrics.validation.machineGroupRepairs, 1);
+  const report = JSON.parse(readFileSync(path.join(runDir, "report.json"), "utf8"));
+  assert.equal(report.machine_groups.length, 4);
+  assert.deepEqual(report.periods.map((period: { period: string }) => period.period), ["day", "week"]);
+  assert.equal(result.validation?.status, "valid");
+  assert.deepEqual(result.validation?.issues, []);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(runDir, "report-quality.json"), "utf8")).validation, result.validation);
+});
+
+test("invalid machine repair arguments return the shared validation feedback before retry", { timeout: 30000 }, async (t) => {
+  const { config, directory } = fixture(t);
+  const runDir = path.join(config.analysis.artifactDir, "machine-repair-fields");
+  let turns = 0;
+  await mockModel(t, directory, (body) => {
+    const { root } = modelContext(body);
+    if (!root) return childLossResponse(body, runDir);
+    turns += 1;
+    const correct = machineGroupsFor(savedContext(runDir))[0]!;
+    if (turns === 1) {
+      const report = lossReport(runDir);
+      report.machine_groups[0]!.items[0]!.evidence_reference = report.machine_groups[2]!.items[0]!.evidence_reference;
+      return [toolCall(0, "submit_analysis", report)];
+    }
+    if (turns === 2) {
+      const invalid = structuredClone(correct); invalid.items[0]!.suggested_owner = "";
+      return [toolCall(0, "repair_machine_group", invalid)];
+    }
+    assert.equal(root.validation.status, "needs_repair");
+    const issue = root.validation.issues.find((entry: { path: string }) => entry.path === "/items/0/suggested_owner");
+    assert.ok(issue);
+    assert.equal(issue.actual, "");
+    assert.equal(issue.expected.non_blank, true);
+    assert.match(issue.hint, /责任职能/u);
+    assert.deepEqual(root.machine_repair.targets, [{ kind: "MT", ranking: "best" }]);
+    return [toolCall(0, "repair_machine_group", correct)];
+  });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, "machine-repair-fields");
+  assert.equal(result.analysisStatus, "completed", result.analysisReason ?? "");
+  assert.equal(turns, 3);
+  assert.equal(result.validation?.status, "valid");
+  assert.deepEqual(result.validation?.issues, []);
+});
+
+for (const stop of ["error", "timeout"] as const) test("validated periods and original email survive a later machine repair " + stop, { timeout: 15000 }, async (t) => {
+  const { config, directory } = fixture(t, stop === "timeout" ? 2000 : 20000);
+  const runId = "machine-partial-" + stop;
+  const runDir = path.join(config.analysis.artifactDir, runId);
+  const pending: (() => void)[] = [];
+  let turns = 0;
+  await mockModel(t, directory, (body) => {
+    const { root } = modelContext(body);
+    if (!root) return childLossResponse(body, runDir);
+    if (++turns === 1) {
+      const report = lossReport(runDir);
+      report.machine_groups[0]!.items = [];
+      return [toolCall(0, "submit_analysis", report)];
+    }
+    return stop === "error" ? new Error("machine repair model unavailable") : new Promise<string>((resolve) => pending.push(() => resolve("cancelled")));
+  });
+  t.after(() => pending.forEach((finish) => finish()));
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger, runId);
+  assert.equal(result.analysisStatus, "degraded", result.analysisReason ?? "");
+  assert.equal(result.periodAnalysisStatus, "completed");
+  assert.equal(result.state.widgets[9]!.data[0]!["loss_hours"], 2.5);
+  const action = String(result.state.widgets[11]!.data[0]!["action_and_owner"]);
+  assert.match(action, /改善建议暂不可用.*缺少该机台的改善建议/u);
+  assert.match(action, stop === "error" ? /分析失败/u : /分析超时/u);
+  assert.match(result.analysisReason!, /MT 最佳榜/u);
+  assert.equal(result.machineAnalysis?.interruption?.status, stop === "error" ? "failed" : "timed_out");
+  assert.equal(result.validation?.status, "unavailable");
+  assert.ok(result.validation?.issues.some((issue) => issue.code === "MACHINE_COVERAGE" && issue.kind === "MT"));
+  assert.deepEqual(JSON.parse(readFileSync(path.join(runDir, "run.json"), "utf8")).validation, result.validation);
+  assert.ok(typeof result.state.widgets[11]!.data[0]!["oee"] === "number");
+  assert.ok(String(result.state.widgets[12]!.data[0]!["action_and_owner"]).includes("建议责任人"));
+  const email = createDailyImprovementEmail(result.state, "2026-01-12", { status: result.periodAnalysisStatus!, exclusions: result.analysisExclusions ?? [] });
+  assert.doesNotMatch(email.subject, /报告降级/u);
+  assert.doesNotMatch(email.text, /TEST OEE|最佳|最差|机台建议暂不可用/u);
+  assert.ok(existsSync(path.join(runDir, "report.json")));
 });

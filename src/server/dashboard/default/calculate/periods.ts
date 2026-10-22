@@ -1,10 +1,10 @@
 import { addDays, assertDate, latestCompleteWeek, type DatePeriod } from "../../../database/business-dates.ts";
 
 export const PERIOD_KEYS = ["week", "month", "quarter"] as const;
-export type PeriodKey = typeof PERIOD_KEYS[number] | "day";
-/** Analysis periods add the latest business day on top of the numeric-card grains. */
-export const ANALYSIS_PERIOD_KEYS = ["day", ...PERIOD_KEYS] as const;
+/** Narrative analysis is independent of the numeric trend grains. */
+export const ANALYSIS_PERIOD_KEYS = ["day", "week"] as const;
 export type AnalysisPeriodKey = typeof ANALYSIS_PERIOD_KEYS[number];
+export type PeriodKey = AnalysisPeriodKey;
 export const PERIOD_GRAINS = { day: "日", week: "周", month: "月", quarter: "季" } as const;
 
 export interface DashboardPeriods {

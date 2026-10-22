@@ -141,7 +141,7 @@ test("default snapshot validation checks template types as well as IDs, count an
   const saved = readFileSync(file, "utf8");
   for (const invalid of [wrongType, { ...original, widgets: original.widgets.slice(1) },
     { ...original, widgets: [...original.widgets].reverse() }]) {
-    assert.throws(() => writeDefaultDashboard(file, invalid), /模板指定顺序和类型的 13 张卡片/u);
+    assert.throws(() => writeDefaultDashboard(file, invalid), /模板指定顺序和类型的 15 张卡片/u);
     assert.equal(readFileSync(file, "utf8"), saved);
   }
   const invalidJson = JSON.stringify(wrongType);

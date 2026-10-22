@@ -6,7 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { parseHTML } from "linkedom";
 import type { DashboardState, DashboardTableWidget } from "../../src/shared/dashboard.ts";
-import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
+import { createDefaultDashboard, createMachineAnalysisTemplate } from "../../src/server/dashboard/default/template.ts";
 
 function table(id: string, size: DashboardTableWidget["size"], columnCount = 2): DashboardTableWidget {
   return {
@@ -208,6 +208,45 @@ test("table layout expands by content, reuses measurements, and preserves saved 
   assert.equal(machineCard.style.gridColumn, "span 12");
   assert.deepEqual([...machineCard.querySelectorAll("tbody tr td:last-child")].map((cell) => cell.textContent),
     machineTable.data.map((row) => row["top10_machines"]), "narrow layouts must retain every machine in all six lists");
+
+  const dailyTemplate = createMachineAnalysisTemplate("MT", "best");
+  const actions = "改善措施：核查 DUT-On 最低子项并复测\n建议责任人：测试工程（职能建议，待人工确认）";
+  const dailyTable = { ...dailyTemplate, data: Array.from({ length: 10 }, (_, index) => ({
+    kind: "MT", rank: index + 1, machine: `ADH${String(index + 1).padStart(3, "0")}`,
+    machine_label: `T5773/ADH${String(index + 1).padStart(3, "0")}`, oee: 42.1234, availability: 90,
+    dut_on: 60, test_time_performance: 100, final_yield: 78,
+    loss_and_bottleneck: "主损失：Conversion 2.50 小时\n短板：DUT-On 60%", action_and_owner: actions,
+  })) };
+  renderer.render({ ...defaults, widgets: [dailyTable] });
+  const dailyCard = card(dailyTable.id);
+  assert.equal(dailyCard.style.gridColumn, "span 12");
+  assert.equal(dailyCard.querySelectorAll("th").length, 10);
+  assert.equal(dailyCard.querySelectorAll("tbody td").length, 100);
+  assert.equal(dailyCard.querySelector("th:nth-child(3)")?.textContent, "平台/机台");
+  assert.equal(dailyCard.querySelector("tbody tr td:nth-child(3)")?.textContent, "T5773/ADH001");
+  assert.equal(dailyCard.querySelector("tbody tr:last-child td:last-child")?.textContent, actions);
+  assert.equal(dailyCard.querySelector("tbody tr td:nth-child(4)")?.textContent, "42.12");
+
+  const failedTable = { ...dailyTable, warnings: [
+    "改善建议暂不可用：MT 最佳榜：1/10 台机台的建议未通过校验；排名、五项指标及短板已保留。",
+    "改善建议暂不可用：T5773/ADH001：证据日期不匹配（应为 2026-10-20，实际 2026-10-19）",
+    "责任人为职能建议，待人工确认",
+  ] };
+  renderer.render({ ...defaults, widgets: [failedTable] });
+  const failedCard = card(failedTable.id);
+  const failureNotice = failedCard.querySelector("details")!;
+  assert.ok(failureNotice.hasAttribute("open"), "analysis failures must be expanded without a click");
+  assert.equal(failedCard.children[1], failureNotice, "analysis alerts must appear above the table");
+  assert.equal(failureNotice.querySelector("summary")?.textContent, "分析异常 · 3 条提醒");
+  assert.match(failureNotice.textContent ?? "", /T5773\/ADH001.*证据日期不匹配/u);
+  assert.equal(failedCard.querySelectorAll("th").length, 10);
+  for (const warning of ["改善建议暂不可用：MT 最佳榜：分析超时", "本次分析暂不可用：分析失败", "日 MT 原第 1 条建议未通过证据校验，已剔除"]) {
+    renderer.render({ ...defaults, widgets: [{ ...dailyTable, warnings: [warning] }] });
+    assert.ok(card(dailyTable.id).querySelector("details")!.hasAttribute("open"), warning);
+  }
+  renderer.render({ ...defaults, widgets: [{ ...dailyTable, warnings: ["责任人为职能建议，待人工确认"] }] });
+  assert.ok(!card(dailyTable.id).querySelector("details")!.hasAttribute("open"), "ordinary notes should remain collapsed");
+  assert.equal(card(dailyTable.id).querySelector("summary")?.textContent, "数据提醒 1");
 
   width = 1200;
   notifyResize(false);

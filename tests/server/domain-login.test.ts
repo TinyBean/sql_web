@@ -178,12 +178,12 @@ test("owned empty sessions persist watermarks, isolate cached access and freeze 
   const alice = env.store.forAccount("3000100562");
   const bob = env.store.forAccount("bob");
   const [a, b] = await Promise.all([alice.create(), bob.create()]);
-  assert.equal(a.dashboards[0]!.state.widgets.length, 4);
+  assert.equal(a.dashboards[0]!.state.widgets.length, 6);
   assert.deepEqual(a.dashboardIds, ["analysis"]);
   assert.equal(a.dashboards[0]!.title, "OEE分析看板");
   assert.equal(b.dashboards[0]!.title, "OEE综合看板");
   assert.deepEqual(a.dashboards[0]!.state.widgets.map((item) => item.id), env.registry.loadInitial("analysis").widgets.map((item) => item.id));
-  assert.equal(b.dashboards[0]!.state.widgets.length, 13);
+  assert.equal(b.dashboards[0]!.state.widgets.length, 15);
   assert.deepEqual((await alice.list()).map((item) => item.id), [a.id]);
   assert.deepEqual((await bob.list()).map((item) => item.id), [b.id]);
   const privateFile = readdirSync(path.join(env.data, "sessions")).find((name) => name.endsWith(a.id + ".jsonl"))!;
@@ -200,10 +200,47 @@ test("owned empty sessions persist watermarks, isolate cached access and freeze 
   assert.equal((await alice.getSerialized(a.id)).dashboards[0]!.state.dataAsOf, a.dashboards[0]!.state.dataAsOf);
   await env.store.dispose();
   const restarted = await env.open();
-  assert.equal((await restarted.forAccount("3000100562").getSerialized(a.id)).dashboards[0]!.state.widgets.length, 4);
+  assert.equal((await restarted.forAccount("3000100562").getSerialized(a.id)).dashboards[0]!.state.widgets.length, 6);
   assert.equal((await restarted.forAccount("bob").list()).length, 1);
   await restarted.forAccount("bob").delete(b.id);
   assert.equal((await restarted.forAccount("bob").list()).length, 0);
+});
+
+test("new authenticated sessions return platform display columns for all four analysis and default tables", async (t) => {
+  const env = await sessionFixture(t);
+  const source = env.registry.loadInitial();
+  writeDefaultDashboard(env.defaultDashboardPath, { ...source, widgets: source.widgets.map((widget) =>
+    widget.kind !== "table" || !widget.id.startsWith("machine-improvement-") ? widget : {
+      ...widget, encoding: { columns: widget.encoding.columns.map((column) =>
+        column.key === "machine_label" ? { key: "machine", label: "机台" } : column) },
+      data: [{ kind: widget.id.includes("-mt-") ? "MT" : "ST", rank: 1,
+        machine: widget.id.includes("-mt-") ? "ADH001" : "ADH092", oee: 43.2,
+        availability: 90, dut_on: 60, test_time_performance: 100, final_yield: 80,
+        loss_and_bottleneck: "保留已发布的损失及短板", action_and_owner: "保留已发布的措施与责任人" }],
+    }) });
+  const base = await listen(t, createWebServer({ sessions: env.store,
+    authentication: new Authentication({ verify: async () => true }),
+    dashboardForAccount: (account) => account === "3000100562" ? ["analysis"] : ["default"],
+    database: { filePath: "oee.sqlite", getSchema: () => [] }, publicDir: path.join(process.cwd(), "public"),
+    vendorDir: "node_modules", logger: { error() {} } }));
+  for (const [account, dashboardId] of [["3000100562", "analysis"], ["bob", "default"]]) {
+    const login = await fetch(base + "/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account, password: "test-only" }) });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const response = await fetch(base + "/api/sessions", { method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(response.status, 201);
+    const session = await response.json();
+    assert.equal(session.dashboards[0].id, dashboardId);
+    const tables = session.dashboards[0].state.widgets.filter((widget: { id: string }) => widget.id.startsWith("machine-improvement-"));
+    assert.equal(tables.length, 4);
+    for (const table of tables) {
+      assert.deepEqual(table.encoding.columns[2], { key: "machine_label", label: "平台/机台" });
+      const row = table.data[0];
+      assert.equal(row.machine_label, row.machine === "ADH001" ? "T5773/ADH001" : "T5851/ADH092");
+      assert.equal(row.oee, 43.2);
+    }
+  }
 });
 
 test("legacy history is read-only; private copies preserve snapshots, references and ownership without touching the source", async (t) => {
@@ -236,12 +273,12 @@ test("legacy history is read-only; private copies preserve snapshots, references
   const copy = await alice.fork(legacy.id);
   assert.equal(copy.ownerAccount, "3000100562");
   assert.equal(copy.readOnly, false);
-  assert.equal(copy.dashboards[0]!.state.widgets.length, 12, "legacy copy retains its source dashboard, despite the four-card account binding");
+  assert.equal(copy.dashboards[0]!.state.widgets.length, 14, "legacy copy retains its source dashboard, despite the four-card account binding");
   assert.deepEqual(copy.messages.map((item) => item.text), ["legacy question", "legacy answer"]);
   assert.equal(env.artifacts.forSession(copy.id).resolveDataSnapshot("values").rowCount, 1);
   const copiedDashboard = JSON.parse(readFileSync(path.join(env.artifacts.rootDir, copy.id, "dashboard.json"), "utf8"));
   assert.deepEqual(copiedDashboard, JSON.parse(sourceDashboard));
-  assert.equal(dashboards.apply(copy.id, { action: "reset", baseRevision: 1 }).dashboard.widgets.length, 13);
+  assert.equal(dashboards.apply(copy.id, { action: "reset", baseRevision: 1 }).dashboard.widgets.length, 15);
   assert.equal(readFileSync(sourceFile, "utf8"), sourceText);
   assert.equal(readFileSync(path.join(env.artifacts.rootDir, legacy.id, "dashboard.json"), "utf8"), sourceDashboard);
   assert.ok(!(await bob.list()).some((item) => item.id === copy.id));
@@ -276,12 +313,12 @@ test("new account bindings freeze all boards while older single-board sessions r
   assert.deepEqual((await alice.getSerialized(old.id)).dashboardIds, ["analysis"]);
   const multi = await alice.create();
   assert.deepEqual(multi.dashboardIds, ["analysis", "default"]);
-  assert.deepEqual(multi.dashboards.map((item) => item.state.widgets.length), [4, 13]);
+  assert.deepEqual(multi.dashboards.map((item) => item.state.widgets.length), [6, 15]);
   const widgetId = multi.dashboards[0]!.state.widgets[0]!.id;
   env.dashboards.apply(multi.id, { action: "remove", widgetId, baseRevision: 0 }, "analysis").dashboard;
   const result = await alice.getSerialized(multi.id);
   assert.deepEqual(result.dashboards.map((item) => item.state.revision), [1, 0]);
-  assert.deepEqual(result.dashboards.map((item) => item.state.widgets.length), [3, 13]);
+  assert.deepEqual(result.dashboards.map((item) => item.state.widgets.length), [5, 15]);
   assert.throws(() => env.dashboards.apply(old.id, { action: "remove", widgetId, baseRevision: 0 }, "default").dashboard, /不存在/u);
   await assert.rejects(restarted.forAccount("bob").getSerialized(multi.id), { name: "SessionNotFoundError" });
   await restarted.dispose();
@@ -349,7 +386,7 @@ test("copies multi-board shared history with all current states and reset baseli
   assert.deepEqual(copy.dashboardIds, shared.dashboardIds);
   assert.deepEqual(copy.dashboards, shared.dashboards);
   const snapshots = new SessionDashboardStore(env.artifacts, () => { throw new Error("must preserve copied baselines"); });
-  assert.equal(snapshots.apply(copy.id, { action: "reset", baseRevision: 1 }, "analysis").dashboard.widgets.length, 4);
+  assert.equal(snapshots.apply(copy.id, { action: "reset", baseRevision: 1 }, "analysis").dashboard.widgets.length, 6);
   assert.equal(snapshots.loadOrPreview(copy.id, "default").revision, 0);
   assert.equal(readFileSync(path.join(env.artifacts.rootDir, source.id, "dashboard.json"), "utf8"), sourceDashboard);
 });

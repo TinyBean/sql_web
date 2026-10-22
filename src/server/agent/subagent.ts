@@ -71,6 +71,8 @@ export interface SubagentRunnerOptions {
   readonly timeoutMs?: number;
   /** Raises the per-batch task cap for programmatic callers; the interactive tool stays at 3. */
   readonly maxTasksPerBatch?: number;
+  /** Programmatic daily machine reports can contain twenty fully referenced items. */
+  readonly maxResultCharacters?: number;
 }
 
 const allowedTools = new Set(["execute_sql", "get_current_time", "measure_loss", "code_interpreter"]);
@@ -256,8 +258,9 @@ export class SubagentRunner {
       unsubscribe?.();
       session?.dispose();
     }
+    const maxCharacters = this.#options.maxResultCharacters ?? 12000;
     const result: SubagentResult = {
-      agent_id: id, name: task.name, status, text: finalText.slice(0, 12000), text_truncated: finalText.length > 12000,
+      agent_id: id, name: task.name, status, text: finalText.slice(0, maxCharacters), text_truncated: finalText.length > maxCharacters,
       error, snapshots: [...snapshots.values()], evidence_ids: [...evidenceIds], usage, duration_ms: Date.now() - started,
     };
     log({ type: "subagent_result", result });

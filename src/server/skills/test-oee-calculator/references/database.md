@@ -74,16 +74,16 @@ CREATE TABLE oee_dut_utilization (
 | Availability | `step` | MT/ST 分类步骤 |
 | Availability | `time_span` | 状态时长，单位秒 |
 | DUT | `machine_id` | 原始机台号 |
-| DUT | `lot_id` | 批次号，基础 Q/E 排除与 Yield 资格使用不同谓词 |
+| DUT | `lot_id` | 批次号，基础排除 Q/E/T；Yield 另用前缀白名单及按此字段分区的计算标签 |
 | DUT | `touchdown_index` | Touchdown 序号，派生 TD_Label |
 | DUT | `start_time`、`end_time` | 测试时间戳，差值为测试秒数 |
 | DUT | `in_qty`、`out_qty` | 实际 Socket 使用数量、好品数量（含复测） |
 | DUT | `dut_num` | Socket 数量，直接作 DUT-On 分母 |
 | DUT | `step_id` | MT/ST 分类步骤 |
-| DUT | `test_stage` | 初测／复测阶段，默认均保留 |
+| DUT | `test_stage` | 初测／复测阶段；仅精确等于 1st 时计入 IN_QTY_Without_Retest，Yield 分母仍包含合格 LOT 的初测和复测投入 |
 | 两表 | `date` | ISO 业务日标签，可带时间部分；不可按测试时间二次移日 |
 | 两表 | `shift` | 白班／夜班标签 |
 
-数量字符串使用 `CAST(NULLIF(trim(字段),'') AS REAL)` 转换；空字符串为 NULL。指标派生不新增数据库列。
+数量字符串使用 `CAST(NULLIF(trim(字段),'') AS REAL)` 转换；空字符串为 NULL。IN_QTY_Without_Retest 和 Yield_Calculation_Label 为查询派生字段，计算范围见业务规则，不新增数据库列。
 
 </database_field_descriptions>

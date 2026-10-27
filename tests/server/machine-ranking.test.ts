@@ -209,6 +209,27 @@ test("period component ratios use sums, isolate types, retain Yield-only eligibi
   assert.equal(st.top3[0]!.value, 100); assert.equal(scans, 1);
 });
 
+test("Yield and OEE rankings reject F LOTs while DUT-On rankings retain them and exclude T prefixes", (t) => {
+  const { database, a, d, queries, artifacts } = fixture(t);
+  a("ADH001", 10, "Test(Normal)");
+  a("ADH002", 10, "Test(Normal)");
+  d("ADH001", 100, 80, 100, "MT", range.start_date, "P-GOOD");
+  d("ADH001", 20, 10, 100, "MT", range.start_date, "P-GOOD");
+  d("ADH002", 100, 90, 100, "MT", range.start_date, "P-BAD");
+  d("ADH002", 20, 15, 100, "MT", range.start_date, "P-BAD");
+  database.exec("UPDATE oee_dut_utilization SET test_stage='Rescreen' WHERE in_qty='20'");
+  d("ADH001", 100_000, 100_000, 200_000, "MT", range.start_date, "T1");
+  const runtime = createOeeSkillRuntime(queries, artifacts);
+  for (const metric of ["final_yield", "oee", "effective_oee"] as const) {
+    const view = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric }));
+    assert.equal(view.observed_machine_count, 2);
+    assert.deepEqual(view.top3.map((row) => row.machine), ["ADH001"]);
+    assert.ok(Math.abs(view.top3[0]!.value - (metric === "final_yield" ? 75 : 45)) < 1e-12);
+  }
+  const dut = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
+  assert.deepEqual(dut.top3.map((row) => [row.machine, row.value]), [["ADH001", 60], ["ADH002", 60]]);
+});
+
 test("single-day ranking uses the period standard, preserves history, and rejects retired basis parameters without writes", (t) => {
   const { a, d, queries, artifacts } = fixture(t);
   a("ADH001", 24, "Test(Normal)"); d("ADH001", 10, 10, 10, "MT", "2026-01-01", "P1", 10);

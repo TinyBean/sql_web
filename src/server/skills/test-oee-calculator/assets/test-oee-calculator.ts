@@ -27,8 +27,11 @@ export interface TestOeeSqlExpressions {
   readonly dateRangePredicate: string;
   /** Shared source filter for all OEE components, losses and coverage. */
   readonly sourceLotPredicate: string;
-  /** DUT-only eligibility for Yield; never a filter on the shared population. */
+  /** DUT Yield LOT whitelist; combine with the calculation label, never filter the shared population. */
   readonly yieldLotPredicate?: string;
+  readonly inputQuantityWithoutRetestExpression?: string;
+  /** Window expression over LOT_ID in the filtered source, before machine/type/period aggregation. */
+  readonly yieldCalculationLabelExpression?: string;
   readonly platformPredicate: string;
   readonly kindExpression: string;
   readonly availabilityStateExpression?: string;
@@ -368,6 +371,10 @@ function validLotSql(column: string): string {
   return `substr(${column},1,1) IN (${VALID_OEE_LOT_PREFIXES.map(quoteSqlLiteral).join(",")})`;
 }
 
+function quantitySql(column: string): string {
+  return `CAST(NULLIF(trim(${column}),'') AS REAL)`;
+}
+
 function eligiblePlatformSql(machineColumn: string): string {
   return `${machineColumn} NOT IN (${PCIE_PLATFORM_MACHINE_IDS.map(quoteSqlLiteral).join(",")})`;
 }
@@ -422,7 +429,7 @@ export function getTestOeeSqlExpressions(
   const exclusiveEndDate = nextIsoDate(endDate);
   const dateColumn = sqlColumn("date", tableAlias);
   const lotIdColumn = sqlColumn("lot_id", tableAlias);
-  const sourceLotPredicate = `substr(${lotIdColumn},1,1) NOT IN ('Q','E')`;
+  const sourceLotPredicate = `substr(${lotIdColumn},1,1) NOT IN (${source === "dut" ? "'Q','E','T'" : "'Q','E'"})`;
   if (source === "availability") {
     const machineColumn = sqlColumn("tool_name", tableAlias);
     return {
@@ -448,6 +455,12 @@ export function getTestOeeSqlExpressions(
     };
   }
   const machineColumn = sqlColumn("machine_id", tableAlias);
+  const inputQuantityWithoutRetestExpression = `CASE WHEN ${sqlColumn("test_stage", tableAlias)}='1st'
+    THEN ${quantitySql(sqlColumn("in_qty", tableAlias))} ELSE NULL END`;
+  const yieldCalculationLabelExpression = `CASE WHEN
+    SUM(${inputQuantityWithoutRetestExpression}) OVER (PARTITION BY ${lotIdColumn})
+      - SUM(${quantitySql(sqlColumn("out_qty", tableAlias))}) OVER (PARTITION BY ${lotIdColumn}) < 0
+    THEN 'F' ELSE 'T' END`;
   const touchdownColumn = sqlColumn("touchdown_index", tableAlias);
   const trimmedTouchdownColumn = `trim(${touchdownColumn})`;
   const touchdownDigits = `(CASE WHEN substr(${trimmedTouchdownColumn},1,1) IN ('+','-')
@@ -463,6 +476,8 @@ export function getTestOeeSqlExpressions(
     dateRangePredicate: dateRangeSql(dateColumn, startDate, exclusiveEndDate),
     sourceLotPredicate,
     yieldLotPredicate: validLotSql(lotIdColumn),
+    inputQuantityWithoutRetestExpression,
+    yieldCalculationLabelExpression,
     platformPredicate: eligiblePlatformSql(machineColumn),
     kindExpression: kindSql(
       sqlColumn("step_id", tableAlias),
@@ -485,7 +500,7 @@ export function getTestOeeSqlExpressions(
   };
 }
 
-/** Exclude Q/E before Performance and trimming, even without matching Availability; Yield applies its own whitelist. */
+/** Filter DUT before LOT windows and trimming; only Yield requires its whitelist and a T calculation label. */
 export function getTestOeeDutCtes(
   startDate: string,
   endDate: string,
@@ -493,30 +508,38 @@ export function getTestOeeDutCtes(
   periodGrain: MachinePeriodGrain | "report_period" = "day",
 ): string {
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
-  if (dut.yieldLotPredicate === undefined) {
-    throw new TestOeeInputError("DUT Yield LOT 表达式不完整");
+  if (dut.yieldLotPredicate === undefined || dut.inputQuantityWithoutRetestExpression === undefined
+    || dut.yieldCalculationLabelExpression === undefined) {
+    throw new TestOeeInputError("DUT Yield 表达式不完整");
   }
   const machineColumn = grain === "machine_day_kind" ? "machine,\n    " : "";
   const group = grain === "machine_day_kind" ? "day, machine, kind" : "day, kind";
   const trimDivisor = grain === "machine_day_kind" ? 200 : 1000;
   const period = machinePeriodExpressions(dut.dayExpression, periodGrain, startDate, endDate);
-  return `dut_base AS (
+  return `dut_labeled AS (
   SELECT
     d.id,
+    d.lot_id,
     ${dut.machineExpression} AS machine,
     ${dut.dayExpression} AS source_day,
     ${period.label} AS day,
     ${dut.kindExpression} AS kind,
-    ${dut.yieldLotPredicate} AS yield_eligible,
-    CAST(NULLIF(trim(d.in_qty),'') AS REAL) AS input_quantity,
-    CAST(NULLIF(trim(d.out_qty),'') AS REAL) AS output_quantity,
-    CAST(NULLIF(trim(d.dut_num),'') AS REAL) AS socket_quantity,
+    ${dut.yieldLotPredicate} AS yield_lot_eligible,
+    ${dut.inputQuantityWithoutRetestExpression} AS input_quantity_without_retest,
+    ${dut.yieldCalculationLabelExpression} AS yield_calculation_label,
+    ${quantitySql("d.in_qty")} AS input_quantity,
+    ${quantitySql("d.out_qty")} AS output_quantity,
+    ${quantitySql("d.dut_num")} AS socket_quantity,
     ${dut.touchdownLabelExpression} AS touchdown_label,
     ${dut.testTimeSecondsExpression} AS test_time_seconds
   FROM oee_dut_utilization AS d
   WHERE ${dut.dateRangePredicate}
     AND ${dut.sourceLotPredicate}
     AND ${dut.platformPredicate}
+),
+dut_base AS (
+  SELECT *, yield_lot_eligible AND yield_calculation_label='T' AS yield_eligible
+  FROM dut_labeled
 ),
 dut_daily_aggregate AS (
   SELECT

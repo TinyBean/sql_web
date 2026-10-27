@@ -191,6 +191,8 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   );
   assert.ok(availability.availabilityStateExpression);
   assert.equal(availability.yieldLotPredicate, undefined);
+  assert.equal(availability.inputQuantityWithoutRetestExpression, undefined);
+  assert.equal(availability.yieldCalculationLabelExpression, undefined);
   assert.equal(availability.exclusiveEndDate, "2026-09-07");
   assert.equal(
     availability.dateRangePredicate,
@@ -253,12 +255,12 @@ test("generates SQL expressions equivalent to the value classifiers", () => {
   );
 });
 
-test("source LOT predicates exclude only uppercase Q/E at the first character with or without aliases", () => {
+test("source LOT predicates exclude uppercase Q/E and DUT-only T at the first character with or without aliases", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec("CREATE TABLE lot_rows(id INTEGER PRIMARY KEY, lot_id TEXT NOT NULL)");
     const lots = ["Q1", "E1", "Q", "E", "q1", "e1", " Q1", " E1",
-      "P1", "M1", "R1", "A1", "F1", "L1", "None", "X1", "AQ1", "PE1", ""];
+      "P1", "M1", "R1", "A1", "F1", "L1", "None", "X1", "AQ1", "PE1", "", "T1", "T", "t1", " T1", "PT1"];
     const insert = database.prepare("INSERT INTO lot_rows(lot_id) VALUES(?)");
     for (const lot of lots) insert.run(lot);
     for (const source of ["availability", "dut"] as const) {
@@ -266,7 +268,8 @@ test("source LOT predicates exclude only uppercase Q/E at the first character wi
         const expressions = getTestOeeSqlExpressions(source, "2026-01-01", "2026-01-01", alias);
         const rows = database.prepare(`SELECT lot_id FROM lot_rows ${alias ?? ""}
           WHERE ${expressions.sourceLotPredicate} ORDER BY id`).all();
-        assert.deepEqual(rows.map((row) => row["lot_id"]), lots.slice(4));
+        const expected = lots.slice(4).filter((lot) => source !== "dut" || !lot.startsWith("T"));
+        assert.deepEqual(rows.map((row) => row["lot_id"]), expected);
       }
     }
   } finally { database.close(); }
@@ -317,6 +320,7 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
     end_time TEXT,
     in_qty TEXT NOT NULL,
     out_qty TEXT NOT NULL,
+    test_stage TEXT NOT NULL DEFAULT '1st',
     dut_num TEXT NOT NULL,
     step_id TEXT NOT NULL,
     date TEXT
@@ -536,7 +540,7 @@ test("publishes four Skill tools and preserves default SQL views and numeric sca
     ('ADH001','P1','Test(Normal)','5000','2026-09-01',86400);
     INSERT INTO oee_dut_utilization(machine_id,lot_id,step_id,date,in_qty,out_qty,dut_num,test_stage,touchdown_index,start_time,end_time) VALUES
     ('ADH001','P1','5000','2026-08-31','10','8','20','1st','1','2026-08-31T08:30:00Z','2026-08-31T08:30:10Z'),
-    ('ADH001','P1','5000','2026-09-01','20','10','20','Rescreen','1','2026-09-01T08:30:00Z','2026-09-01T08:30:30Z');`);
+    ('ADH001','P1','5000','2026-09-01','20','10','20','1st','1','2026-09-01T08:30:00Z','2026-09-01T08:30:30Z');`);
 
   const defaultSql = await executeTool(byName.get("get_default_sql")!, range) as {
     sql: string; view: string; valueScale: string; dailyGrain: readonly string[]; periodAggregation: string;
@@ -585,7 +589,12 @@ test("publishes four Skill tools and preserves default SQL views and numeric sca
   }
   const e = await executeTool(byName.get("get_sql_expressions")!, {
     ...range, source: "dut", table_alias: "d",
-  }) as { kindExpression: string; platformPredicate: string; sourceLotPredicate: string; yieldLotPredicate: string };
+  }) as { kindExpression: string; platformPredicate: string; sourceLotPredicate: string; yieldLotPredicate: string;
+    inputQuantityWithoutRetestExpression: string; yieldCalculationLabelExpression: string };
+  const quantities = db.prepare(`SELECT ${e.inputQuantityWithoutRetestExpression} AS initial_input,
+    ${e.yieldCalculationLabelExpression} AS label FROM oee_dut_utilization d
+    WHERE ${e.sourceLotPredicate} AND ${e.platformPredicate} AND d.date>='2026-08-31' ORDER BY d.id`).all();
+  assert.deepEqual(quantities.map((row) => [row["initial_input"], row["label"]]), [[10, "T"], [20, "T"]]);
   const samples = db.prepare(`WITH samples(machine_id,step_id,lot_id) AS
     (VALUES ('ADH001','5000','P1'),('ADH001','7000','X1'),('TSPH001','5000','P1'),('ADH001','5000','Q1'))
     SELECT ${e.kindExpression} AS kind, ${e.platformPredicate} AS included_platform,

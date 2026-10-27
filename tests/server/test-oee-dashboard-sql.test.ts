@@ -24,6 +24,7 @@ function databaseFixture(t: TestContext): DatabaseSync {
   );
   CREATE TABLE oee_dut_utilization (
     id INTEGER PRIMARY KEY, machine_id TEXT, lot_id TEXT, in_qty TEXT, out_qty TEXT, dut_num TEXT, step_id TEXT, date TEXT,
+    test_stage TEXT NOT NULL DEFAULT '1st',
     touchdown_index TEXT DEFAULT '1', start_time TEXT DEFAULT '2026-01-01T00:00:00.000Z', end_time TEXT DEFAULT '2026-01-01T00:00:10.000Z'
   );`);
   return database;

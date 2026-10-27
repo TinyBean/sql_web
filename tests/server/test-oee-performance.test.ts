@@ -57,7 +57,7 @@ test("0.2 percent trimming handles 999/1000/2000 samples, boundary ties and sepa
   assert.equal(trends[1]!["st_test_time_percent"], 100);
 });
 
-test("Q/E exclusion precedes trimming and preserves the 999/1000 valid-sample boundary", (t) => {
+test("Q/E/T exclusion precedes trimming and preserves the 999/1000 valid-sample boundary", (t) => {
   const f = fixture(t);
   for (const [day, count, trimmed] of [["2026-01-01", 999, 0], ["2026-01-02", 1000, 1]] as const) {
     for (const kind of ["MT", "ST"]) {
@@ -74,6 +74,7 @@ test("Q/E exclusion precedes trimming and preserves the 999/1000 valid-sample bo
     for (const kind of ["MT", "ST"]) {
       f.d(day, 0, "1", kind, "Q1");
       f.d(day, 100_000, "1", kind, "E1");
+      f.d(day, 100_000, "1", kind, "T1");
     }
     assert.deepEqual(f.rows(day), baseline);
   }

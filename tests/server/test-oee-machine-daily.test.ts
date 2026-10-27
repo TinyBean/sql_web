@@ -67,7 +67,7 @@ test("machine-day Test Time caps only that factor and preserves independent null
   const typeDay = f.db.prepare(getDefaultTestOeeSql(day, day).sql).all()[0]!;
   assert.equal(typeDay["test_time_performance"], 2);
   f.a("LOW", day); f.d("LOW", day, 1.125); f.d("LOW", day, 1.125, "bad");
-  f.db.exec("UPDATE oee_dut_utilization SET out_qty='30', dut_num='5' WHERE machine_id='CAP'");
+  f.db.exec("UPDATE oee_dut_utilization SET dut_num='5' WHERE machine_id='CAP'");
   const rows = f.rows(day);
   const cap = rows.find((row) => row["machine"] === "CAP")!;
   assert.equal(cap["valid_duration_rows"], 1);
@@ -76,9 +76,9 @@ test("machine-day Test Time caps only that factor and preserves independent null
   assert.equal(cap["raw_test_time_performance"], 2);
   assert.equal(cap["test_time_performance"], 1);
   assert.equal(cap["dut_on"], 2);
-  assert.equal(cap["final_yield"], 3);
-  assert.equal(cap["daily_test_oee"], 6);
-  assert.equal(cap["daily_effective_oee"], 6);
+  assert.equal(cap["final_yield"], .8);
+  assert.equal(cap["daily_test_oee"], 1.6);
+  assert.equal(cap["daily_effective_oee"], 1.6);
   assert.equal(rows.find((row) => row["machine"] === "LOW")!["test_time_performance"], .5);
 });
 
@@ -119,6 +119,8 @@ test("machine-day source filters precede trimming and preserve the 199-sample bo
   for (let i = 2; i < 199; i++) f.d("A", day, 10);
   const baseline = f.rows(day);
   assert.equal(baseline[0]!["trimmed_rows_each_tail"], 0);
+  f.d("A", day, 1_000_000, "1", "MT", "T1");
+  f.d("T-DUT-ONLY", day, 1_000_000, "1", "MT", "T1");
   for (const lot of ["Q1", "E1"]) {
     f.a("A", day, "ST", 1_000_000, "PM", lot);
     f.d("A", day, 1_000_000, "1", "MT", lot);

@@ -12,20 +12,20 @@ function jsonResult(value: unknown) {
 }
 
 const dateRangeParameters = {
-  start_date: Type.String({ description: "开始业务日标签，YYYY-MM-DD。", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
-  end_date: Type.String({ description: "结束业务日标签，YYYY-MM-DD，包含整日。", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+  start_date: Type.String({ description: "开始业务日标签,YYYY-MM-DD。", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+  end_date: Type.String({ description: "结束业务日标签,YYYY-MM-DD,包含整日。", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
 };
 
 export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
   const getDefaultSqlTool = defineTool({
     name: "get_default_sql",
     label: "获取全类型 Test OEE / Effective OEE SQL",
-    description: "生成全类型日口径 SQL。view 默认 daily，返回逐日 MT/ST 明细及多日结果，数值为原始比率；overview 返回单行分类及合并概览，trends 返回 MT/ST 日趋势宽表，后两者的 _percent 列已乘 100。仅生成 SQL，再交给 execute_sql；看板查询需保存快照。公式见 Skill 业务规则，字段映射见 dashboard.md。",
+    description: "生成全类型日口径 SQL。view 默认 daily,返回逐日 MT/ST 明细及多日结果,数值为原始比率;overview 返回单行分类及合并概览,trends 返回 MT/ST 日趋势宽表,后两者的 _percent 列已乘 100。仅生成 SQL,再交给 execute_sql;看板查询需保存快照。公式见 Skill 业务规则,字段映射见 dashboard.md。",
     executionMode: "sequential",
     parameters: Type.Object({
       ...dateRangeParameters,
       view: Type.Optional(Type.Union([Type.Literal("daily"), Type.Literal("overview"), Type.Literal("trends")], {
-        default: "daily", description: "daily 明细；overview 看板概览；trends 看板日趋势。",
+        default: "daily", description: "daily 明细;overview 看板概览;trends 看板日趋势。",
       })),
     }, { additionalProperties: false }),
     async execute(_toolCallId, params, signal) {
@@ -42,7 +42,7 @@ export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
   const getMachinePeriodSqlTool = defineTool({
     name: "get_machine_period_sql",
     label: "获取机台周期 Test OEE / Effective OEE SQL",
-    description: "生成周期+机台+MT/ST 明细 SQL，grain 必填，支持 day/week/month/quarter。返回周期边界、部分周期标记、实际覆盖、组成项、截尾样本及封顶前后 Test Time；比率列以 1 表示 100%。仅生成 SQL，再交给 execute_sql；覆盖、周期聚合与空值规则见 Skill 业务规则。",
+    description: "生成周期+机台+MT/ST 明细 SQL,grain 必填,支持 day/week/month/quarter。返回周期边界、部分周期标记、实际覆盖、组成项、截尾样本及封顶前后 Test Time;比率列以 1 表示 100%。仅生成 SQL,再交给 execute_sql;覆盖、周期聚合与空值规则见 Skill 业务规则。",
     executionMode: "sequential",
     parameters: Type.Object({
       ...dateRangeParameters,
@@ -59,13 +59,13 @@ export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
   const getSqlExpressionsTool = defineTool({
     name: "get_sql_expressions",
     label: "获取 OEE 自定义查询表达式",
-    description: "返回指定来源的日期、基础 LOT 筛选、平台、类型及指标派生表达式，用于自定义 SQL 或通过 VALUES 抽查少量记录。sourceLotPredicate 用于基础 WHERE；DUT 的 yieldLotPredicate 仅用于 Yield 条件聚合。仅返回 SQL 片段，不执行查询；组合方法见 Skill 业务规则。",
+    description: "返回指定来源的日期、基础 LOT 筛选、平台、类型及指标派生表达式,用于自定义 SQL 或通过 VALUES 抽查少量记录。sourceLotPredicate 用于基础 WHERE;DUT 另返回初测投入表达式 inputQuantityWithoutRetestExpression 和 LOT 窗口标签 yieldCalculationLabelExpression。先在日期/LOT/平台筛选后的来源中计算标签,再将标签 T 与 yieldLotPredicate 白名单结合用于 Yield 条件聚合,不过滤 Performance 样本。仅返回 SQL 片段,不执行查询;组合方法见 Skill 业务规则。",
     executionMode: "sequential",
     parameters: Type.Object({
       ...dateRangeParameters,
       source: Type.Union([Type.Literal("availability"), Type.Literal("dut")]),
       table_alias: Type.Optional(Type.String({
-        description: "可选表别名，例如 a 或 d。", minLength: 1, maxLength: 64, pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+        description: "可选表别名,例如 a 或 d。", minLength: 1, maxLength: 64, pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
       })),
     }, { additionalProperties: false }),
     async execute(_toolCallId, params, signal) {

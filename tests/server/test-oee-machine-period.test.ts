@@ -212,7 +212,7 @@ test("period Test Time caps only its factor and keeps independent missing popula
     // Repeat queries over one shared fixture to verify every grain's NULL and cap behavior.
     if (grain === "week") {
       f.a("CAP", day); f.d("CAP", day, 1.125); f.d("CAP", day, null);
-      f.db.exec("UPDATE oee_dut_utilization SET dut_num='5',out_qty='30' WHERE machine_id='CAP'");
+      f.db.exec("UPDATE oee_dut_utilization SET dut_num='5' WHERE machine_id='CAP'");
       f.a("LOW", day); f.d("LOW", day, 10); f.d("LOW", day, 10, "bad");
       f.a("NO-TD", day); f.d("NO-TD", day, 10, "0");
       f.a("NO-TIME", day); f.d("NO-TIME", day, null);
@@ -224,8 +224,10 @@ test("period Test Time caps only its factor and keeps independent missing popula
     const cap = rows.find((r) => r["machine"] === "CAP")!;
     assert.equal(cap["raw_test_time_performance"], 2);
     assert.equal(cap["test_time_performance"], 1);
-    assert.equal(cap["test_oee"], 6);
-    assert.equal(cap["effective_oee"], 6);
+    assert.equal(cap["dut_on"], 2);
+    assert.equal(cap["final_yield"], .8);
+    assert.equal(cap["test_oee"], 1.6);
+    assert.equal(cap["effective_oee"], 1.6);
     assert.equal(rows.find((r) => r["machine"] === "LOW")!["test_time_performance"], .5);
     for (const machine of ["NO-TD", "NO-TIME", "ZERO-TIME", "NO-DUT"]) {
       assert.equal(rows.find((r) => r["machine"] === machine)!["test_time_performance"], null);

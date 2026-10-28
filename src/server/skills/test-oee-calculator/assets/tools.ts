@@ -59,7 +59,7 @@ export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
   const getSqlExpressionsTool = defineTool({
     name: "get_sql_expressions",
     label: "获取 OEE 自定义查询表达式",
-    description: "返回指定来源的日期、基础 LOT 筛选、平台、类型及指标派生表达式,用于自定义 SQL 或通过 VALUES 抽查少量记录。sourceLotPredicate 用于基础 WHERE;DUT 另返回初测投入表达式 inputQuantityWithoutRetestExpression 和 LOT 窗口标签 yieldCalculationLabelExpression。先在日期/LOT/平台筛选后的来源中计算标签,再将标签 T 与 yieldLotPredicate 白名单结合用于 Yield 条件聚合,不过滤 Performance 样本。仅返回 SQL 片段,不执行查询;组合方法见 Skill 业务规则。",
+    description: "返回指定来源的日期、基础 LOT 筛选、平台、类型及指标派生表达式,用于自定义 SQL 或少量记录抽查。sourceLotPredicate 用于报表基础 WHERE;DUT 的 inputQuantityWithoutRetestExpression 返回初测投入,yieldCalculationLabelExpression 独立查询数据库中同 LOT 全部已导入记录计算标签,不受报表日期、机台和 MT/ST 筛选限制,沿用基础 LOT/平台排除。标签 T 与 yieldLotPredicate 白名单仅用于报表日期内的 Yield 条件聚合,不过滤 Performance 样本。CTE/VALUES 抽查需传 table_alias 并用于外层来源。仅返回 SQL 片段,不执行查询;组合方法见 Skill 业务规则。",
     executionMode: "sequential",
     parameters: Type.Object({
       ...dateRangeParameters,

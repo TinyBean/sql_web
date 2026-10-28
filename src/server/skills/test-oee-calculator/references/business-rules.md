@@ -4,7 +4,8 @@
 
 - 所有指标、损失、覆盖及排名先用对应来源的 `sourceLotPredicate`：Availability 排除 LOT 首字符为大写 Q/E 的记录；DUT 排除大写 Q/E/T。直接判断原值首字符，不去空格、不转换大小写；小写 q/e/t 不排除。筛选仅用于只读查询，不改原始数据。
 - 仅 Yield 再用 `yieldLotPredicate` 保留 P/M/R/A/F/L 前缀 LOT，并要求 `Yield_Calculation_Label='T'`，在 DUT 条件聚合中使用，不过滤共享基础数据。其余指标保留 None、X 等批次及标签 F 的记录。Yield 分子、分母保留合格 LOT 的所有 test_stage，包括初测和复测。
-- `IN_QTY_Without_Retest`：仅 `test_stage='1st'` 时为数值化的 IN_QTY，否则 NULL。`Yield_Calculation_Label`：在当前 start_date/end_date 的日期、基础 LOT 和平台筛选后，按原始 LOT_ID 汇总，若 `SUM(IN_QTY_Without_Retest) - SUM(OUT_QTY) < 0` 则为 F，否则为 T。窗口仅按 LOT_ID 分区，跨日期、机台和 MT/ST，在类型筛选及日／机台／周期聚合前计算；查询范围外的记录不参与。无初测或总和为 NULL 时，按 CASE 的 ELSE 分支返回 T，不补零。
+- `IN_QTY_Without_Retest`：仅 `test_stage='1st'` 时为数值化的 IN_QTY，否则 NULL。`Yield_Calculation_Label`：按原始 LOT_ID 对该 LOT 的全部已导入 DUT 记录独立汇总，沿用基础 LOT 和平台排除；若 `SUM(IN_QTY_Without_Retest) - SUM(OUT_QTY) < 0` 则为 F，否则为 T。标签跨日期、机台和 MT/ST，不受报表 start_date/end_date、年界或类型筛选限制，包含报表开始前、结束后及无日期但已入库的同 LOT 记录。查询日期外的记录仅参与标签判断，Yield 分子／分母、Performance、覆盖和截尾样本仍只使用报表日期内的数据。无初测或总和为 NULL 时，按 CASE 的 ELSE 分支返回 T，不补零。
+- 标准 SQL 先提取报表涉及的 distinct LOT_ID，再独立汇总这些 LOT 的完整已导入记录并关联回报表；同一数据库快照中，同 LOT 的标签不随查询日期变化。后续补入或修正同 LOT 数据可能改变重新查询的标签；既有历史快照不自动改写。数据库尚未导入的历史不在标签计算范围内。
 - `date` 是当天 08:30 至次日 08:30 的业务日标签，不按 START_TIME/END_TIME 再次移日。start_date/end_date 是闭区间；原样使用工具返回的日期前缀谓词，避免 BETWEEN 漏掉结束日带时间部分的记录。
 - 业务周为周日至周六，完整周在次周日 08:30 结束。使用周日起始的 %U，标签 YYYY-Wnn；首个周日之前为 W00，不使用 %W 或 ISO 周。例如 2026-W36 为 09-06 至 09-12。
 - 最近完整周取截止已结束业务日当日或之前最近的周六，向前六天。年内趋势跨年周按各自年份拆分并标为部分周；最近完整周保留七天，必要时跨年查询。趋势、极值与对应排名必须使用同一范围。
@@ -87,7 +88,7 @@ Effective OEE = Effective Availability × DUT-On × Test Time × Yield
 
 ## 自定义口径与抽查
 
-用户明确改变固定规则时，对受影响部分使用 get_sql_expressions 编写查询，说明偏差。原样复用未改变的日期、平台、分类、状态和基础 LOT 表达式。DUT 返回 inputQuantityWithoutRetestExpression 和 yieldCalculationLabelExpression；后者是窗口表达式，先在日期／基础 LOT／平台筛选后的来源 CTE 中计算，再在外层结合 yieldLotPredicate 白名单及标签 T 做 Yield 条件聚合。不要将标签或白名单放入共享 WHERE，也不要先按机台、类型或周期切分 LOT 窗口。
+用户明确改变固定规则时，对受影响部分使用 get_sql_expressions 编写查询，说明偏差。原样复用未改变的日期、平台、分类、状态和基础 LOT 表达式。DUT 返回 inputQuantityWithoutRetestExpression 和 yieldCalculationLabelExpression；后者是独立查询事实表中同 LOT 全部已导入记录的关联子查询，可直接放入报表 SELECT，不受外层日期／机台／类型筛选影响。外层再结合 yieldLotPredicate 白名单及标签 T 做 Yield 条件聚合。不要在报表子集上重新计算标签窗口，也不要将标签或白名单放入共享 WHERE。默认无别名时外层来源须为 oee_dut_utilization；使用 CTE、VALUES 或其他别名时，传入 table_alias 并将其用于外层来源。批量查询优先使用标准 SQL，避免逐条重复查找同 LOT。
 
 少量记录抽查可在 VALUES 中提供用户给定字段，使用返回的表达式，不手写另一套分类规则。例如 DUT 来源返回 e，table_alias=d：
 
@@ -100,6 +101,6 @@ SELECT e.kindExpression AS kind,
 FROM samples AS d
 ```
 
-将 e.* 替换为工具返回的 SQL 片段，再交给 execute_sql。此处 yield_lot_eligible 仅检查前缀；检查最终 Yield 资格时需提供同 LOT 的 in_qty、out_qty、test_stage 记录并计算标签。Availability 抽查提供 tool_name、step、lot_id、final_state，使用对应来源的 kindExpression、availabilityStateExpression 和 idlePredicate。
+将 e.* 替换为工具返回的 SQL 片段，再交给 execute_sql。此处 yield_lot_eligible 仅检查前缀；检查最终 Yield 资格时，可另选 e.yieldCalculationLabelExpression AS yield_calculation_label，表达式按 samples 中的 LOT_ID 查询数据库完整记录，不将 VALUES 内的局部记录当作 LOT 历史。Availability 抽查提供 tool_name、step、lot_id、final_state，使用对应来源的 kindExpression、availabilityStateExpression 和 idlePredicate。
 
 - 每日机台改善榜：以目标业务日的单机台、同 MT/ST 指标独立取最佳/最差各 10 台；最高榜降序，最低榜升序，均按原始精度、机台编号处理并列。零值参与，NULL 不参与；不足展示实际数量，两榜允许重叠。同一机台的 MT/ST 记录分别处理，不采用极值机台表的合并口径。主损失为该机台同类型同日非运行状态累计小时最大项，并列按状态名称；短板取四个子项最小值，并列全部展示。

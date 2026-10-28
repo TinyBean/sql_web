@@ -28,7 +28,7 @@ SQL 与表达式工具只生成查询或片段，将 SQL 原样交给 `execute_s
 
 标准状态损失使用公共工具 `measure_loss`，其快照用于后续计算，完整工具结果或基于快照的计算结果可作为看板展示数据。少量 LOT／分类抽查通过表达式和 SQL VALUES 完成，示例见业务规则。
 
-DUT 自定义 Yield 查询先在日期、基础 LOT（排除 Q/E/T）和平台筛选后的来源中计算 LOT 窗口标签，再结合前缀白名单做条件聚合；标签 F 不过滤两项 Performance。标签与初测投入表达式通过 `get_sql_expressions` 获取，范围及 NULL 规则见业务规则。
+DUT 的 Yield 标签按同 LOT 全部已导入记录独立计算，跨日期、机台和 MT/ST，沿用基础 LOT（排除 Q/E/T）和平台排除；报表日期仅限制 Yield 数量及 Performance 样本。自定义查询使用 `get_sql_expressions` 返回的标签查找表达式，不在当天或当前周期的数据上重新计算 LOT 窗口；CTE/VALUES 来源须传入并使用 table_alias。标签 T 与前缀白名单结合做 Yield 条件聚合；标签 F 不过滤两项 Performance。范围及 NULL 规则见业务规则。
 
 每日分析引用以返回的 `source` 和 `report_usage` 为准：`measure_loss` 的 `ranking`／`machine_summaries` 仅供调查，其编号不能填入 `machine_evidence_ids`；该字段仅接受同周期、同类型、同入选状态的 `rank_machines` 标准排名编号，并须同时加入 `evidence_ids`。`loss_reference` 始终使用程序提供的 `losses[period].evidence_id` 和入选原始行，不能用补查或排名替换。
 

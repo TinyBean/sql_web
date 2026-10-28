@@ -15,7 +15,7 @@ import { createDefaultDashboardDefinition } from "../../src/server/dashboard/def
 import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/calculate/periods.ts";
 import { addDays, latestClosedBusinessDate, latestCompleteWeek } from "../../src/server/database/business-dates.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import type { DashboardRow } from "../../src/shared/dashboard.ts";
+import type { DashboardRow, DashboardState } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
 import type { ImportNewDayOptions, SyncResult } from "../../scripts/database/oee-data-store.ts";
 
@@ -260,6 +260,53 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
     { overall_oee_percent: 40, avg_availability_percent: 100, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
     { overall_oee_percent: 20, avg_availability_percent: 100, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
   ]);
+});
+
+test("daily updates calculate complete LOT labels across year and report boundaries without importing extra dates", async (t) => {
+  const { config } = fixture(t);
+  const day = "2026-01-01";
+  const writer = new DatabaseSync(config.databasePath);
+  seed(writer, day);
+  writer.prepare(`INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span)
+    VALUES('BAD-01','P-CROSS-YEAR','Test(Normal)','5000',?,43200)`).run(day);
+  const dut = writer.prepare(`INSERT INTO oee_dut_utilization
+    (machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date,touchdown_index,start_time,end_time)
+    VALUES(?,?,?,?,?,'100',?,?,'1','2026-01-01T00:00:00Z','2026-01-01T00:00:10Z')`);
+  dut.run("HISTORY", "P-CROSS-YEAR", "100", "90", "1st", "7000", "2025-12-31");
+  dut.run("BAD-01", "P-CROSS-YEAR", "20", "15", "Rescreen", "5000", day);
+  dut.run("FUTURE", "P-LOT", "100", "1", "Rescreen", "7000", "2026-01-02");
+  writer.close();
+  const requests: ImportNewDayOptions[] = [];
+  const published: DashboardState[] = [];
+  const registry = new DashboardRegistry([createDefaultDashboardDefinition(config, {
+    async generate(config, date, now, warnings) {
+      return { state: readCalculatedDashboard(config.databasePath, date, now, warnings),
+        analysisStatus: "completed", analysisReason: null, analysisRunId: "test", analysisArtifactDir: "test" };
+    },
+    publish(_file, state) { published.push(state); },
+  })]);
+  const plan = dailyUpdatePlan(["--through-date", day], new Date("2026-01-02T01:00:00Z"));
+  const outcome = await runDailyUpdate(config, plan, registry, logger, {
+    openStore: () => ({
+      async importNewDay(options) { requests.push(options); return result("completed", options.dataset); },
+      close() {},
+    }),
+  });
+  assert.equal(outcome.dashboards[0]!.published, true);
+  assert.deepEqual(requests, [{ dataset: "availability", date: day }, { dataset: "dut_utilization", date: day }]);
+  assert.equal(published.length, 1);
+  const state = published[0]!;
+  assert.deepEqual(state.dateRange, { start: day, end: day });
+  const mt = state.widgets.find((widget) => widget.id === "mt-oee-overview")!.data[0]!;
+  assert.equal(mt["avg_yield_percent"], 80);
+  assert.equal(mt["avg_dut_on_percent"], 25);
+  assert.equal(mt["avg_test_time_percent"], 100);
+  assert.equal(mt["overall_oee_percent"], 20);
+  for (const ranking of ["best", "worst"]) {
+    const card = state.widgets.find((widget) => widget.id === `machine-improvement-mt-${ranking}-2026`)!;
+    assert.deepEqual(card.data.map((row) => row["machine"]), ["MT-01"]);
+    assert.equal(card.data[0]!["final_yield"], 80);
+  }
 });
 
 test("empty and cross-year dashboards contain null metrics and accurate period warnings", (t) => {

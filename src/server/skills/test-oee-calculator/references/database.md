@@ -74,7 +74,7 @@ CREATE TABLE oee_dut_utilization (
 | Availability | `step` | MT/ST 分类步骤 |
 | Availability | `time_span` | 状态时长，单位秒 |
 | DUT | `machine_id` | 原始机台号 |
-| DUT | `lot_id` | 批次号，基础排除 Q/E/T；Yield 另用前缀白名单及按此字段分区的计算标签 |
+| DUT | `lot_id` | 批次号，基础排除 Q/E/T；Yield 另用前缀白名单及按此字段汇总全部已导入记录的计算标签，不受报表日期限制 |
 | DUT | `touchdown_index` | Touchdown 序号，派生 TD_Label |
 | DUT | `start_time`、`end_time` | 测试时间戳，差值为测试秒数 |
 | DUT | `in_qty`、`out_qty` | 实际 Socket 使用数量、好品数量（含复测） |

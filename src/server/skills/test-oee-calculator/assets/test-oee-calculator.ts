@@ -30,7 +30,7 @@ export interface TestOeeSqlExpressions {
   /** DUT Yield LOT whitelist; combine with the calculation label, never filter the shared population. */
   readonly yieldLotPredicate?: string;
   readonly inputQuantityWithoutRetestExpression?: string;
-  /** Window expression over LOT_ID in the filtered source, before machine/type/period aggregation. */
+  /** Looks up the LOT label across all imported dates, independently of the outer report filters. */
   readonly yieldCalculationLabelExpression?: string;
   readonly platformPredicate: string;
   readonly kindExpression: string;
@@ -375,6 +375,20 @@ function quantitySql(column: string): string {
   return `CAST(NULLIF(trim(${column}),'') AS REAL)`;
 }
 
+function sourceLotSql(column: string, source: TestOeeSqlSource): string {
+  return `substr(${column},1,1) NOT IN (${source === "dut" ? "'Q','E','T'" : "'Q','E'"})`;
+}
+
+function inputQuantityWithoutRetestSql(tableAlias?: string): string {
+  return `CASE WHEN ${sqlColumn("test_stage", tableAlias)}='1st'
+    THEN ${quantitySql(sqlColumn("in_qty", tableAlias))} ELSE NULL END`;
+}
+
+function yieldCalculationLabelSql(tableAlias: string): string {
+  return `CASE WHEN SUM(${inputQuantityWithoutRetestSql(tableAlias)})
+    - SUM(${quantitySql(sqlColumn("out_qty", tableAlias))}) < 0 THEN 'F' ELSE 'T' END`;
+}
+
 function eligiblePlatformSql(machineColumn: string): string {
   return `${machineColumn} NOT IN (${PCIE_PLATFORM_MACHINE_IDS.map(quoteSqlLiteral).join(",")})`;
 }
@@ -429,7 +443,7 @@ export function getTestOeeSqlExpressions(
   const exclusiveEndDate = nextIsoDate(endDate);
   const dateColumn = sqlColumn("date", tableAlias);
   const lotIdColumn = sqlColumn("lot_id", tableAlias);
-  const sourceLotPredicate = `substr(${lotIdColumn},1,1) NOT IN (${source === "dut" ? "'Q','E','T'" : "'Q','E'"})`;
+  const sourceLotPredicate = sourceLotSql(lotIdColumn, source);
   if (source === "availability") {
     const machineColumn = sqlColumn("tool_name", tableAlias);
     return {
@@ -455,12 +469,15 @@ export function getTestOeeSqlExpressions(
     };
   }
   const machineColumn = sqlColumn("machine_id", tableAlias);
-  const inputQuantityWithoutRetestExpression = `CASE WHEN ${sqlColumn("test_stage", tableAlias)}='1st'
-    THEN ${quantitySql(sqlColumn("in_qty", tableAlias))} ELSE NULL END`;
-  const yieldCalculationLabelExpression = `CASE WHEN
-    SUM(${inputQuantityWithoutRetestExpression}) OVER (PARTITION BY ${lotIdColumn})
-      - SUM(${quantitySql(sqlColumn("out_qty", tableAlias))}) OVER (PARTITION BY ${lotIdColumn}) < 0
-    THEN 'F' ELSE 'T' END`;
+  const inputQuantityWithoutRetestExpression = inputQuantityWithoutRetestSql(tableAlias);
+  const historyAlias = tableAlias === "yield_history" ? "yield_history_source" : "yield_history";
+  // Qualify the default outer table so the inner LOT_ID cannot shadow it.
+  const outerLotColumn = sqlColumn("lot_id", tableAlias ?? "oee_dut_utilization");
+  const yieldCalculationLabelExpression = `(SELECT ${yieldCalculationLabelSql(historyAlias)}
+    FROM oee_dut_utilization AS ${historyAlias}
+    WHERE ${historyAlias}.lot_id=${outerLotColumn}
+      AND ${sourceLotSql(`${historyAlias}.lot_id`, "dut")}
+      AND ${eligiblePlatformSql(`${historyAlias}.machine_id`)})`;
   const touchdownColumn = sqlColumn("touchdown_index", tableAlias);
   const trimmedTouchdownColumn = `trim(${touchdownColumn})`;
   const touchdownDigits = `(CASE WHEN substr(${trimmedTouchdownColumn},1,1) IN ('+','-')
@@ -500,7 +517,7 @@ export function getTestOeeSqlExpressions(
   };
 }
 
-/** Filter DUT before LOT windows and trimming; only Yield requires its whitelist and a T calculation label. */
+/** Report quantities stay date-limited; LOT labels aggregate matching history across all imported dates. */
 export function getTestOeeDutCtes(
   startDate: string,
   endDate: string,
@@ -516,7 +533,9 @@ export function getTestOeeDutCtes(
   const group = grain === "machine_day_kind" ? "day, machine, kind" : "day, kind";
   const trimDivisor = grain === "machine_day_kind" ? 200 : 1000;
   const period = machinePeriodExpressions(dut.dayExpression, periodGrain, startDate, endDate);
-  return `dut_labeled AS (
+  // Materialize report rows once; CROSS JOIN drives indexed history lookups from their distinct LOTs.
+  // The raw date bounds let SQLite use its date index alongside the shared business-day predicate.
+  return `dut_report AS MATERIALIZED (
   SELECT
     d.id,
     d.lot_id,
@@ -526,7 +545,6 @@ export function getTestOeeDutCtes(
     ${dut.kindExpression} AS kind,
     ${dut.yieldLotPredicate} AS yield_lot_eligible,
     ${dut.inputQuantityWithoutRetestExpression} AS input_quantity_without_retest,
-    ${dut.yieldCalculationLabelExpression} AS yield_calculation_label,
     ${quantitySql("d.in_qty")} AS input_quantity,
     ${quantitySql("d.out_qty")} AS output_quantity,
     ${quantitySql("d.dut_num")} AS socket_quantity,
@@ -534,12 +552,24 @@ export function getTestOeeDutCtes(
     ${dut.testTimeSecondsExpression} AS test_time_seconds
   FROM oee_dut_utilization AS d
   WHERE ${dut.dateRangePredicate}
+    AND d.date>=${quoteSqlLiteral(startDate)} AND d.date<${quoteSqlLiteral(dut.exclusiveEndDate)}
     AND ${dut.sourceLotPredicate}
     AND ${dut.platformPredicate}
 ),
+dut_report_lots AS (
+  SELECT DISTINCT lot_id FROM dut_report
+),
+dut_lot_labels AS (
+  SELECT h.lot_id, ${yieldCalculationLabelSql("h")} AS yield_calculation_label
+  FROM dut_report_lots AS l CROSS JOIN oee_dut_utilization AS h
+  WHERE h.lot_id=l.lot_id
+    AND ${sourceLotSql("h.lot_id", "dut")} AND ${eligiblePlatformSql("h.machine_id")}
+  GROUP BY h.lot_id
+),
 dut_base AS (
-  SELECT *, yield_lot_eligible AND yield_calculation_label='T' AS yield_eligible
-  FROM dut_labeled
+  SELECT r.*, l.yield_calculation_label,
+    r.yield_lot_eligible AND l.yield_calculation_label='T' AS yield_eligible
+  FROM dut_report AS r JOIN dut_lot_labels AS l ON l.lot_id=r.lot_id
 ),
 dut_daily_aggregate AS (
   SELECT

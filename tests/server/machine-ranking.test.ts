@@ -228,6 +228,16 @@ test("Yield and OEE rankings reject F LOTs while DUT-On rankings retain them and
   }
   const dut = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
   assert.deepEqual(dut.top3.map((row) => [row.machine, row.value]), [["ADH001", 60], ["ADH002", 60]]);
+  // A later ST retest changes this LOT's label even for the earlier MT report.
+  d("ADH009", 20, 20, 100, "ST", "2026-02-01", "P-GOOD");
+  database.exec("UPDATE oee_dut_utilization SET test_stage='Rescreen' WHERE machine_id='ADH009'");
+  for (const metric of ["final_yield", "oee", "effective_oee"] as const) {
+    const view = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric }));
+    assert.equal(view.observed_machine_count, 2);
+    assert.deepEqual(view.top3, []);
+  }
+  const unchangedDut = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
+  assert.deepEqual(unchangedDut.top3, dut.top3);
 });
 
 test("single-day ranking uses the period standard, preserves history, and rejects retired basis parameters without writes", (t) => {

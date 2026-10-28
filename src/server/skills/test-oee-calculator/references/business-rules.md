@@ -40,14 +40,14 @@ Availability 使用 tool_name/step；DUT 使用 machine_id/step_id。两表统�
 
 ## 公式与粒度
 
-各组先独立汇总两表，以 Availability 为主按相同粒度左连接 DUT。仅有 DUT 的组不输出 OEE；必要组成项缺失时保留 NULL。
+全类型按日、周、月、季或整个查询区间，分别独立聚合两张来源表，再关联到完整周期×MT/ST/ALL；保留 Availability-only、DUT-only 日期及其可计算组成项，不按日 OEE 是否可计算筛选。周期组成项齐全即可计算 OEE，即使每天的 OEE 均不可计算；覆盖不足仍须说明。机台按相同周期独立汇总两表，以 Availability 周期为主关联 DUT；机台周期内 DUT-only 日期仍参与 DUT 汇总。必要组成项缺失时保留 NULL。
 
 | 口径 | Test Time 均值样本范围 | 总截尾 | 每端删除 | Test Time 上限 | 多日／周期 OEE |
 |---|---|---|---|---|---|
-| 全类型 | 同业务日、同 MT/ST 的全部合格 DUT，包含无匹配 Availability 机台的 DUT | 0.2% | floor(n/1000) | 不封顶 | 对各类型可计算日 OEE 等权平均 |
+| 全类型 | 同周期、同 MT/ST 的全部合格 DUT，包含无匹配 Availability 机台及业务日的 DUT | 0.2% | floor(n/1000) | 不封顶 | 独立汇总周期组成项后相乘 |
 | 单机台 | 同周期、同机台、同 MT/ST 的全部合格 DUT，包含该机台周期内 DUT-only 业务日 | 1% | floor(n/200) | 100% | 汇总周期组成项后相乘 |
 
-单机台 grain 为 day/week/month/quarter；排名使用整个所选日期范围作为一个周期。全类型概览不能通过平均机台 OEE 得到。
+全类型 `get_period_sql` 和单机台 grain 均支持 day/week/month/quarter；概览与排名使用整个所选日期范围作为一个周期。全类型概览不能通过平均机台 OEE 得到。MT/ST 合并时，状态与数量跨类型累计后相除；Test Time 为 `SUM(各类型周期截尾标准秒数×各类型TD次数)/SUM(各类型实际测试秒数)`，不混合类型重算标准、不平均类型百分比。有 DUT 数据的任一类型若标准、TD 或时间分母不可计算，合并 Test Time 为 NULL。ALL 的 trimmed_mean_test_seconds 为 NULL，各类型标准见对应 MT/ST 行，expected_test_seconds 为合并后的标准时间分子。
 
 ```text
 Availability = Machine_Running 状态秒数 / 全部状态秒数
@@ -58,7 +58,8 @@ Performance (DUT-On) = SUM(IN_QTY) / SUM(DUT_NUM)
 Performance (Test Time) = TrimmedMean(测试秒数, 截尾参数) × SUM(TD_Label) / SUM(测试秒数)
 Yield = SUM(白名单且标签 T 的 OUT_QTY) / SUM(白名单且标签 T 的 IN_QTY)
 Test OEE = Availability × DUT-On × Test Time × Yield
-Effective OEE = Effective Availability × DUT-On × Test Time × Yield
+Effective DUT-On = 0.895（固定，所有类型、机台及周期）
+Effective OEE = Effective Availability × Effective DUT-On × Test Time × Yield
 ```
 
 - 测试秒数为 END_TIME－START_TIME 的秒数，保留毫秒精度；无法解析的时间为 NULL。DUT_NUM 直接作 Socket 分母，不额外乘 768。
@@ -66,18 +67,19 @@ Effective OEE = Effective Availability × DUT-On × Test Time × Yield
 - n 只统计非空测试秒数。按秒数、事实表 id 排序，两端按行数截尾，边界同值不整组删除。截尾参数表示总百分比，两端各取一半。
 - 截尾仅影响均值；TD 总和和测试秒数总和分别保留全部非空值，不过滤为共同样本，也不移除截尾行。样本不足截尾边界且时间和 TD 均有效时 Test Time 为 100%，不能据此断言没有效率损失。
 - 单机台先保留 raw_test_time_performance，再将超过 1 的值封顶得到 test_time_performance。其他比率及 OEE 不封顶，不舍入中间值，不额外裁剪负值。
-- 分母为零或必要输入缺失时为 NULL，不补零或 100%。无 Yield 合格记录时 yield_rows=0，Yield 的数量总和及比率为 NULL。
-- 全类型多日 Test OEE 与 Effective OEE 分别平均自身可计算日，实际日数可能不同。period_test_oee/period_effective_oee 是每行重复的期间值，不再次求和或平均；OEE 不等于组成项均值的乘积。
+- Effective OEE 的 DUT-On 固定为0.895；日/周/月/季及任意区间、MT/ST/ALL和单机台均相同，甚至无来源数据时该配置因子仍返回0.895。实际 dut_on/performance 仍只供 Test OEE 使用；其 Socket 分母为零/缺失不阻断 Effective OEE，后者仍要求 Effective Availability、Test Time、Yield 可计算。
+- 其余比率分母为零或必要输入缺失时为 NULL，不补零或 100%。无 Yield 合格记录时 yield_rows=0，Yield 的数量总和及比率为 NULL。
+- 所有周期采用 `periodAggregation="pooled_components"`。Availability、DUT-On、Yield 等先累计各自分子分母，Effective Availability 使用周期 Availability 与 IDLENoWIP 代入公式，Test OEE 为周期实际组成项乘积；Effective OEE 的 DUT-On 是固定0.895，其余组成项使用周期值。Test Time 的截尾均值必须基于目标周期原始时长重算，不能合并日均值或日百分比。日明细的 period_test_oee/period_effective_oee 是每行重复的所选区间池化值，不再次求和或平均。
 
 ## 输出与覆盖
 
 - 全类型 daily 为每个所选业务日生成 MT、ST 两行，包括缺数据日。availability_rows、machine_count、dut_rows、yield_rows 用于检查来源；machine_count 不参与 Availability 分母。
 - available_seconds 是全部有效状态秒数，idle_seconds 是其中原始状态包含 IDLE 的秒数。idle_no_wip_seconds 是其中派生状态为 IDLE_NoWIP 的秒数，idle_no_wip 是对应占比（IDLENoWIP），用于 Effective Availability；总 Idle 不能替代 IDLENoWIP。以上指标使用相同的基础筛选及全部状态秒数分母，以原始比率参与计算。input_quantity/output_quantity/socket_quantity 是共享 DUT 总和；Yield 使用独立的 yield_input_quantity/yield_output_quantity。
 - valid_duration_rows、trimmed_rows_each_tail、trimmed_mean_test_seconds、touchdown_count、actual_test_seconds 是 Test Time 审计组成项。
-- 全类型 selected_day_count 与 calculable_day_count/effective_calculable_day_count 分别表示所选日数和实际平均日数；dut_rows 为 NULL 表示该 Availability 日类型没有匹配 DUT。
+- 全类型 selected_day_count 与 calculable_day_count/effective_calculable_day_count 分别表示所选日数和日指标可计算日数，仅描述覆盖，不筛选周期计算样本；dut_rows 为 NULL 表示该日类型没有 DUT，DUT-only 日类型保留其数量及 Performance/Yield。get_period_sql 返回周期边界、is_partial_period、原始累计量、审计组成项及覆盖；selected_day_type_count 等覆盖字段在 ALL 为日类型数，在 MT/ST 为该类型天数。
 - 单机台 period_label、period_start、period_end 表示查询范围内周期标签及边界，is_partial_period 标识边界不完整；availability_days/dut_days 为实际覆盖日数，不从边界天数推算。不补缺机台周期。
 - 没有数据不是零损失，也不代表完整覆盖。回答需说明不可计算项及实际覆盖不足；导入完整性调查见 [导入审计](import-audit.md)。
-- 明细及多日值是原始比率，1 表示 100%；看板 _percent 列与排名 value/metric_value 已乘 100，损失为小时。Performance (DUT-On) 与 Performance (Test Time) 分开展示，旧 performance 字段仅为 DUT-On 别名。看板字段与平均样本见 [字段映射](dashboard.md)。
+- 明细及多日值是原始比率，1 表示 100%；看板 _percent 列与排名 value/metric_value 已乘 100，损失为小时。Performance (DUT-On) 与 Performance (Test Time) 分开展示，旧 performance 字段仅为 DUT-On 别名。看板字段与覆盖计数见 [字段映射](dashboard.md)。
 
 ## 排名与历史结果
 

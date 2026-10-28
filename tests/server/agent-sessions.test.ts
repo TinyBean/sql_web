@@ -132,6 +132,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
   assert.equal(codeInterpreterDefinition, undefined);
   for (const name of [
     "get_default_sql",
+    "get_period_sql",
     "get_machine_daily_sql",
     "get_machine_period_sql",
     "get_default_dashboard_sql",
@@ -217,6 +218,7 @@ test("keeps Skill tools session-local and activates them only after reading SKIL
     "update_dashboard",
     "subagent",
     "test_oee_calculator__get_default_sql",
+    "test_oee_calculator__get_period_sql",
     "test_oee_calculator__get_machine_period_sql",
     "test_oee_calculator__get_sql_expressions",
     "test_oee_calculator__rank_machines",

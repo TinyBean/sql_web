@@ -18,7 +18,7 @@ import { createAgentTools, createExecuteSqlTool, executeSqlParameters } from "..
 import {
   createMeasureLossTool, measureLoss, measureLossParameters, MEASURE_LOSS_TOOL_NAME, type LossMeasurement, type LossScope,
 } from "../../../tool/loss-tools.ts";
-import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { getPeriodTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import {
   createRankMachinesTool, rankMachinesParameters, RANK_MACHINES_LOCAL_TOOL_NAME,
   type MachineRankingMeasurement, type MachineRankingScope, type MachineRankingCache,
@@ -28,7 +28,7 @@ import { loadAgentSkillCatalog, type SkillSessionOptions } from "../../../agent/
 import { createOeeSkillRuntime } from "../../../agent/oee-skill-runtime.ts";
 import { SubagentRunner, type SubagentResult } from "../../../agent/subagent.ts";
 import { NUMBER_DISPLAY_RULES } from "../../../agent/prompts.ts";
-import { minimumComparisonPeriod, selectLosses, summarizeDailyOee, type AnalysisLossCandidate } from "../calculate/index.ts";
+import { minimumComparisonPeriod, selectLosses, summarizePeriodOee, type AnalysisLossCandidate } from "../calculate/index.ts";
 import { dashboardPeriods, ANALYSIS_PERIOD_KEYS, type PeriodKey } from "../calculate/periods.ts";
 import { createAnalysisTemplate, type MachineKind } from "../template.ts";
 import { dailyMachineSql } from "../calculate/daily-machines.ts";
@@ -194,21 +194,22 @@ export class AnalysisEvidence {
   context(state: DashboardState, throughDate: string, machineRows?: readonly DashboardRow[]): AnalysisContext {
     if (!this.artifacts) throw new Error("每日分析需要独立的数据快照存储");
     const periods = dashboardPeriods(throughDate);
-    const source = this.query(getDefaultTestOeeSql(periods.syncStart, throughDate).sql, [], 800);
+    const source = this.query(getPeriodTestOeeSql(periods.syncStart, throughDate, "day").sql, [], 1200);
     if (source.truncated) throw new Error("基础分析证据被截断");
-    const slice = (period: PeriodKey, range: DatePeriod | undefined): Evidence => this.#save({
-      sql: source.sql, parameters: [], sourceId: source.id, ...(range ? { range } : {}),
-      owner: { period, agentId: "baseline" },
-      rows: range ? source.rows.filter((row) => String(row["day"]) >= range.start && String(row["day"]) <= range.end) : [],
-      truncated: false,
-    });
+    const aggregate = (period: PeriodKey, range: DatePeriod | undefined): Evidence => {
+      const sql = range ? getPeriodTestOeeSql(range.start, range.end, "report_period").sql : "SELECT NULL WHERE 0";
+      const result = this.#read(sql, [], 10);
+      if (result.truncated) throw new Error("周期池化比较证据被截断");
+      return this.#save({ ...result, ...(range ? { range } : {}),
+        owner: { period, agentId: "baseline" } });
+    };
     const comparisons = {} as AnalysisContext["comparisons"];
     const losses = {} as AnalysisContext["losses"];
     for (const key of ANALYSIS_PERIOD_KEYS) {
       comparisons[key] = {
-        current: slice(key, periods[key]),
-        minimum: slice(key, minimumComparisonPeriod(state, source.rows, throughDate, key)),
-        history: slice(key, periods[key].start > periods.trend.start ? {
+        current: aggregate(key, periods[key]),
+        minimum: aggregate(key, minimumComparisonPeriod(state, source.rows, throughDate, key)),
+        history: aggregate(key, periods[key].start > periods.trend.start ? {
           start: periods.trend.start, end: addDays(periods[key].start, -1),
         } : undefined),
       };
@@ -387,7 +388,7 @@ export function createAnalysisSkillOptions(evidence: AnalysisEvidence, scope?: A
 function summary(evidence: Evidence) {
   return {
     evidence_id: evidence.id, snapshot: evidence.snapshot?.name ?? null, range: evidence.range ?? null,
-    by_kind: summarizeDailyOee(evidence.rows),
+    by_kind: summarizePeriodOee(evidence.rows),
   };
 }
 
@@ -465,8 +466,8 @@ Python 只调用一次 emit_result,例如 emit_result(summary='覆盖核查', me
 
 【统计口径】
 本期范围以 periods 为准:最新业务日、最近完整周。最低点使用 comparisons.minimum;历史参考从年初到本期之前,使用 comparisons.history。没有可计算基准时说明限制,不虚构对比。
-means 为原始比率,1 表示 100%,不截断上下界。daily_test_oee 是该类型 OEE 可计算日的等权平均;四个组成项也在相同可计算日上等权平均,不能将组成项均值相乘代替 OEE。
-覆盖不同的期间宜比较日均或同覆盖值;日均值写明实际分母,避免直接比较覆盖不同的损失总小时。
+metrics 为本期独立查询得到的周期池化原始比率,1 表示 100%。各指标独立累计周期内各自来源的数据,不以日 OEE 是否可计算筛选;覆盖计数只描述完整性。Test Time 在整个周期同类型内重算0.2%截尾标准且不封顶。test_oee 等于周期 Availability、实际 DUT-On、Test Time、Yield 的乘积;effective_oee 使用 Effective Availability×固定0.895×Test Time×Yield。effective_dut_on 在所有日期、类型和周期恒为0.895,不受实际 DUT-On、Socket零值或缺失影响;其他必要组成项缺失仍为NULL。不能对日百分比或日 OEE 求平均。
+覆盖不同的期间仍使用池化指标并说明各来源覆盖;损失总小时可另补充每有效日损失小时,写明实际天数,不能将损失日均用于替代池化 OEE。
 
 【业务写作:建议,不参与验收】
 ${NUMBER_DISPLAY_RULES}

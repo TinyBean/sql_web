@@ -18,8 +18,9 @@ description: 查询、计算和解释 Test OEE 与 Effective OEE，支持全类�
 
 | 需求 | 工具与参数 |
 |---|---|
-| 全类型日明细、多日结果 | `get_default_sql(start_date,end_date,view="daily")`，view 可省略 |
+| 全类型日明细、查询区间池化结果 | `get_default_sql(start_date,end_date,view="daily")`，view 可省略 |
 | 分类／合并概览或日趋势看板 | `get_default_sql(...,view="overview"/"trends")` |
+| 全类型日／周／月／季池化明细（MT/ST/ALL） | `get_period_sql(start_date,end_date,grain)`，grain 为 day/week/month/quarter |
 | 机台日／周／月／季明细 | `get_machine_period_sql(start_date,end_date,grain)`，grain 为 day/week/month/quarter |
 | 自定义口径或少量记录抽查 | `get_sql_expressions(source,start_date,end_date,table_alias?)`，source 为 availability/dut |
 | 问题指标机台 TOP3 | `rank_machines(start_date,end_date,kind,metric,states?)`，states 仅用于 loss_hours |
@@ -33,6 +34,10 @@ DUT 的 Yield 标签按同 LOT 全部已导入记录独立计算，跨日期、�
 每日分析引用以返回的 `source` 和 `report_usage` 为准：`measure_loss` 的 `ranking`／`machine_summaries` 仅供调查，其编号不能填入 `machine_evidence_ids`；该字段仅接受同周期、同类型、同入选状态的 `rank_machines` 标准排名编号，并须同时加入 `evidence_ids`。`loss_reference` 始终使用程序提供的 `losses[period].evidence_id` 和入选原始行，不能用补查或排名替换。
 
 ## 结果核对
+
+- Effective OEE 的 Performance (DUT-On) 在 MT/ST/ALL、单机台及日/周/月/季/任意区间恒为 **89.5%**（比率 `effective_dut_on=0.895`），显示值与乘积因子一致；不使用实际 DUT-On，不随 Socket 缺失或零值变为 NULL。Test OEE 的 `dut_on/performance` 仍按实际投入和Socket数量池化，其他组成项的缺失规则不变。
+
+- 所有周期指标使用 `periodAggregation="pooled_components"`：各来源独立累计分子、分母，Test Time 在整个周期同类型内重算截尾标准，最后将组成项相乘。周/月/季直接使用 `get_period_sql`，不能平均日、周、月的百分比，也不能平均机台 OEE 得到全类型指标。`get_default_sql` 的 daily 保留日明细及重复的区间池化值；overview 为区间池化概览，trends 为日趋势。
 
 - 说明业务日范围、计算粒度与实际覆盖；缺失和不可计算结果不作为零，部分周期不作为完整周期。
 - 明细以 1 表示 100%；看板 `_percent` 列及排名 value/metric_value 已是百分数值，损失为小时。不要重复缩放。

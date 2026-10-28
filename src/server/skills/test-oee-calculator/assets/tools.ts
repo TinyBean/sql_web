@@ -4,7 +4,7 @@ import { createRankMachinesTool } from "./machine-ranking.ts";
 import type { TestOeeToolContext } from "./runtime.ts";
 import {
   getDefaultTestOeeDashboardSql, getDefaultTestOeeSql,
-  getMachinePeriodTestOeeSql, getTestOeeSqlExpressions,
+  getMachinePeriodTestOeeSql, getPeriodTestOeeSql, getTestOeeSqlExpressions,
 } from "./test-oee-calculator.ts";
 
 function jsonResult(value: unknown) {
@@ -20,7 +20,7 @@ export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
   const getDefaultSqlTool = defineTool({
     name: "get_default_sql",
     label: "获取全类型 Test OEE / Effective OEE SQL",
-    description: "生成全类型日口径 SQL。view 默认 daily,返回逐日 MT/ST 明细及多日结果,数值为原始比率;overview 返回单行分类及合并概览,trends 返回 MT/ST 日趋势宽表,后两者的 _percent 列已乘 100。仅生成 SQL,再交给 execute_sql;看板查询需保存快照。公式见 Skill 业务规则,字段映射见 dashboard.md。",
+    description: "生成全类型池化 SQL。view 默认 daily,返回逐日 MT/ST 明细及所选区间池化结果,数值为原始比率;overview 返回单行分类及合并概览,trends 返回 MT/ST 日趋势宽表,后两者的 _percent 列已乘 100。仅生成 SQL,再交给 execute_sql;看板查询需保存快照。Effective OEE 的 DUT-On 固定89.5%,Test OEE 保留实际DUT-On。公式见 Skill 业务规则,字段映射见 dashboard.md。",
     executionMode: "sequential",
     parameters: Type.Object({
       ...dateRangeParameters,
@@ -39,10 +39,25 @@ export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
     },
   });
 
+  const getPeriodSqlTool = defineTool({
+    name: "get_period_sql",
+    label: "获取全类型周期池化 OEE SQL",
+    description: "生成日/周/月/季的 MT、ST、ALL 周期池化指标 SQL。各来源独立累计,Test Time 在周期同类型内重算0.2%截尾均值且不封顶,ALL 使用各类型标准秒数×TD之和。返回周期边界、部分周期、覆盖、原始累计量及Test/Effective OEE,比率以1表示100%。Effective OEE 的 DUT-On 固定89.5%。仅生成SQL,再交给execute_sql并保存完整快照。",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      ...dateRangeParameters,
+      grain: Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("quarter")]),
+    }, { additionalProperties: false }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      return jsonResult(getPeriodTestOeeSql(params.start_date, params.end_date, params.grain));
+    },
+  });
+
   const getMachinePeriodSqlTool = defineTool({
     name: "get_machine_period_sql",
     label: "获取机台周期 Test OEE / Effective OEE SQL",
-    description: "生成周期+机台+MT/ST 明细 SQL,grain 必填,支持 day/week/month/quarter。返回周期边界、部分周期标记、实际覆盖、组成项、截尾样本及封顶前后 Test Time;比率列以 1 表示 100%。仅生成 SQL,再交给 execute_sql;覆盖、周期聚合与空值规则见 Skill 业务规则。",
+    description: "生成周期+机台+MT/ST 明细 SQL,grain 必填,支持 day/week/month/quarter。返回周期边界、部分周期标记、实际覆盖、组成项、截尾样本及封顶前后 Test Time;比率列以 1 表示 100%。仅生成 SQL,再交给 execute_sql;Effective OEE 的 DUT-On 固定89.5%,实际dut_on供Test OEE使用;覆盖、周期聚合与空值规则见 Skill 业务规则。",
     executionMode: "sequential",
     parameters: Type.Object({
       ...dateRangeParameters,
@@ -76,5 +91,5 @@ export function createTools(context?: TestOeeToolContext): ToolDefinition[] {
     },
   });
 
-  return [getDefaultSqlTool, getMachinePeriodSqlTool, getSqlExpressionsTool, createRankMachinesTool(context?.runtime)];
+  return [getDefaultSqlTool, getPeriodSqlTool, getMachinePeriodSqlTool, getSqlExpressionsTool, createRankMachinesTool(context?.runtime)];
 }

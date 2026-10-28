@@ -65,21 +65,21 @@ test("NoWIP uses period state totals in every grain and in type-specific and mer
       const effective = running / total + (noWip / total) / (2 - (noWip + running) / total);
       closeTo(row["effective_availability"], effective);
       closeTo(row["test_oee"], running / total * .4);
-      closeTo(row["effective_oee"], effective * .4);
+      closeTo(row["effective_oee"], effective * .895 * .8);
     }
   }
   const byKind = f.db.prepare(machinePeriodSql({ start, end }, true)).all();
   const mt = byKind.find((row) => row["kind"] === "MT")!;
   const st = byKind.find((row) => row["kind"] === "ST")!;
   closeTo(mt["effective_availability"], (.2 + 5 / 31) * 100);
-  closeTo(mt["effective_oee"], (.2 + 5 / 31) * 40);
+  closeTo(mt["effective_oee"], (.2 + 5 / 31) * .895 * .8 * 100);
   closeTo(st["effective_availability"], 32.5);
-  closeTo(st["effective_oee"], 13);
+  closeTo(st["effective_oee"], .325 * .895 * .8 * 100);
   const merged = f.db.prepare(machinePeriodSql({ start, end })).get()!;
   assert.equal(merged["kind"], "MT");
   closeTo(merged["availability"], 20);
   closeTo(merged["effective_availability"], (.2 + 2 / 13) * 100);
-  closeTo(merged["effective_oee"], (.2 + 2 / 13) * 40);
+  closeTo(merged["effective_oee"], (.2 + 2 / 13) * .895 * .8 * 100);
 });
 
 test("NoWIP period calculations preserve zero, missing DUT and undefined denominators", (t) => {
@@ -103,7 +103,7 @@ test("NoWIP period calculations preserve zero, missing DUT and undefined denomin
       if (expected === null) assert.equal(row["effective_availability"], null);
       else closeTo(row["effective_availability"], expected);
       if (expected === null || machine === "NO-DUT") assert.equal(row["effective_oee"], null);
-      else closeTo(row["effective_oee"], expected * .4);
+      else closeTo(row["effective_oee"], expected * .895 * .8);
     }
     for (const byKind of [true, false]) {
       const row = f.db.prepare(machinePeriodSql({ start: day, end: day }, byKind)).all()
@@ -111,7 +111,7 @@ test("NoWIP period calculations preserve zero, missing DUT and undefined denomin
       if (expected === null) assert.equal(row["effective_availability"], null);
       else closeTo(row["effective_availability"], expected * 100);
       if (expected === null || machine === "NO-DUT") assert.equal(row["effective_oee"], null);
-      else closeTo(row["effective_oee"], expected * 40);
+      else closeTo(row["effective_oee"], expected * .895 * .8 * 100);
     }
   }
 });
@@ -142,7 +142,7 @@ test("each machine period trims 1% across days at 199/200/400 rows and isolates 
       closeTo(mt["raw_test_time_performance"], expected);
       closeTo(mt["test_time_performance"], expected);
       closeTo(mt["test_oee"], .4 * expected);
-      closeTo(mt["effective_oee"], .4 * expected);
+      closeTo(mt["effective_oee"], .895 * .8 * expected);
       assert.equal(rows.find((r) => r["machine"] === "B")!["trimmed_mean_test_seconds"], 50);
       assert.equal(rows.find((r) => r["kind"] === "ST")!["trimmed_mean_test_seconds"], 30);
       const ranked = f.db.prepare(machinePeriodSql({ start, end }, true)).all()
@@ -227,7 +227,7 @@ test("period Test Time caps only its factor and keeps independent missing popula
     assert.equal(cap["dut_on"], 2);
     assert.equal(cap["final_yield"], .8);
     assert.equal(cap["test_oee"], 1.6);
-    assert.equal(cap["effective_oee"], 1.6);
+    assert.equal(cap["effective_oee"], .895 * .8);
     assert.equal(rows.find((r) => r["machine"] === "LOW")!["test_time_performance"], .5);
     for (const machine of ["NO-TD", "NO-TIME", "ZERO-TIME", "NO-DUT"]) {
       assert.equal(rows.find((r) => r["machine"] === machine)!["test_time_performance"], null);

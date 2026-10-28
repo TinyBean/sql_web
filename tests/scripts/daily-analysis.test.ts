@@ -14,6 +14,7 @@ import { AnalysisValidationError, applyAnalysisReport, degradeAnalysisReport, in
   validateAnalysisReport, type AnalysisReport, AnalysisRepairState, pointerValue, machineSelectionContext, type MachineGroup,
 } from "../../src/server/dashboard/default/analysis/validation.ts";
 
+import { getPeriodTestOeeSql } from "../../src/server/skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
 
 import { SessionArtifactStore } from "../../src/server/tool/artifact-store.ts";
@@ -85,7 +86,7 @@ function addRanking(item: AnalysisReport["periods"][number]["groups"][number]["i
 
 function reportFor(context: AnalysisContext, evidence?: AnalysisEvidence): AnalysisReport {
   return { periods: ANALYSIS_PERIOD_KEYS.map((period) => ({
-    period, comparison: "本期和最低点均有缺日，按可计算日均值比较，根因待验证。",
+    period, comparison: "本期和最低点均有缺日，按周期池化指标比较，根因待验证。",
     minimum_evidence: context.comparisons[period].minimum.id,
     history_evidence: context.comparisons[period].history.id,
     groups: (["MT", "ST"] as const).map((kind) => ({
@@ -401,6 +402,18 @@ test("analysis evidence shares the metrics snapshot and validates six unchanged 
   assert.deepEqual(context.comparisons.day.current.range, { start: "2026-01-12", end: "2026-01-12" });
   assert.deepEqual(context.comparisons.day.minimum.range, { start: "2026-01-01", end: "2026-01-01" }, "the lowest calculable day anchors the day comparison");
   assert.deepEqual(context.comparisons.day.history.range, { start: "2026-01-01", end: "2026-01-11" });
+  for (const period of ANALYSIS_PERIOD_KEYS) {
+    for (const record of Object.values(context.comparisons[period])) {
+      assert.ok(record.range);
+      const query = getPeriodTestOeeSql(record.range.start, record.range.end, "report_period");
+      assert.equal(record.sql, query.sql);
+      assert.deepEqual(record.rows, database.prepare(query.sql).all().map((row) => ({ ...row })), "baseline freezes an independently queried pooled period");
+      const frozen = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(record.snapshot!.name).filePath, "utf8"));
+      assert.deepEqual(frozen.rows, record.rows);
+    }
+  }
+  assert.match(analysisPrompt(context), /"metrics":/u);
+  assert.doesNotMatch(analysisPrompt(context), /"means":|等权平均/u);
   const writer = new DatabaseSync(config.databasePath);
   writer.prepare("UPDATE oee_availability SET time_span=18000 WHERE final_state='Conversion'").run();
   writer.close();
@@ -527,7 +540,7 @@ test("unavailable models publish new metrics and empty analysis, without creatin
     publish(_file, state) {
       published = state;
       assert.equal(state.dateRange?.end, "2026-01-12");
-      const expectedOee = (40 * 21_600 / 30_600 + 2 * 40 * 43_200 / 52_200) / 3;
+      const expectedOee = 40 * (21_600 + 2 * 43_200) / (30_600 + 2 * 52_200);
       assert.ok(Math.abs(Number(state.widgets[1]?.data[0]?.["overall_oee_percent"]) - expectedOee) < 1e-10);
       for (const widget of state.widgets.slice(9, 11)) {
         assert.deepEqual(widget.data, []);
@@ -736,7 +749,7 @@ test("measured losses remain analysable without DUT or calculable OEE and preser
   const evidence = new AnalysisEvidence(database, undefined, new SessionArtifactStore(path.dirname(config.databasePath), "no-dut-data"));
   const base = calculatedDashboard(database, "2026-01-12");
   const context = evidence.context(base, "2026-01-12");
-  assert.ok(context.comparisons.day.current.rows.every((row) => row["daily_test_oee"] === null));
+  assert.ok(context.comparisons.day.current.rows.every((row) => row["test_oee"] === null));
   const report = reportFor(context, evidence);
   const result = validateAnalysisReport(report, context, evidence.records);
   for (const period of ANALYSIS_PERIOD_KEYS) {

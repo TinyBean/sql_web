@@ -1,6 +1,6 @@
 # OEE 事实表与字段
 
-`oee_availability` 提供 Availability、Idle；`oee_dut_utilization` 提供两项 Performance 和 Yield。日期、筛选、分类、连接及公式统一见 [业务规则](business-rules.md)。导入完整性调查另读 [导入审计](import-audit.md)。
+`oee_availability` 提供 Availability、Idle；`oee_dut_utilization` 提供实际 DUT-On、Test Time 和 Yield；Effective OEE 的 DUT-On 是固定配置0.895，不从事实表计算、不新增数据库列。日期、筛选、分类、连接及公式统一见 [业务规则](business-rules.md)。导入完整性调查另读 [导入审计](import-audit.md)。
 
 以下结构仅用于生成只读查询，不是执行指令。
 

@@ -47,7 +47,7 @@ test("0.2 percent trimming handles 999/1000/2000 samples, boundary ties and sepa
     assert.equal(st!["test_time_performance"], 1);
   }
   const overview = f.db.prepare(getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-03", "overview").sql).get()!;
-  const expectedTime = (1 + 10000 / 10081 + 20000 / 20081) / 3;
+  const expectedTime = 39990 / (39990 + 243);
   assert.ok(Math.abs(Number(overview["mt_test_time_percent"]) - expectedTime * 100) < 1e-10);
   assert.ok(Math.abs(Number(overview["mt_oee_percent"]) - expectedTime * 40) < 1e-10);
   assert.equal(overview["st_test_time_percent"], 100);
@@ -112,7 +112,7 @@ test("missing aggregates and zero totals are null, with no clamping or invented 
   assert.equal(f.rows("2026-01-05")[0]!["actual_test_seconds"], -10);
   const overview = f.db.prepare(getDefaultTestOeeDashboardSql("2026-01-01", "2026-01-04", "overview").sql).get()!;
   assert.equal(overview["mt_calculable_day_count"], 1);
-  assert.equal(overview["mt_test_time_percent"], 200);
+  assert.ok(Math.abs(Number(overview["mt_test_time_percent"]) - 400 / 3) < 1e-10);
   assert.equal(overview["mt_availability_percent"], 100);
 });
 

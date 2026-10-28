@@ -300,7 +300,7 @@ test("generated date predicate includes the complete end date", () => {
   database.close();
 });
 
-test("default SQL aggregates components by day and kind, then averages daily OEE", () => {
+test("default SQL aggregates components by day and kind, then pools period components", () => {
   const database = new DatabaseSync(":memory:");
   database.exec(`CREATE TABLE oee_availability (
     id INTEGER PRIMARY KEY,
@@ -354,7 +354,7 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
 
   const generated = getDefaultTestOeeSql("2026-01-01", "2026-01-02");
   assert.deepEqual(generated.dailyGrain, ["day", "kind"]);
-  assert.equal(generated.periodAggregation, "average_of_daily_oee");
+  assert.equal(generated.periodAggregation, "pooled_components");
   const rows = database.prepare(generated.sql).all();
   assert.equal(rows.length, 4);
   const day1Mt = rows.find((row) => row["day"] === "2026-01-01" && row["kind"] === "MT");
@@ -377,7 +377,7 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.ok(Math.abs(Number(day2Mt["daily_test_oee"]) - 0.4) < 1e-12);
   assert.equal(day1Mt["calculable_day_count"], 2);
   assert.equal(day1Mt["selected_day_count"], 2);
-  const expectedPeriodOee = (1 / 3 * (10000 / 10081) + 0.4) / 2;
+  const expectedPeriodOee = (7 / 8) * .5 * (10010 / 10091) * .8;
   assert.ok(Math.abs(Number(day1Mt["period_test_oee"]) - expectedPeriodOee) < 1e-12);
   assert.equal(day1St["availability_rows"], 0);
   assert.equal(day1St["machine_count"], 0);
@@ -399,7 +399,7 @@ test("default SQL aggregates components by day and kind, then averages daily OEE
   assert.equal(overview["availability_day_type_count"], 2);
   assert.equal(overview["dut_day_type_count"], 2);
   assert.equal(overview["avg_performance_percent"], 50);
-  assert.equal(overview["avg_test_time_percent"], (10000 / 10081 + 1) / 2 * 100);
+  assert.equal(overview["avg_test_time_percent"], 10010 / 10091 * 100);
   assert.equal(overview["avg_dut_on_percent"], 50);
 
   const trends = database.prepare(
@@ -524,10 +524,10 @@ test("matches the SQL ratio and product semantics used for database-derived OEE"
   assert.equal(actual["product"], expected.product);
 });
 
-test("publishes four Skill tools and preserves default SQL views and numeric scales", async (t) => {
+test("publishes five Skill tools and preserves default SQL views and numeric scales", async (t) => {
   const tools = createTools() as readonly CallableSkillTool[];
   assert.deepEqual(tools.map((tool) => tool.name), [
-    "get_default_sql", "get_machine_period_sql", "get_sql_expressions", "rank_machines",
+    "get_default_sql", "get_period_sql", "get_machine_period_sql", "get_sql_expressions", "rank_machines",
   ]);
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const range = { start_date: "2026-08-31", end_date: "2026-09-06" };
@@ -548,11 +548,11 @@ test("publishes four Skill tools and preserves default SQL views and numeric sca
   assert.equal(defaultSql.view, "daily");
   assert.equal(defaultSql.valueScale, "ratio");
   assert.deepEqual(defaultSql.dailyGrain, ["day", "kind"]);
-  assert.equal(defaultSql.periodAggregation, "average_of_daily_oee");
+  assert.equal(defaultSql.periodAggregation, "pooled_components");
   const daily = db.prepare(defaultSql.sql).all();
   assert.equal(daily.length, 14);
   assert.ok(Math.abs(Number(daily[0]!["daily_test_oee"]) - .2) < 1e-12);
-  assert.ok(Math.abs(Number(daily[0]!["period_test_oee"]) - .35) < 1e-12);
+  assert.ok(Math.abs(Number(daily[0]!["period_test_oee"]) - .3375) < 1e-12);
   assert.equal(daily[1]!["daily_test_oee"], null);
   assert.deepEqual(daily, db.prepare(getDefaultTestOeeSql(range.start_date, range.end_date).sql).all());
   assert.deepEqual(await executeTool(byName.get("get_default_sql")!, { ...range, view: "daily" }), defaultSql);
@@ -566,8 +566,8 @@ test("publishes four Skill tools and preserves default SQL views and numeric sca
     assert.deepEqual(rows, db.prepare(getDefaultTestOeeDashboardSql(range.start_date, range.end_date, view).sql).all());
     if (view === "overview") {
       assert.equal(rows.length, 1);
-      assert.ok(Math.abs(Number(rows[0]!["mt_oee_percent"]) - 35) < 1e-12);
-      assert.ok(Math.abs(Number(rows[0]!["mt_effective_oee_percent"]) - 35) < 1e-12);
+      assert.ok(Math.abs(Number(rows[0]!["mt_oee_percent"]) - 33.75) < 1e-12);
+      assert.ok(Math.abs(Number(rows[0]!["mt_effective_oee_percent"]) - 40.275) < 1e-12);
       assert.equal(rows[0]!["mt_selected_day_count"], 7);
       assert.equal(rows[0]!["mt_calculable_day_count"], 2);
     } else {

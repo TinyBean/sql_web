@@ -52,7 +52,7 @@ test("Effective Availability and Effective OEE rank by NoWIP rather than total I
     const view = machineRankingView(measurement);
     assert.equal(view.machine_count, 4);
     assert.deepEqual(view.top3.map((row) => row.machine), ["ADH002", "ADH004", "ADH001"]);
-    const expected = [.4, .5, 4 / 7, 1].map((value) => value * (metric === "effective_oee" ? 40 : 100));
+    const expected = [.4, .5, 4 / 7, 1].map((value) => value * (metric === "effective_oee" ? .895 * .8 * 100 : 100));
     for (const [index, value] of expected.entries()) {
       const machine = ["ADH002", "ADH004", "ADH001", "ADH003"][index]!;
       const row = measurement.rows.find((entry) => entry["machine"] === machine)!;
@@ -224,7 +224,7 @@ test("Yield and OEE rankings reject F LOTs while DUT-On rankings retain them and
     const view = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric }));
     assert.equal(view.observed_machine_count, 2);
     assert.deepEqual(view.top3.map((row) => row.machine), ["ADH001"]);
-    assert.ok(Math.abs(view.top3[0]!.value - (metric === "final_yield" ? 75 : 45)) < 1e-12);
+    assert.ok(Math.abs(view.top3[0]!.value - (metric === "final_yield" ? 75 : metric === "effective_oee" ? .895 * .75 * 100 : 45)) < 1e-12);
   }
   const dut = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
   assert.deepEqual(dut.top3.map((row) => [row.machine, row.value]), [["ADH001", 60], ["ADH002", 60]]);

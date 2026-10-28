@@ -1,4 +1,6 @@
 export type TestOeeKind = "MT" | "ST";
+/** Effective OEE uses this fixed DUT-On factor for every scope and reporting period. */
+export const EFFECTIVE_DUT_ON = 0.895;
 export type TestOeeKindSource = "step" | "platform";
 export type TestOeeSqlSource = "availability" | "dut";
 export type AvailabilityStateGroup =
@@ -49,11 +51,12 @@ export interface DefaultTestOeeSql {
   readonly trimFraction: 0.002;
   readonly trimPercentPerTail: 0.1;
   readonly trimFractionPerTail: 0.001;
-  readonly periodAggregation: "average_of_daily_oee";
+  readonly periodAggregation: "pooled_components";
   readonly sql: string;
 }
 
 export interface MachineDailyTestOeeSql {
+  readonly periodAggregation: "pooled_components";
   readonly startDate: string;
   readonly endDate: string;
   readonly exclusiveEndDate: string;
@@ -69,6 +72,7 @@ export interface MachineDailyTestOeeSql {
 export type MachinePeriodGrain = "day" | "week" | "month" | "quarter";
 
 export interface MachinePeriodTestOeeSql {
+  readonly periodAggregation: "pooled_components";
   readonly startDate: string;
   readonly endDate: string;
   readonly exclusiveEndDate: string;
@@ -85,10 +89,25 @@ export interface MachinePeriodTestOeeSql {
 export type TestOeeDashboardView = "overview" | "trends";
 
 export interface DefaultTestOeeDashboardSql {
+  readonly periodAggregation: "pooled_components";
   readonly startDate: string;
   readonly endDate: string;
   readonly view: TestOeeDashboardView;
   readonly valueScale: "percentage_points";
+  readonly sql: string;
+}
+
+export interface PeriodTestOeeSql {
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly exclusiveEndDate: string;
+  readonly grain: MachinePeriodGrain | "report_period";
+  readonly periodGrain: readonly ["period_label", "kind"];
+  readonly periodAggregation: "pooled_components";
+  readonly trimPercent: 0.2;
+  readonly trimFraction: 0.002;
+  readonly trimPercentPerTail: 0.1;
+  readonly trimFractionPerTail: 0.001;
   readonly sql: string;
 }
 
@@ -523,6 +542,7 @@ export function getTestOeeDutCtes(
   endDate: string,
   grain: "day_kind" | "machine_day_kind" = "day_kind",
   periodGrain: MachinePeriodGrain | "report_period" = "day",
+  mapPeriodDays = false,
 ): string {
   const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
   if (dut.yieldLotPredicate === undefined || dut.inputQuantityWithoutRetestExpression === undefined
@@ -541,7 +561,7 @@ export function getTestOeeDutCtes(
     d.lot_id,
     ${dut.machineExpression} AS machine,
     ${dut.dayExpression} AS source_day,
-    ${period.label} AS day,
+    ${mapPeriodDays ? "" : `${period.label} AS day,`}
     ${dut.kindExpression} AS kind,
     ${dut.yieldLotPredicate} AS yield_lot_eligible,
     ${dut.inputQuantityWithoutRetestExpression} AS input_quantity_without_retest,
@@ -567,9 +587,10 @@ dut_lot_labels AS (
   GROUP BY h.lot_id
 ),
 dut_base AS (
-  SELECT r.*, l.yield_calculation_label,
+  SELECT r.*, ${mapPeriodDays ? "p.day," : ""} l.yield_calculation_label,
     r.yield_lot_eligible AND l.yield_calculation_label='T' AS yield_eligible
   FROM dut_report AS r JOIN dut_lot_labels AS l ON l.lot_id=r.lot_id
+  ${mapPeriodDays ? "JOIN period_days p ON p.source_day=r.source_day" : ""}
 ),
 dut_daily_aggregate AS (
   SELECT
@@ -715,11 +736,12 @@ SELECT a.*, a.day AS period_label, d.dut_rows, COALESCE(d.dut_days, 0) AS dut_da
   d.yield_rows, d.yield_input_quantity, d.yield_output_quantity,
   d.input_quantity, d.output_quantity, d.socket_quantity, d.touchdown_count, d.actual_test_seconds,
   d.valid_duration_rows, d.trimmed_rows_each_tail, d.trimmed_mean_test_seconds,
-  d.dut_on, d.dut_on AS performance, d.raw_test_time_performance, d.test_time_performance, d.final_yield,
+  d.dut_on, d.dut_on AS performance, ${EFFECTIVE_DUT_ON} AS effective_dut_on,
+  d.raw_test_time_performance, d.test_time_performance, d.final_yield,
   ${grain === "day" ? `a.availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_test_oee,
-  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield AS daily_effective_oee,` : ""}
+  a.effective_availability * ${EFFECTIVE_DUT_ON} * d.test_time_performance * d.final_yield AS daily_effective_oee,` : ""}
   a.availability * d.dut_on * d.test_time_performance * d.final_yield AS test_oee,
-  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield AS effective_oee
+  a.effective_availability * ${EFFECTIVE_DUT_ON} * d.test_time_performance * d.final_yield AS effective_oee
 FROM availability_effective AS a
 LEFT JOIN dut_daily AS d ON d.day=a.day AND d.machine=a.machine AND d.kind=a.kind
 ORDER BY a.day, a.machine, a.kind`;
@@ -737,7 +759,7 @@ export function getMachineDailyTestOeeSql(startDate: string, endDate: string): M
     trimFraction: 0.01,
     trimPercentPerTail: 0.5,
     trimFractionPerTail: 0.005,
-    testTimeUpperLimit: 1,
+    periodAggregation: "pooled_components", testTimeUpperLimit: 1,
     sql: machineTestOeeSql(startDate, endDate, "day"),
   };
 }
@@ -752,338 +774,204 @@ export function getMachinePeriodTestOeeSql(
   return { startDate, endDate, exclusiveEndDate: availability.exclusiveEndDate,
     grain, periodGrain: ["period_label", "machine", "kind"],
     trimPercent: 1, trimFraction: 0.01, trimPercentPerTail: 0.5, trimFractionPerTail: 0.005,
-    testTimeUpperLimit: 1, sql: machineTestOeeSql(startDate, endDate, grain) };
+    periodAggregation: "pooled_components", testTimeUpperLimit: 1, sql: machineTestOeeSql(startDate, endDate, grain) };
 }
 
-export function getDefaultTestOeeSql(startDate: string, endDate: string): DefaultTestOeeSql {
-  const availability = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
-  const dut = getTestOeeSqlExpressions("dut", startDate, endDate, "d");
-  if (
-    availability.availabilityStateExpression === undefined ||
-    availability.idlePredicate === undefined ||
-    dut.touchdownLabelExpression === undefined ||
-    dut.testTimeSecondsExpression === undefined
-  ) {
-    throw new TestOeeInputError("默认 Test OEE SQL 表达式不完整");
-  }
+/** Aggregate each source independently; daily coverage never filters the period population. */
+export function getPeriodTestOeeSql(
+  startDate: string, endDate: string, grain: MachinePeriodGrain | "report_period",
+): PeriodTestOeeSql {
+  return periodTestOeeSql(startDate, endDate, grain);
+}
 
+function periodTestOeeSql(
+  startDate: string, endDate: string, grain: MachinePeriodGrain | "report_period", includeReport = false,
+): PeriodTestOeeSql {
+  const a = getTestOeeSqlExpressions("availability", startDate, endDate, "a");
+  const p = machinePeriodExpressions("c.day", grain, startDate, endDate);
+  const dutSums = ["dut_rows", "yield_rows", "yield_input_quantity", "yield_output_quantity", "input_quantity",
+    "output_quantity", "socket_quantity", "touchdown_count", "actual_test_seconds", "valid_duration_rows", "trimmed_rows_each_tail"];
+  const coverageColumns = ["availability_day_type_count", "dut_day_type_count", "calculable_day_type_count",
+    "effective_calculable_day_type_count"];
   const sql = `WITH RECURSIVE
 calendar(day) AS (
   SELECT ${quoteSqlLiteral(startDate)}
-  UNION ALL
-  SELECT date(day,'+1 day') FROM calendar WHERE day<${quoteSqlLiteral(endDate)}
+  UNION ALL SELECT date(day,'+1 day') FROM calendar WHERE day<${quoteSqlLiteral(endDate)}
+),
+period_days AS (
+  SELECT c.day AS source_day, ${p.label} AS day, ${p.start} AS period_start,
+    ${p.end} AS period_end, ${p.partial} AS is_partial_period FROM calendar c
+  ${includeReport ? `UNION ALL SELECT day, ${quoteSqlLiteral(startDate+"/"+endDate)}, ${quoteSqlLiteral(startDate)}, ${quoteSqlLiteral(endDate)}, 0 FROM calendar` : ""}
+),
+periods AS (
+  SELECT day, MIN(period_start) AS period_start, MAX(period_end) AS period_end,
+    MAX(is_partial_period) AS is_partial_period, COUNT(*) AS selected_day_count
+  FROM period_days GROUP BY day
 ),
 kinds(kind) AS (VALUES ('MT'),('ST')),
-availability_classified AS (
-  SELECT
-    ${availability.dayExpression} AS day,
-    ${availability.machineExpression} AS machine,
-    ${availability.kindExpression} AS kind,
-    ${availability.availabilityStateExpression} AS state_group,
-    ${availability.idlePredicate} AS is_idle,
-    CAST(a.time_span AS REAL) AS state_seconds
-  FROM oee_availability AS a
-  WHERE ${availability.dateRangePredicate}
-    AND ${availability.sourceLotPredicate}
-    AND ${availability.platformPredicate}
+scopes(kind) AS (VALUES ('MT'),('ST'),('ALL')),
+availability_classified AS MATERIALIZED (
+  SELECT ${a.dayExpression} AS source_day, p.day, ${a.machineExpression} AS machine,
+    ${a.kindExpression} AS kind, ${a.availabilityStateExpression} AS state_group,
+    ${a.idlePredicate} AS is_idle, CAST(a.time_span AS REAL) AS state_seconds
+  FROM oee_availability a JOIN period_days p ON p.source_day=${a.dayExpression}
+  WHERE ${a.dateRangePredicate} AND ${a.sourceLotPredicate} AND ${a.platformPredicate}
 ),
-availability_daily AS (
-  SELECT
-    day,
-    kind,
-    COUNT(*) AS availability_rows,
-    COUNT(DISTINCT machine) AS machine_count,
-    SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
-      AS machine_running_seconds,
+availability_totals AS (
+  SELECT day, s.kind, COUNT(*) AS availability_rows, COUNT(DISTINCT machine) AS machine_count,
+    SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END) AS machine_running_seconds,
     SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END) AS idle_seconds,
     SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END) AS idle_no_wip_seconds,
-    SUM(state_seconds) AS available_seconds,
-    CASE
-      WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
-      ELSE SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END)
-        / SUM(state_seconds)
-    END AS availability,
-    CASE
-      WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
-      ELSE SUM(CASE WHEN is_idle THEN state_seconds ELSE 0 END)
-        / SUM(state_seconds)
-    END AS idle,
-    CASE
-      WHEN SUM(state_seconds) IS NULL OR SUM(state_seconds)=0 THEN NULL
-      ELSE SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END)
-        / SUM(state_seconds)
-    END AS idle_no_wip
-  FROM availability_classified
-  WHERE kind IN ('MT','ST')
-  GROUP BY day, kind
+    SUM(state_seconds) AS available_seconds
+  FROM availability_classified a JOIN scopes s ON s.kind=a.kind OR s.kind='ALL'
+  WHERE a.kind IN ('MT','ST') GROUP BY day, s.kind
 ),
-availability_effective AS (
-  SELECT
-    *,
-    CASE
-      WHEN availability IS NULL OR idle_no_wip IS NULL
-        OR (1 + (1 - idle_no_wip - availability))=0 THEN NULL
-      ELSE availability + idle_no_wip / (1 + (1 - idle_no_wip - availability))
-    END AS effective_availability
-  FROM availability_daily
+${getTestOeeDutCtes(startDate, endDate, "day_kind", grain, true)},
+dut_period AS (
+  SELECT q.*, t.valid_duration_rows, t.trimmed_rows_each_tail, t.trimmed_mean_test_seconds,
+    CASE WHEN q.actual_test_seconds IS NULL OR q.actual_test_seconds=0 OR q.touchdown_count IS NULL
+      OR t.trimmed_mean_test_seconds IS NULL THEN NULL
+      ELSE t.trimmed_mean_test_seconds * q.touchdown_count END AS expected_test_seconds
+  FROM dut_daily_aggregate q LEFT JOIN duration_trimmed t ON t.day=q.day AND t.kind=q.kind
 ),
-${getTestOeeDutCtes(startDate, endDate)},
-dut_daily AS (
-  SELECT
-    q.day,
-    q.kind,
-    q.dut_rows,
-    q.yield_rows,
-    q.yield_input_quantity,
-    q.yield_output_quantity,
-    q.input_quantity,
-    q.output_quantity,
-    q.socket_quantity,
-    q.touchdown_count,
-    q.actual_test_seconds,
-    t.valid_duration_rows,
-    t.trimmed_rows_each_tail,
-    t.trimmed_mean_test_seconds,
-    CASE
-      WHEN q.socket_quantity IS NULL OR q.socket_quantity=0 THEN NULL
-      ELSE q.input_quantity / q.socket_quantity
-    END AS dut_on,
-    CASE
-      WHEN q.actual_test_seconds IS NULL OR q.actual_test_seconds=0
-        OR q.touchdown_count IS NULL OR t.trimmed_mean_test_seconds IS NULL THEN NULL
-      ELSE t.trimmed_mean_test_seconds * q.touchdown_count / q.actual_test_seconds
-    END AS test_time_performance,
-    CASE
-      WHEN q.yield_input_quantity IS NULL OR q.yield_input_quantity=0 THEN NULL
-      ELSE q.yield_output_quantity / q.yield_input_quantity
-    END AS final_yield
-  FROM dut_daily_aggregate AS q
-  LEFT JOIN duration_trimmed AS t ON t.day=q.day AND t.kind=q.kind
+dut_totals AS (
+  SELECT day, kind, ${dutSums.join(", ")}, trimmed_mean_test_seconds, expected_test_seconds FROM dut_period
+  UNION ALL
+  SELECT day, 'ALL', ${dutSums.map((c) => `SUM(${c})`).join(", ")}, NULL,
+    CASE WHEN COUNT(expected_test_seconds)<COUNT(*) THEN NULL ELSE SUM(expected_test_seconds) END
+  FROM dut_period GROUP BY day
 ),
-daily_results AS (
-  SELECT
-    a.day,
-    a.kind,
-    a.availability_rows,
-    a.machine_count,
-    a.machine_running_seconds,
-    a.idle_seconds,
-    a.idle_no_wip_seconds,
-    a.available_seconds,
-    d.dut_rows,
-    d.yield_rows,
-    d.yield_input_quantity,
-    d.yield_output_quantity,
-    d.input_quantity,
-    d.output_quantity,
-    d.socket_quantity,
-    d.touchdown_count,
-    d.actual_test_seconds,
-    d.valid_duration_rows,
-    d.trimmed_rows_each_tail,
-    d.trimmed_mean_test_seconds,
-    a.availability,
-    a.idle,
-    a.idle_no_wip,
-    a.effective_availability,
-    d.dut_on,
-    d.test_time_performance,
-    d.final_yield,
-    CASE
-      WHEN a.availability IS NULL OR d.dut_on IS NULL
-        OR d.test_time_performance IS NULL OR d.final_yield IS NULL THEN NULL
-      ELSE a.availability * d.dut_on * d.test_time_performance * d.final_yield
-    END AS daily_test_oee,
-    CASE
-      WHEN a.effective_availability IS NULL OR d.dut_on IS NULL
-        OR d.test_time_performance IS NULL OR d.final_yield IS NULL THEN NULL
-      ELSE a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield
-    END AS daily_effective_oee
-  FROM availability_effective AS a
-  LEFT JOIN dut_daily AS d ON d.day=a.day AND d.kind=a.kind
+availability_coverage AS (
+  SELECT day, source_day, kind, COUNT(*) AS availability_rows, SUM(state_seconds) AS available_seconds,
+    SUM(CASE WHEN state_group='Machine_Running' THEN state_seconds ELSE 0 END) AS machine_running_seconds,
+    SUM(CASE WHEN state_group='IDLE_NoWIP' THEN state_seconds ELSE 0 END) AS idle_no_wip_seconds
+  FROM availability_classified WHERE kind IN ('MT','ST') GROUP BY day, source_day, kind
+),
+dut_coverage AS (
+  SELECT day, source_day, kind, COUNT(*) AS dut_rows, SUM(socket_quantity) AS socket_quantity,
+    SUM(touchdown_label) AS touchdown_count, SUM(test_time_seconds) AS actual_test_seconds,
+    COUNT(test_time_seconds) AS valid_duration_rows,
+    SUM(CASE WHEN yield_eligible THEN input_quantity END) AS yield_input_quantity,
+    SUM(CASE WHEN yield_eligible THEN output_quantity END) AS yield_output_quantity
+  FROM dut_base WHERE kind IN ('MT','ST') GROUP BY day, source_day, kind
+),
+daily_coverage AS (
+  SELECT p.day, k.kind, COALESCE(a.availability_rows,0)>0 AS has_availability,
+    COALESCE(d.dut_rows,0)>0 AS has_dut,
+    COALESCE(a.available_seconds!=0 AND d.socket_quantity!=0 AND d.touchdown_count IS NOT NULL
+      AND d.actual_test_seconds!=0 AND d.valid_duration_rows>0
+      AND d.yield_input_quantity!=0 AND d.yield_output_quantity IS NOT NULL,0) AS calculable,
+    COALESCE(a.available_seconds!=0 AND d.touchdown_count IS NOT NULL
+      AND d.actual_test_seconds!=0 AND d.valid_duration_rows>0
+      AND d.yield_input_quantity!=0 AND d.yield_output_quantity IS NOT NULL,0) AS effective_calculable,
+    a.machine_running_seconds / NULLIF(a.available_seconds,0) AS availability,
+    a.idle_no_wip_seconds / NULLIF(a.available_seconds,0) AS idle_no_wip
+  FROM period_days p CROSS JOIN kinds k
+  LEFT JOIN availability_coverage a ON a.day=p.day AND a.source_day=p.source_day AND a.kind=k.kind
+  LEFT JOIN dut_coverage d ON d.day=p.day AND d.source_day=p.source_day AND d.kind=k.kind
+),
+coverage_by_kind AS (
+  SELECT day, kind, SUM(has_availability) AS availability_day_type_count,
+    SUM(has_dut) AS dut_day_type_count, SUM(calculable) AS calculable_day_type_count,
+    SUM(CASE WHEN effective_calculable AND (1+(1-idle_no_wip-availability))!=0 THEN 1 ELSE 0 END)
+      AS effective_calculable_day_type_count
+  FROM daily_coverage GROUP BY day, kind
+),
+coverage AS (
+  SELECT * FROM coverage_by_kind
+  UNION ALL SELECT day, 'ALL', ${coverageColumns.map((c) => `SUM(${c})`).join(", ")}
+  FROM coverage_by_kind GROUP BY day
+),
+components AS (
+  SELECT p.day AS period_label, s.kind, p.period_start, p.period_end, p.is_partial_period,
+    p.selected_day_count, p.selected_day_count * CASE WHEN s.kind='ALL' THEN 2 ELSE 1 END AS selected_day_type_count,
+    ${coverageColumns.map((c) => `c.${c}`).join(", ")},
+    COALESCE(a.availability_rows,0) AS availability_rows, COALESCE(a.machine_count,0) AS machine_count,
+    a.machine_running_seconds, a.idle_seconds, a.idle_no_wip_seconds, a.available_seconds,
+    ${dutSums.map((c) => `d.${c}`).join(", ")}, d.trimmed_mean_test_seconds, d.expected_test_seconds,
+    a.machine_running_seconds / NULLIF(a.available_seconds,0) AS availability,
+    a.idle_seconds / NULLIF(a.available_seconds,0) AS idle,
+    a.idle_no_wip_seconds / NULLIF(a.available_seconds,0) AS idle_no_wip,
+    d.input_quantity / NULLIF(d.socket_quantity,0) AS dut_on,
+    d.expected_test_seconds / NULLIF(d.actual_test_seconds,0) AS test_time_performance,
+    d.yield_output_quantity / NULLIF(d.yield_input_quantity,0) AS final_yield
+  FROM periods p CROSS JOIN scopes s
+  LEFT JOIN availability_totals a ON a.day=p.day AND a.kind=s.kind
+  LEFT JOIN dut_totals d ON d.day=p.day AND d.kind=s.kind
+  LEFT JOIN coverage c ON c.day=p.day AND c.kind=s.kind
+),
+effective AS (
+  SELECT *, availability + idle_no_wip / NULLIF(1+(1-idle_no_wip-availability),0) AS effective_availability
+  FROM components
 )
-SELECT
-  c.day,
-  k.kind,
-  COALESCE(r.availability_rows,0) AS availability_rows,
-  COALESCE(r.machine_count,0) AS machine_count,
-  r.machine_running_seconds,
-  r.idle_seconds,
-  r.idle_no_wip_seconds,
-  r.available_seconds,
-  r.dut_rows,
-  r.yield_rows,
-  r.yield_input_quantity,
-  r.yield_output_quantity,
-  r.input_quantity,
-  r.output_quantity,
-  r.socket_quantity,
-  r.touchdown_count,
-  r.actual_test_seconds,
-  r.valid_duration_rows,
-  r.trimmed_rows_each_tail,
-  r.trimmed_mean_test_seconds,
-  r.availability,
-  r.idle,
-  r.idle_no_wip,
-  r.effective_availability,
-  r.dut_on,
-  r.dut_on AS performance,
-  r.test_time_performance,
-  r.final_yield,
-  r.daily_test_oee,
-  COUNT(r.daily_test_oee) OVER (PARTITION BY k.kind) AS calculable_day_count,
-  COUNT(*) OVER (PARTITION BY k.kind) AS selected_day_count,
-  AVG(r.daily_test_oee) OVER (PARTITION BY k.kind) AS period_test_oee,
-  r.daily_effective_oee,
-  COUNT(r.daily_effective_oee) OVER (PARTITION BY k.kind) AS effective_calculable_day_count,
-  AVG(r.daily_effective_oee) OVER (PARTITION BY k.kind) AS period_effective_oee
-FROM calendar AS c
-CROSS JOIN kinds AS k
-LEFT JOIN daily_results AS r ON r.day=c.day AND r.kind=k.kind
-ORDER BY c.day, k.kind`;
-
-  return {
-    startDate,
-    endDate,
-    exclusiveEndDate: availability.exclusiveEndDate,
-    dailyGrain: ["day", "kind"],
-    trimPercent: TEST_TIME_TRIM_PERCENT,
-    trimFraction: TEST_TIME_TRIM_FRACTION,
-    trimPercentPerTail: TEST_TIME_TRIM_PERCENT_PER_TAIL,
-    trimFractionPerTail: TEST_TIME_TRIM_FRACTION_PER_TAIL,
-    periodAggregation: "average_of_daily_oee",
-    sql,
-  };
+SELECT *, dut_on AS performance, ${EFFECTIVE_DUT_ON} AS effective_dut_on,
+  availability * dut_on * test_time_performance * final_yield AS test_oee,
+  effective_availability * ${EFFECTIVE_DUT_ON} * test_time_performance * final_yield AS effective_oee
+FROM effective ORDER BY period_label, kind`;
+  return { startDate, endDate, exclusiveEndDate: a.exclusiveEndDate, grain,
+    periodGrain: ["period_label", "kind"], periodAggregation: "pooled_components",
+    trimPercent: 0.2, trimFraction: 0.002, trimPercentPerTail: 0.1, trimFractionPerTail: 0.001, sql };
 }
 
-/**
- * Project the canonical daily query into the exact row shapes used by Dashboard widgets.
- * Percentage columns deliberately contain percentage points (for example 56.65), because
- * Dashboard's `%` unit is a display suffix and does not scale ratios automatically.
- */
-export function getDefaultTestOeeDashboardSql(
-  startDate: string,
-  endDate: string,
-  view: TestOeeDashboardView,
-): DefaultTestOeeDashboardSql {
-  const daily = getDefaultTestOeeSql(startDate, endDate);
-  const dailySubquery = `(\n${daily.sql}\n) AS daily`;
-  const sql = view === "overview"
-    ? `SELECT
-  100.0 * AVG(daily_test_oee) AS overall_oee_percent,
-  100.0 * AVG(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_oee_percent,
-  100.0 * AVG(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent,
-  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN availability END)
-    AS avg_availability_percent,
-  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN dut_on END)
-    AS avg_dut_on_percent,
-  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN test_time_performance END)
-    AS avg_test_time_percent,
-  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN performance END)
-    AS avg_performance_percent,
-  100.0 * AVG(CASE WHEN daily_test_oee IS NOT NULL THEN final_yield END)
-    AS avg_yield_percent,
-  COUNT(daily_test_oee) AS calculable_day_type_count,
-  COUNT(*) AS selected_day_type_count,
-  SUM(CASE WHEN availability_rows>0 THEN 1 ELSE 0 END) AS availability_day_type_count,
-  COUNT(dut_rows) AS dut_day_type_count,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN availability END)
-    AS mt_availability_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN dut_on END)
-    AS mt_dut_on_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN test_time_performance END)
-    AS mt_test_time_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN performance END)
-    AS mt_performance_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_test_oee IS NOT NULL THEN final_yield END)
-    AS mt_yield_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN availability END)
-    AS st_availability_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN dut_on END)
-    AS st_dut_on_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN test_time_performance END)
-    AS st_test_time_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN performance END)
-    AS st_performance_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_test_oee IS NOT NULL THEN final_yield END)
-    AS st_yield_percent,
-  COUNT(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_calculable_day_count,
-  COUNT(CASE WHEN kind='MT' THEN 1 END) AS mt_selected_day_count,
-  COUNT(CASE WHEN kind='MT' AND availability_rows>0 THEN 1 END) AS mt_availability_day_count,
-  COUNT(CASE WHEN kind='MT' THEN dut_rows END) AS mt_dut_day_count,
-  COUNT(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_calculable_day_count,
-  COUNT(CASE WHEN kind='ST' THEN 1 END) AS st_selected_day_count,
-  COUNT(CASE WHEN kind='ST' AND availability_rows>0 THEN 1 END) AS st_availability_day_count,
-  COUNT(CASE WHEN kind='ST' THEN dut_rows END) AS st_dut_day_count,
-  100.0 * AVG(daily_effective_oee) AS overall_effective_oee_percent,
-  100.0 * AVG(CASE WHEN kind='MT' THEN daily_effective_oee END) AS mt_effective_oee_percent,
-  100.0 * AVG(CASE WHEN kind='ST' THEN daily_effective_oee END) AS st_effective_oee_percent,
-  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN idle END)
-    AS avg_idle_percent,
-  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN effective_availability END)
-    AS avg_effective_availability_percent,
-  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN dut_on END)
-    AS avg_effective_dut_on_percent,
-  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN test_time_performance END)
-    AS avg_effective_test_time_percent,
-  100.0 * AVG(CASE WHEN daily_effective_oee IS NOT NULL THEN final_yield END)
-    AS avg_effective_yield_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN idle END)
-    AS mt_idle_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN effective_availability END)
-    AS mt_effective_availability_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN dut_on END)
-    AS mt_effective_dut_on_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN test_time_performance END)
-    AS mt_effective_test_time_percent,
-  100.0 * AVG(CASE WHEN kind='MT' AND daily_effective_oee IS NOT NULL THEN final_yield END)
-    AS mt_effective_yield_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN idle END)
-    AS st_idle_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN effective_availability END)
-    AS st_effective_availability_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN dut_on END)
-    AS st_effective_dut_on_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN test_time_performance END)
-    AS st_effective_test_time_percent,
-  100.0 * AVG(CASE WHEN kind='ST' AND daily_effective_oee IS NOT NULL THEN final_yield END)
-    AS st_effective_yield_percent,
-  COUNT(daily_effective_oee) AS effective_calculable_day_type_count,
-  COUNT(CASE WHEN kind='MT' THEN daily_effective_oee END) AS mt_effective_calculable_day_count,
-  COUNT(CASE WHEN kind='ST' THEN daily_effective_oee END) AS st_effective_calculable_day_count
-FROM ${dailySubquery}`
-    : `SELECT
-  day,
-  100.0 * MAX(CASE WHEN kind='MT' THEN availability END) AS mt_availability_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN availability END) AS st_availability_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN dut_on END) AS mt_dut_on_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN test_time_performance END) AS mt_test_time_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN performance END) AS mt_performance_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN dut_on END) AS st_dut_on_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN test_time_performance END) AS st_test_time_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN performance END) AS st_performance_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN final_yield END) AS mt_yield_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN final_yield END) AS st_yield_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN daily_test_oee END) AS mt_oee_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN daily_test_oee END) AS st_oee_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN idle END) AS mt_idle_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN idle END) AS st_idle_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN effective_availability END) AS mt_effective_availability_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN effective_availability END) AS st_effective_availability_percent,
-  100.0 * MAX(CASE WHEN kind='MT' THEN daily_effective_oee END) AS mt_effective_oee_percent,
-  100.0 * MAX(CASE WHEN kind='ST' THEN daily_effective_oee END) AS st_effective_oee_percent
-FROM ${dailySubquery}
-GROUP BY day
-ORDER BY day`;
+/** Daily rows retain their own values; repeated report values pool the entire selected range. */
+export function getDefaultTestOeeSql(startDate: string, endDate: string): DefaultTestOeeSql {
+  // Assign each fact to its day and report period in one query, sharing the source and LOT scan.
+  const daily = periodTestOeeSql(startDate, endDate, "day", true);
+  const reportLabel = quoteSqlLiteral(startDate+"/"+endDate);
+  const columns = ["availability_rows", "machine_count", "machine_running_seconds", "idle_seconds", "idle_no_wip_seconds",
+    "available_seconds", "dut_rows", "yield_rows", "yield_input_quantity", "yield_output_quantity", "input_quantity",
+    "output_quantity", "socket_quantity", "touchdown_count", "actual_test_seconds", "valid_duration_rows",
+    "trimmed_rows_each_tail", "trimmed_mean_test_seconds", "availability", "idle", "idle_no_wip",
+    "effective_availability", "dut_on", "effective_dut_on", "performance", "test_time_performance", "final_yield"];
+  return { startDate, endDate, exclusiveEndDate: daily.exclusiveEndDate, dailyGrain: ["day", "kind"],
+    trimPercent: 0.2, trimFraction: 0.002, trimPercentPerTail: 0.1, trimFractionPerTail: 0.001,
+    periodAggregation: "pooled_components",
+    sql: `WITH pooled AS (${daily.sql})
+SELECT d.period_label AS day, d.kind, ${columns.map((c) => `d.${c}`).join(", ")},
+  d.test_oee AS daily_test_oee, r.calculable_day_type_count AS calculable_day_count,
+  r.selected_day_count, r.test_oee AS period_test_oee,
+  d.effective_oee AS daily_effective_oee,
+  r.effective_calculable_day_type_count AS effective_calculable_day_count,
+  r.effective_oee AS period_effective_oee
+FROM pooled d JOIN pooled r ON r.kind=d.kind AND r.period_label=${reportLabel}
+WHERE d.period_label!=${reportLabel} AND d.kind IN ('MT','ST') ORDER BY day, d.kind` };
+}
 
-  return {
-    startDate,
-    endDate,
-    view,
-    valueScale: "percentage_points",
-    sql,
+/** Legacy avg_* names are stable projections of pooled metrics, not arithmetic means. */
+export function getDefaultTestOeeDashboardSql(
+  startDate: string, endDate: string, view: TestOeeDashboardView,
+): DefaultTestOeeDashboardSql {
+  const source = getPeriodTestOeeSql(startDate, endDate, view === "overview" ? "report_period" : "day");
+  const fields: string[] = [];
+  const project = (kind: string, source: string, target: string, percent = true): void => {
+    fields.push(`${percent ? "100.0 * " : ""}MAX(CASE WHEN kind='${kind}' THEN ${source} END) AS ${target}`);
   };
+  for (const [kind, prefix] of [["ALL", "avg"], ["MT", "mt"], ["ST", "st"]] as const) {
+    if (view === "trends" && kind === "ALL") continue;
+    const oeePrefix = kind === "ALL" ? "overall" : prefix;
+    for (const [source, suffix] of [["test_oee", "oee"], ["effective_oee", "effective_oee"]]) {
+      project(kind, source!, `${oeePrefix}_${suffix}_percent`);
+    }
+    for (const [source, suffix] of [["availability", "availability"], ["dut_on", "dut_on"],
+      ["dut_on", "performance"], ["test_time_performance", "test_time"], ["final_yield", "yield"],
+      ["idle", "idle"], ["effective_availability", "effective_availability"]]) {
+      project(kind, source!, `${prefix}_${suffix}_percent`);
+    }
+    project(kind, "effective_dut_on", `${prefix}_effective_dut_on_percent`);
+    if (view === "overview") {
+      for (const [source, suffix] of [["test_time_performance", "test_time"], ["final_yield", "yield"]]) {
+        project(kind, source!, `${prefix}_effective_${suffix}_percent`);
+      }
+      for (const [source, name] of [["calculable_day_type_count", "calculable"], ["selected_day_type_count", "selected"],
+        ["availability_day_type_count", "availability"], ["dut_day_type_count", "dut"],
+        ["effective_calculable_day_type_count", "effective_calculable"]]) {
+        project(kind, source!, kind === "ALL" ? `${name}_day_type_count` : `${prefix}_${name}_day_count`, false);
+      }
+    }
+  }
+  return { startDate, endDate, view, valueScale: "percentage_points", periodAggregation: "pooled_components",
+    sql: `SELECT ${view === "trends" ? "period_label AS day,\n  " : ""}${fields.join(",\n  ")}
+FROM (${source.sql}) AS pooled${view === "trends" ? "\nGROUP BY period_label ORDER BY period_label" : ""}` };
 }
 
 function assertBatchSize(values: readonly unknown[], name: string): void {

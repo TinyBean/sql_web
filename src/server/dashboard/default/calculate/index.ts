@@ -3,7 +3,7 @@ import { parseDashboardState, type DashboardRow, type DashboardState, type Dashb
   type DashboardOverviewWidget, type DashboardTableWidget } from "../../../../shared/dashboard.ts";
 import { formatDisplayNumber } from "../../../../shared/number-format.ts";
 import { addDays, assertDate, type DatePeriod } from "../../../database/business-dates.ts";
-import { getDefaultTestOeeSql } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
+import { EFFECTIVE_DUT_ON, getPeriodTestOeeSql, type MachinePeriodGrain } from "../../../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { machinePeriodSql } from "../../../skills/test-oee-calculator/assets/machine-metrics.ts";
 import { machineLabel, machinePlatform } from "../../../skills/test-oee-calculator/assets/machine-platforms.ts";
 import { createDefaultDashboard, fillCardTemplate, createOverviewTemplate, createTrendTemplate,
@@ -12,34 +12,34 @@ import { dashboardPeriods, periodLabel, isPartialPeriod, PERIOD_KEYS, ANALYSIS_P
   PERIOD_GRAINS, type PeriodKey } from "./periods.ts";
 import { buildDailyMachineCards, readDailyMachines } from "./daily-machines.ts";
 
-type Grain = "周" | "月" | "季";
 interface PeriodData extends DatePeriod {
   readonly label: string;
   readonly rows: readonly DashboardRow[];
 }
 
-function average(rows: readonly DashboardRow[], column: string): number | null {
-  const values = rows.map((row) => row[column]).filter((value): value is number => typeof value === "number");
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+function metric(row: DashboardRow | undefined, column: string): number | null {
+  const value = row?.[column];
+  return typeof value === "number" ? value : null;
 }
 
 function percentage(value: number | null): number | null {
   return value === null ? null : value * 100;
 }
 
-function groupPeriods(rows: readonly DashboardRow[], grain: Grain | "日"): PeriodData[] {
+function periodMetric(period: PeriodData, column: string): number | null {
+  return metric(period.rows.find((row) => row["kind"] === "ALL"), column);
+}
+
+function groupPeriods(rows: readonly DashboardRow[]): PeriodData[] {
   const groups = new Map<string, DashboardRow[]>();
   for (const row of rows) {
-    const label = grain === "日" ? String(row["day"]) : periodLabel(String(row["day"]), grain);
+    const label = String(row["period_label"]);
     const group = groups.get(label) ?? [];
     group.push(row);
     groups.set(label, group);
   }
   return [...groups.entries()].map(([label, group]) => ({
-    label,
-    start: String(group[0]?.["day"]),
-    end: String(group.at(-1)?.["day"]),
-    rows: group,
+    label, start: String(group[0]!["period_start"]), end: String(group[0]!["period_end"]), rows: group,
   }));
 }
 
@@ -49,7 +49,7 @@ function extremes(periods: readonly PeriodData[]): { high?: PeriodData; low?: Pe
   let highValue = -Infinity;
   let lowValue = Infinity;
   for (const period of periods) {
-    const value = average(period.rows, "daily_test_oee");
+    const value = periodMetric(period, "test_oee");
     if (value === null) continue;
     if (value > highValue) { high = period; highValue = value; }
     if (value < lowValue) { low = period; lowValue = value; }
@@ -66,13 +66,14 @@ export function calculateDefaultDashboard(
   machineRows?: readonly DashboardRow[],
 ): DashboardState {
   const periods = dashboardPeriods(throughDate);
-  // At most 732 aggregate day/type rows. This read-only batch intentionally
+  // At most 1098 pooled day/scope rows. This read-only batch intentionally
   // does not use the interactive SQL tool's 200-row display limit.
-  const daily = readDailyOee(database, periods.trend);
-  const commonWarnings = [...syncWarnings, ...coverageWarnings(daily)];
-  const latest = daily.filter((row) => row["day"] === throughDate);
-  if (calculable(latest).length < 2) commonWarnings.push("最新业务日 " + throughDate + " 的 MT/ST OEE 尚未全部可计算");
-  const cards = new Map<string, DashboardWidget>(buildTypeOverviews(daily, periods.trend, syncWarnings)
+  const daily = readPeriodOee(database, periods.trend, "day");
+  const pooled = readPeriodOee(database, periods.trend, "report_period");
+  const commonWarnings = [...syncWarnings, ...coverageWarnings(pooled)];
+  const latest = daily.filter((row) => row["period_label"] === throughDate && row["kind"] !== "ALL");
+  if (latest.filter((row) => typeof row["test_oee"] === "number").length < 2) commonWarnings.push("最新业务日 " + throughDate + " 的 MT/ST OEE 尚未全部可计算");
+  const cards = new Map<string, DashboardWidget>(buildTypeOverviews(pooled, periods.trend, syncWarnings, latest)
     .map((widget) => [widget.id, widget]));
   const rangeText = periods.trend.start + " 至 " + throughDate;
 
@@ -80,7 +81,7 @@ export function calculateDefaultDashboard(
   for (const key of PERIOD_KEYS) {
     const grain = PERIOD_GRAINS[key];
     const template = createTrendTemplate(key);
-    const grouped = groupPeriods(daily, grain);
+    const grouped = groupPeriods(readPeriodOee(database, periods.trend, key));
     const { high, low } = extremes(grouped);
     const partials = grouped.filter((period) => isPartialPeriod(period, grain));
     const warnings = [...commonWarnings];
@@ -89,26 +90,26 @@ export function calculateDefaultDashboard(
     cards.set(template.id, {
       ...template,
       title: template.title + "（" + periods.year + " 年至今）",
-      subtitle: rangeText + " · MT/ST 日 OEE 等权平均",
+      subtitle: rangeText + " · MT/ST 周期池化 OEE",
       warnings,
       data: grouped.map((period) => ({
         period_label: period.label,
-        oee_percent: percentage(average(period.rows, "daily_test_oee")),
-        max_point: period === high ? percentage(average(period.rows, "daily_test_oee")) : null,
-        min_point: period === low ? percentage(average(period.rows, "daily_test_oee")) : null,
+        oee_percent: percentage(periodMetric(period, "test_oee")),
+        max_point: period === high ? percentage(periodMetric(period, "test_oee")) : null,
+        min_point: period === low ? percentage(periodMetric(period, "test_oee")) : null,
       })),
     });
     for (const [pointType, period] of [["最高", high], ["最低", low]] as const) {
       if (!period) continue;
       extremeRows.push({
         grain, period_label: period.label, point_type: pointType,
-        oee_percent: percentage(average(period.rows, "daily_test_oee")),
-        availability_percent: percentage(average(calculable(period.rows), "availability")),
-        performance_percent: percentage(average(calculable(period.rows), "dut_on")),
-        dut_on_percent: percentage(average(calculable(period.rows), "dut_on")),
-        test_time_percent: percentage(average(calculable(period.rows), "test_time_performance")),
-        yield_percent: percentage(average(calculable(period.rows), "final_yield")),
-        calculable_day_type_count: calculable(period.rows).length,
+        oee_percent: percentage(periodMetric(period, "test_oee")),
+        availability_percent: percentage(periodMetric(period, "availability")),
+        performance_percent: percentage(periodMetric(period, "dut_on")),
+        dut_on_percent: percentage(periodMetric(period, "dut_on")),
+        test_time_percent: percentage(periodMetric(period, "test_time_performance")),
+        yield_percent: percentage(periodMetric(period, "final_yield")),
+        calculable_day_type_count: periodMetric(period, "calculable_day_type_count"),
       });
     }
   }
@@ -132,70 +133,63 @@ export function calculateDefaultDashboard(
   });
 }
 
-function readDailyOee(database: DatabaseSync, range: DatePeriod): DashboardRow[] {
-  return database.prepare(getDefaultTestOeeSql(range.start, range.end).sql).all().map((row) => {
+export function readPeriodOee(
+  database: DatabaseSync, range: DatePeriod, grain: MachinePeriodGrain | "report_period",
+): DashboardRow[] {
+  return database.prepare(getPeriodTestOeeSql(range.start, range.end, grain).sql).all().map((row) => {
     const output: Record<string, string | number | null> = {};
     for (const [key, value] of Object.entries(row)) {
       if (value !== null && typeof value !== "string" &&
-          !(typeof value === "number" && Number.isFinite(value))) {
-        throw new Error("默认看板查询含无效值：" + key);
-      }
+          !(typeof value === "number" && Number.isFinite(value))) throw new Error("默认看板查询含无效值：" + key);
       output[key] = value;
     }
     return output;
   });
 }
 
-function calculable(rows: readonly DashboardRow[]): readonly DashboardRow[] {
-  return rows.filter((row) => typeof row["daily_test_oee"] === "number");
-}
-
 function coverageWarnings(rows: readonly DashboardRow[]): string[] {
-  const count = calculable(rows).length;
-  if (count === rows.length) return [];
-  const availabilityMissing = rows.filter((row) => !row["availability_rows"]).length;
-  const dutMissing = rows.filter((row) => !row["dut_rows"]).length;
-  return [
-    "可计算日类型 " + count + "/" + rows.length + "；缺 Availability " +
-      availabilityMissing + " 个、缺 DUT " + dutMissing + " 个；缺失或零分母结果为 NULL，平均仅使用可计算值",
-  ];
+  const combined = rows.filter((row) => row["kind"] === "ALL");
+  const sum = (column: string): number => combined.reduce((total, row) => total+Number(row[column] ?? 0), 0);
+  const count = sum("calculable_day_type_count"), selected = sum("selected_day_type_count");
+  if (count === selected) return [];
+  return [`可计算日类型 ${count}/${selected}；缺 Availability ${selected-sum("availability_day_type_count")} 个、缺 DUT ${selected-sum("dut_day_type_count")} 个；各指标独立池化已有数据，缺失或零分母保持 NULL`];
 }
 
-/** Each metric uses its own type and calculable daily sample for all five values. */
+/** Cards project the shared period query; coverage describes data without filtering it. */
 export function buildTypeOverviews(
-  daily: readonly DashboardRow[],
+  pooled: readonly DashboardRow[],
   range: DatePeriod,
   syncWarnings: readonly string[] = [],
+  latest?: readonly DashboardRow[],
 ): DashboardOverviewWidget[] {
   return (["MT", "ST"] as const).flatMap((kind) => ([true, false] as const).map((effective) => {
     const template = createOverviewTemplate(kind, effective);
     const label = template.encoding.label;
-    const dailyColumn = effective ? "daily_effective_oee" : "daily_test_oee";
+    const column = effective ? "effective_oee" : "test_oee";
     const prefix = effective ? "avg_effective_" : "avg_";
-    const rows = daily.filter((row) => row["kind"] === kind);
-    const valid = rows.filter((row) => typeof row[dailyColumn] === "number");
+    const row = pooled.find((row) => row["kind"] === kind);
+    const selected = Number(row?.["selected_day_count"] ?? (Date.parse(range.end)-Date.parse(range.start))/86_400_000+1);
+    const count = Number(row?.[effective ? "effective_calculable_day_type_count" : "calculable_day_type_count"] ?? 0);
     const warnings = [...syncWarnings];
-    if (valid.length < rows.length) {
-      const availabilityMissing = rows.filter((row) => !row["availability_rows"]).length;
-      const dutMissing = rows.filter((row) => !row["dut_rows"]).length;
-      warnings.push(`${kind} ${label} 可计算业务日 ${valid.length}/${rows.length}；缺 Availability ${availabilityMissing} 天、缺 DUT ${dutMissing} 天；缺失或零分母为 NULL，五项指标仅使用 ${label} 可计算日`);
+    if (count < selected) {
+      warnings.push(`${kind} ${label} 可计算业务日 ${count}/${selected}；缺 Availability ${selected-Number(row?.["availability_day_type_count"] ?? 0)} 天、缺 DUT ${selected-Number(row?.["dut_day_type_count"] ?? 0)} 天；各指标独立池化已有数据，缺失或零分母保持 NULL`);
     }
-    if (!valid.some((row) => row["day"] === range.end)) {
+    if (latest && !latest.some((r) => r["kind"] === kind && typeof r[column] === "number")) {
       warnings.push(`最新业务日 ${range.end} 的 ${kind} ${label} 尚未可计算`);
     }
     return {
       ...template,
       subtitle: `业务日 ${range.start} 至 ${range.end}（每天 08:30 至次日 08:30）`,
       data: [{
-        [template.encoding.value]: percentage(average(valid, dailyColumn)),
-        [prefix + "availability_percent"]: percentage(average(valid, effective ? "effective_availability" : "availability")),
-        [prefix + "dut_on_percent"]: percentage(average(valid, "dut_on")),
-        [prefix + "test_time_percent"]: percentage(average(valid, "test_time_performance")),
-        [prefix + "yield_percent"]: percentage(average(valid, "final_yield")),
-        ...(!effective ? { avg_performance_percent: percentage(average(valid, "dut_on")) } : {}),
+        [template.encoding.value]: percentage(metric(row, column)),
+        [prefix + "availability_percent"]: percentage(metric(row, effective ? "effective_availability" : "availability")),
+        [prefix + "dut_on_percent"]: percentage(effective ? EFFECTIVE_DUT_ON : metric(row, "dut_on")),
+        [prefix + "test_time_percent"]: percentage(metric(row, "test_time_performance")),
+        [prefix + "yield_percent"]: percentage(metric(row, "final_yield")),
+        ...(!effective ? { avg_performance_percent: percentage(metric(row, "dut_on")) } : {}),
       }],
       encoding: { ...template.encoding,
-        description: `${kind} 日 ${label} 等权平均；覆盖 ${valid.length}/${rows.length} 个可计算业务日`,
+        description: `${kind} 周期池化 ${label}；日可计算覆盖 ${count}/${selected}，各来源独立汇总${effective ? "；DUT-On 固定89.5%" : ""}`,
       },
       warnings,
     };
@@ -298,7 +292,7 @@ function prepareAnalysisCards(
     const grain = PERIOD_GRAINS[key];
     const label = key === "day" ? period.end : periodLabel(key === "week" ? period.start : period.end, PERIOD_GRAINS[key]);
     const subtitle = key === "day" ? "最新业务日 · " + period.end : (key === "week" ? "最近完整周" : grain + "累计") + " · " + periodText;
-    const warnings = [...syncWarnings, ...coverageWarnings(readDailyOee(database, period)),
+    const warnings = [...syncWarnings, ...coverageWarnings(readPeriodOee(database, period, "report_period")),
       "本次分析暂不可用：尚未生成临时 Agent 报告", "责任人列为职能建议，需管理层确认后指派到人"];
     return {
       ...template, title: template.title + "（" + label + "）",
@@ -333,7 +327,7 @@ export function minimumComparisonPeriod(
   const periods = dashboardPeriods(throughDate);
   if (key === "day") {
     // Source rows are day-ordered; the shared extrema calculation keeps the earliest tie.
-    const { low } = extremes(groupPeriods(daily, "日"));
+    const { low } = extremes(groupPeriods(daily));
     return low ? { start: low.start, end: low.end } : undefined;
   }
   const grain = PERIOD_GRAINS[key];
@@ -346,17 +340,16 @@ export function minimumComparisonPeriod(
   return days.length ? { start: days[0]!, end: days.at(-1)! } : undefined;
 }
 
-export function summarizeDailyOee(daily: readonly DashboardRow[]) {
+export function summarizePeriodOee(pooled: readonly DashboardRow[]) {
   return ["MT", "ST"].map((kind) => {
-    const rows = daily.filter((row) => row["kind"] === kind);
-    const valid = calculable(rows);
-    const means = Object.fromEntries(["daily_test_oee", "availability", "dut_on", "test_time_performance", "final_yield"]
-      .map((column) => [column, average(valid, column)]));
+    const row = pooled.find((row) => row["kind"] === kind);
     return {
-      kind, selected_days: rows.length, calculable_days: valid.length,
-      availability_days: rows.filter((row) => Number(row["availability_rows"]) > 0).length,
-      dut_days: rows.filter((row) => Number(row["dut_rows"]) > 0).length,
-      means,
+      kind, selected_days: Number(row?.["selected_day_count"] ?? 0),
+      calculable_days: Number(row?.["calculable_day_type_count"] ?? 0),
+      availability_days: Number(row?.["availability_day_type_count"] ?? 0),
+      dut_days: Number(row?.["dut_day_type_count"] ?? 0),
+      metrics: Object.fromEntries(["test_oee", "effective_oee", "availability", "effective_availability", "idle", "idle_no_wip",
+        "dut_on", "effective_dut_on", "test_time_performance", "final_yield"].map((column) => [column, metric(row, column)])),
     };
   });
 }

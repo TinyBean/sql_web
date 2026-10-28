@@ -68,9 +68,9 @@ export function createOverviewTemplate(kind: "MT" | "ST", effective: boolean): D
       ...(!effective ? { avg_performance_percent: null } : {}) }],
     encoding: { value, label, description: WAITING, gauges },
     format: { unit: "%", precision: 2 },
-    metricDefinition: `${kind} ${label} = AVG(${kind} 日 ${label})x100;日 ${label} = ${availability}xPerformance (DUT-On)xPerformance (Test Time)xYield。` +
+    metricDefinition: `${kind} 周期池化 ${label} = ${availability}x${effective ? "0.895（固定 DUT-On）" : "Performance (DUT-On)"}xPerformance (Test Time)xYieldx100。` +
       (effective ? "Effective Availability = Availability + IDLENoWIP / (1 + (1 - IDLENoWIP - Availability))。IDLENoWIP 为归类后 IDLE_NoWIP 的时长占比,包含 IDLE_NoWIP、IDLE_NoWIP(NoTask) 和 IDLE_NoTask(xCurrentLot);总 Idle 仍按原始状态包含 IDLE 统计。" : "") +
-      `五项指标分别对该类型 ${label} 可计算日等权平均;OEE 不由组成项的平均值再次相乘。Availability 排除大写 Q/E 前缀 LOT,DUT 排除大写 Q/E/T 前缀 LOT。${effective ? "Availability、Idle 和 IDLENoWIP" : "Availability 和 Idle"} 使用过滤后全部状态秒数作分母;仅 Yield 再筛选 P/M/R/A/F/L 前缀且 Yield_Calculation_Label 为 T 的 LOT;标签按同 LOT 全部已导入记录独立汇总,跨日期、机台及 MT/ST,不受报表日期限制,初测投入减全部产出小于零为 F,否则为 T;Yield 产出及包含初测和复测的投入仅统计报表日期内记录。沿用 PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
+      `各指标独立累计周期内各自来源的分子和分母再计算;不以日 OEE 是否可计算筛选。Test Time 在整个周期同类型内重算0.2%截尾均值且不封顶;OEE 由周期组成项相乘。Availability 排除大写 Q/E 前缀 LOT,DUT 排除大写 Q/E/T 前缀 LOT。${effective ? "Availability、Idle 和 IDLENoWIP" : "Availability 和 Idle"} 使用过滤后全部状态秒数作分母;仅 Yield 再筛选 P/M/R/A/F/L 前缀且 Yield_Calculation_Label 为 T 的 LOT;标签按同 LOT 全部已导入记录独立汇总,跨日期、机台及 MT/ST,不受报表日期限制,初测投入减全部产出小于零为 F,否则为 T;Yield 产出及包含初测和复测的投入仅统计报表日期内记录。沿用 PCIe 排除及 MT/ST 分类规则,缺失或零分母保持 NULL。`,
   };
 }
 
@@ -85,7 +85,7 @@ export function createTrendTemplate(key: typeof PERIOD_KEYS[number]): DashboardL
     ] },
     format: { unit: "%", precision: 2 },
     metricDefinition: "按" + grain + (grain === "周" ? "(周日至周六)" : "") +
-      "聚合可计算的 MT/ST 日 OEE 并等权平均;极值按未舍入值比较,并列取最早期间",
+      "独立池化 MT/ST 状态和数量;Test Time 使用同周期各类型截尾标准秒数xTD之和÷实际测试秒数之和;OEE 为周期组成项乘积;极值按未舍入值比较,并列取最早期间",
   };
 }
 
@@ -100,7 +100,7 @@ export function createExtremesTemplate(): DashboardTableWidget {
       { key: "calculable_day_type_count", label: "可计算日类型数" },
     ] },
     format: { unit: "%", precision: 2 },
-    metricDefinition: "周/月/季的 MT/ST 日 OEE 等权平均极值;四个组成项与 OEE 均使用同一期间 OEE 可计算日类型的等权平均值",
+    metricDefinition: "周/月/季的 MT/ST 周期池化 OEE 极值;各组成项独立累计相应来源后计算,OEE 为周期组成项乘积;日可计算覆盖不作为取样条件",
   };
 }
 
@@ -113,7 +113,7 @@ export function createMachineExtremesTemplate(): DashboardTableWidget {
       { key: "oee_percent", label: "周期OEE%" }, { key: "top10_machines", label: "TOP10 机台(机台 OEE 最低)" },
     ] },
     format: { unit: "%", precision: 2 },
-    metricDefinition: "与 OEE 极值明细(周/月/季)逐项对应;周期 OEE 沿用日类型等权平均。机台 OEE 按同一周期整期汇总:运行秒数÷整期全部状态秒数xSUM(IN_QTY)÷SUM(DUT_NUM)x[SUM(同日同类型截尾标准秒数x机台TD次数)÷SUM(机台实际测试秒数)]xSUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)x100;Availability 排除大写 Q/E 前缀 LOT,DUT 排除大写 Q/E/T 前缀 LOT;两项 Performance 保留其余 LOT及标签 F 的记录,仅 Yield 再应用 P/M/R/A/F/L 白名单和 Yield_Calculation_Label 为 T 的条件;标签按同 LOT 全部已导入记录独立汇总,跨日期、机台及 MT/ST,不受报表日期限制,初测投入减全部产出小于零为 F,否则为 T;Yield 产出及包含初测和复测的投入仅统计报表日期内记录;标准秒数来自当日该类型过滤后全部合格 DUT,含无匹配 Availability 的记录;MT/ST 合并为一台,按 Availability 累计时长标注主要类型,并列取 MT。按未舍入机台 OEE 升序取最低 10 台,并列按机台编号;不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计,缺日不会补零。",
+    metricDefinition: "与 OEE 极值明细(周/月/季)逐项对应;周期 OEE 使用 MT/ST 池化组成项相乘。机台 OEE 按同一周期整期汇总:运行秒数÷整期全部状态秒数xSUM(IN_QTY)÷SUM(DUT_NUM)x[SUM(本机台同周期同类型1%截尾标准秒数x机台TD次数)÷SUM(机台实际测试秒数)]xSUM(Yield 合格 LOT 的 OUT_QTY)÷SUM(Yield 合格 LOT 的 IN_QTY)x100;Availability 排除大写 Q/E 前缀 LOT,DUT 排除大写 Q/E/T 前缀 LOT;两项 Performance 保留其余 LOT及标签 F 的记录,仅 Yield 再应用 P/M/R/A/F/L 白名单和 Yield_Calculation_Label 为 T 的条件;标签按同 LOT 全部已导入记录独立汇总,跨日期、机台及 MT/ST,不受报表日期限制,初测投入减全部产出小于零为 F,否则为 T;Yield 产出及包含初测和复测的投入仅统计报表日期内记录;标准秒数来自本机台整个周期同类型过滤后的全部合格 DUT,含该机台无匹配 Availability 的业务日;Test Time 最后封顶100%;MT/ST 合并为一台,按 Availability 累计时长标注主要类型,并列取 MT。按未舍入机台 OEE 升序取最低 10 台,并列按机台编号;不足 10 台展示实际数量。年初首周及截至业务日的未完整月、季按实际范围统计,缺日不会补零。",
   };
 }
 

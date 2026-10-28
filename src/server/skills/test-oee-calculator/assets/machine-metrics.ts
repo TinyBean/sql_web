@@ -1,5 +1,5 @@
 import type { MachineDatePeriod as DatePeriod } from "./runtime.ts";
-import { getMachineTestOeeCtes } from "./test-oee-calculator.ts";
+import { EFFECTIVE_DUT_ON, getMachineTestOeeCtes } from "./test-oee-calculator.ts";
 
 /** Each machine/type uses its own 1% standard over the selected period. */
 export function machinePeriodSql(period: DatePeriod, byKind = false): string {
@@ -40,11 +40,12 @@ dut_merged AS (
   return `WITH ${getMachineTestOeeCtes(period.start, period.end, "report_period")}${merged}
 SELECT a.machine, a.kind, a.availability_days, COALESCE(d.dut_days, 0) AS dut_days,
   a.availability * 100 AS availability, d.dut_on * 100 AS dut_on,
+  ${EFFECTIVE_DUT_ON} * 100 AS effective_dut_on,
   d.raw_test_time_performance * 100 AS raw_test_time_performance,
   d.test_time_performance * 100 AS test_time_performance, d.final_yield * 100 AS final_yield,
   a.effective_availability * 100 AS effective_availability,
   a.availability * d.dut_on * d.test_time_performance * d.final_yield * 100 AS oee,
-  a.effective_availability * d.dut_on * d.test_time_performance * d.final_yield * 100 AS effective_oee
+  a.effective_availability * ${EFFECTIVE_DUT_ON} * d.test_time_performance * d.final_yield * 100 AS effective_oee
 FROM ${byKind ? "availability_effective" : "availability_merged_effective"} AS a
 LEFT JOIN ${byKind ? "dut_daily" : "dut_merged"} AS d ON d.machine=a.machine${byKind ? " AND d.kind=a.kind" : ""}
 ORDER BY oee, a.machine`;

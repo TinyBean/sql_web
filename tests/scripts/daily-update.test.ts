@@ -180,17 +180,17 @@ test("generates numeric cards using canonical calculations, period extrema, and 
   assert.equal(state.dataAsOf, "2026-01-09T01:00:00.000Z");
   const overview = state.widgets[1]!;
   assert.ok(overview.kind === "overview");
-  // Jan 1 MT: 55800 running / 68400 total; Jan 8 MT: all running.
-  const expectedOverview = (55_800 / 68_400 * 40 + 40) / 2;
+  // Include Jan 2 state time and input despite its zero daily Socket denominator.
+  const expectedOverview = (55_800 + 2 * 43_200) / (68_400 + 2 * 43_200) * (30 / 40) * .8 * 100;
   assert.ok(Math.abs(Number(overview.data[0]?.["overall_oee_percent"]) - expectedOverview) < 1e-10);
   assert.match(overview.encoding.description ?? "", /2\/8/u);
   assert.ok(overview.warnings.some((warning) => warning.includes("NULL")));
   const weekly = state.widgets[4]!;
   const firstWeekOee = Number(weekly.data[0]?.["oee_percent"]);
   assert.ok(Math.abs(firstWeekOee - expectedOverview) < 1e-10);
-  assert.notEqual(firstWeekOee, 36.32, "stored trend values retain precision beyond display rounding");
+  assert.notEqual(firstWeekOee, Number(firstWeekOee.toFixed(2)), "stored trend values retain precision beyond display rounding");
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
-    ["2026-W00", firstWeekOee, null, firstWeekOee], ["2026-W01", 40, 40, null],
+    ["2026-W00", firstWeekOee, firstWeekOee, null], ["2026-W01", 40, null, 40],
   ]);
   assert.equal(state.widgets[7]?.data.length, 6);
   const machines = state.widgets[8]!;
@@ -205,7 +205,7 @@ test("generates numeric cards using canonical calculations, period extrema, and 
     assert.equal(row["oee_percent"], extreme?.["oee_percent"]);
     // Machine period aggregation retains Jan 2's input even though its daily Socket denominator is zero.
     const expectedMachines = row["grain"] === "周"
-      ? row["point_type"] === "最低" ? "1.平台待维护/ST-01(ST 40%)、2.平台待维护/MT-01(MT 69.82%)" : "1.平台待维护/MT-01(MT 40%)、2.平台待维护/ST-01(ST 40%)"
+      ? row["point_type"] === "最高" ? "1.平台待维护/ST-01(ST 40%)、2.平台待维护/MT-01(MT 69.82%)" : "1.平台待维护/MT-01(MT 40%)、2.平台待维护/ST-01(ST 40%)"
       : "1.平台待维护/ST-01(ST 40%)、2.平台待维护/MT-01(MT 54.68%)";
     assert.equal(row["top10_machines"], expectedMachines);
   }
@@ -229,26 +229,26 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
   const state = readCalculatedDashboard(config.databasePath, "2026-01-11");
   const weekly = state.widgets[4]!;
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
-    ["2026-W00", 40, null, null], ["2026-W01", 50, 50, null], ["2026-W02", 10, null, 10],
+    ["2026-W00", 40, 40, null], ["2026-W01", 20 / 50 * .8 * 100, null, null], ["2026-W02", 10, null, 10],
   ]);
   assert.equal(weekly.warnings.find((warning) => warning.startsWith("部分周：")),
     "部分周：2026-W00、2026-W02；与完整周期比较时需注意覆盖天数");
   assert.match(weekly.metricDefinition, /周日至周六/u);
   const extremes = state.widgets[7]!.data.filter((row) => row["grain"] === "周");
   assert.deepEqual(extremes.map((row) => [row["point_type"], row["period_label"], row["oee_percent"]]), [
-    ["最高", "2026-W01", 50], ["最低", "2026-W02", 10],
+    ["最高", "2026-W00", 40], ["最低", "2026-W02", 10],
   ]);
   const machines = state.widgets[8]!;
   assert.deepEqual(machines.data.filter((row) => row["grain"] === "周").map((row) => [
     row["period_label"], row["top10_machines"],
-  ]), [["2026-W02", "1.平台待维护/MT-01(MT 10%)"], ["2026-W01", "1.平台待维护/MT-01(MT 32.00%)"]]);
-  assert.ok(machines.warnings.some((warning) => warning.includes("2026-W01（2026-01-04 至 2026-01-10）")));
+  ]), [["2026-W02", "1.平台待维护/MT-01(MT 10%)"], ["2026-W00", "1.平台待维护/MT-01(MT 40%)"]]);
+  assert.ok(machines.warnings.some((warning) => warning.includes("2026-W00（2026-01-01 至 2026-01-03）")));
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
   assert.match(state.widgets[9]!.subtitle, /最新业务日 · 2026-01-11/u);
   assert.match(state.widgets[10]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
 });
 
-test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable days", (t) => {
+test("daily overview SQL independently pools MT/ST sources including daily zero-denominator quantities", (t) => {
   const { config } = fixture(t);
   const writer = new DatabaseSync(config.databasePath);
   seed(writer, "2026-01-01", "MT", 20);
@@ -257,7 +257,7 @@ test("daily overview SQL feeds separate MT/ST metrics and excludes uncomputable 
   writer.close();
   const state = readCalculatedDashboard(config.databasePath, "2026-01-02");
   assert.deepEqual(state.widgets.filter((widget) => widget.id === "mt-oee-overview" || widget.id === "st-oee-overview").map((widget) => widget.data[0]), [
-    { overall_oee_percent: 40, avg_availability_percent: 100, avg_performance_percent: 50, avg_dut_on_percent: 50, avg_test_time_percent: 100, avg_yield_percent: 80 },
+    { overall_oee_percent: 80, avg_availability_percent: 100, avg_performance_percent: 100, avg_dut_on_percent: 100, avg_test_time_percent: 100, avg_yield_percent: 80 },
     { overall_oee_percent: 20, avg_availability_percent: 100, avg_performance_percent: 25, avg_dut_on_percent: 25, avg_test_time_percent: 100, avg_yield_percent: 80 },
   ]);
 });

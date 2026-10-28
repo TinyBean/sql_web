@@ -53,7 +53,7 @@ test("machine-day 1% trimming uses 199/200/400 samples and isolates machines, da
     closeTo(mt["raw_test_time_performance"], expected);
     closeTo(mt["test_time_performance"], expected);
     closeTo(mt["daily_test_oee"], .4 * expected);
-    closeTo(mt["daily_effective_oee"], .4 * expected);
+    closeTo(mt["daily_effective_oee"], .895 * .8 * expected);
     assert.equal(rows[1]!["trimmed_mean_test_seconds"], 30);
     assert.equal(rows[2]!["trimmed_mean_test_seconds"], 50);
     assert.equal(rows[1]!["test_time_performance"], 1);
@@ -78,7 +78,7 @@ test("machine-day Test Time caps only that factor and preserves independent null
   assert.equal(cap["dut_on"], 2);
   assert.equal(cap["final_yield"], .8);
   assert.equal(cap["daily_test_oee"], 1.6);
-  assert.equal(cap["daily_effective_oee"], 1.6);
+  assert.equal(cap["daily_effective_oee"], .895 * .8);
   assert.equal(rows.find((row) => row["machine"] === "LOW")!["test_time_performance"], .5);
 });
 
@@ -104,7 +104,8 @@ test("missing machine-day inputs and zero denominators remain null", (t) => {
   f.db.exec("UPDATE oee_dut_utilization SET dut_num='0' WHERE machine_id='ZERO-SOCKETS'");
   for (const row of f.rows(day)) {
     assert.equal(row["daily_test_oee"], null);
-    assert.equal(row["daily_effective_oee"], null);
+    if (row["machine"] === "ZERO-SOCKETS") closeTo(row["daily_effective_oee"], .895 * .8);
+    else assert.equal(row["daily_effective_oee"], null);
     if (["NO-TIME", "ZERO-TIME", "NO-TD", "NO-DUT"].includes(String(row["machine"]))) {
       assert.equal(row["raw_test_time_performance"], null);
       assert.equal(row["test_time_performance"], null);
@@ -153,7 +154,7 @@ test("machine-day joins require day, machine and type and preserve whole end-day
   assert.equal(mt["idle_no_wip"], .2);
   closeTo(mt["effective_availability"], .4 + .2 / 1.4);
   closeTo(mt["daily_test_oee"], .16);
-  closeTo(mt["daily_effective_oee"], (.4 + .2 / 1.4) * .4);
+  closeTo(mt["daily_effective_oee"], (.4 + .2 / 1.4) * .895 * .8);
   assert.equal(rows[1]!["trimmed_mean_test_seconds"], 30);
   assert.equal(rows[2]!["machine"], "B");
   assert.equal(rows[2]!["dut_rows"], null);

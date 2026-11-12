@@ -41,6 +41,27 @@ test("renders the full active branch after model context compaction", () => {
   ]);
 });
 
+test("upload markers attach only to their accepted user message and survive context compaction", () => {
+  const manager = SessionManager.inMemory();
+  const append = (message: TranscriptSourceMessage): string => manager.appendMessage(message as never);
+  const fileId = "11111111-1111-4111-8111-111111111111";
+  append({ role: "user", content: "旧消息", timestamp: 1 });
+  manager.appendCustomEntry("datalens_upload_attachment_v1", { fileId, userTimestamp: 2 });
+  append({ role: "user", content: "查看附件", timestamp: 2 });
+  append({ role: "assistant", content: "已查看", stopReason: "stop", timestamp: 3 });
+  const kept = append({ role: "user", content: "继续处理", timestamp: 4 });
+  manager.appendCompaction("已处理附件", kept, 40000);
+  // A crash between the marker and the user message must not bind a later request.
+  manager.appendCustomEntry("datalens_upload_attachment_v1", { fileId, userTimestamp: 5 });
+  append({ role: "user", content: "另一条消息", timestamp: 6 });
+  const transcript = serializeSessionTranscript({ sessionManager: manager });
+  assert.deepEqual(transcript.filter((message) => message.attachmentFileId), [
+    { id: "user-2", role: "user", text: "查看附件", timestamp: 2, attachmentFileId: fileId },
+  ]);
+  assert.equal(transcript.length, 5);
+  assert.ok(!JSON.stringify(manager.buildSessionContext()).includes("datalens_upload_attachment_v1"));
+});
+
 test("groups agent turns into one answer with an ordered persisted trace", () => {
   const messages: TranscriptSourceMessage[] = [
     { role: "user", content: [{ type: "text", text: "统计销售额" }], timestamp: 1 },

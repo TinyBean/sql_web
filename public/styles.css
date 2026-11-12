@@ -275,6 +275,8 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .message-text { color: #c9d7d0; font-size: 12px; line-height: 1.72; overflow-wrap: anywhere; }
 .message.user .message-body { justify-self: end; max-width: 86%; padding: 9px 12px; border: 1px solid #284038; border-radius: 11px 11px 3px 11px; background: #14261f; }
 .message.user .message-text { color: #e9f4ef; }
+.message-file a { color: var(--mint); overflow-wrap: anywhere; }
+.message-file a:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
 .message-error { margin-top: 9px; padding: 8px 10px; border: 1px solid rgb(255 123 135 / 24%); border-radius: 7px; color: #f5a3ab; background: rgb(255 123 135 / 7%); font-size: 10px; }
 
 .thoughts { margin-bottom: 9px; }
@@ -301,16 +303,23 @@ svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: 
 .markdown-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .markdown-content th, .markdown-content td { padding: 6px 8px; border: 1px solid var(--line); }
 
-.composer { position: relative; z-index: 8; display: grid; flex: 0 0 auto; grid-template-columns: 1fr 44px; align-items: center; height: 64px; padding: 8px 8px 8px 14px; background: #0d1915; }
+.composer { position: relative; z-index: 8; display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 64px; padding: 8px 8px 8px 14px; background: #0d1915; }
 .composer-status { display: none; }
 .composer textarea { min-width: 0; height: 40px; max-height: 110px; resize: none; padding: 10px 7px; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 12px; line-height: 20px; }
 .composer textarea::placeholder { color: #70857b; }
-.composer-actions { display: contents; }
+.composer-actions { display: flex; align-items: center; gap: 7px; }
 .composer-hint { display: none; }
+.upload-button { display: grid; place-items: center; flex: 0 0 auto; width: 39px; height: 39px; padding: 0; border: 1px solid var(--line-bright); border-radius: 10px; color: var(--muted); background: var(--surface-raised); cursor: pointer; }
+.upload-button:hover:not(:disabled) { border-color: var(--mint); color: var(--mint); background: var(--surface-strong); }
+.upload-button:disabled { opacity: .45; cursor: wait; }
+.upload-button svg { width: 18px; height: 18px; }
+.upload-spinner { display: none; }
+.upload-button[aria-busy="true"] .upload-icon { display: none; }
+.upload-button[aria-busy="true"] .upload-spinner { display: block; animation: spin 1s linear infinite; }
 .send-button { display: grid; place-items: center; width: 39px; height: 39px; border: 1px solid rgb(71 229 177 / 35%); border-radius: 10px; color: #07110d; background: var(--mint); cursor: pointer; }
 .send-button:hover { background: #68ebc0; }.send-button:disabled { opacity: .45; cursor: wait; }
 .send-button svg { width: 17px; }.stop-icon { display: none; fill: currentColor; stroke: none; }.send-button.streaming .send-icon { display: none; }.send-button.streaming .stop-icon { display: block; }
-.chat-dock.open .composer { grid-template-columns: 1fr 44px; height: 78px; padding: 8px 10px 10px 14px; border-top: 1px solid var(--line); }
+.chat-dock.open .composer { min-height: 78px; padding: 8px 10px 10px 14px; border-top: 1px solid var(--line); }
 .chat-dock.open .composer textarea { height: 54px; padding-top: 9px; }
 
 .composer-status { position: absolute; left: 16px; top: -23px; align-items: center; gap: 8px; color: var(--mint); font-size: 9px; }
@@ -342,3 +351,6 @@ kbd { padding: 1px 4px; border: 1px solid #334a41; border-radius: 3px; color: #8
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.pending-workbook { grid-column: 1 / -1; min-width: 0; padding: 0 7px 6px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.pending-workbook[hidden], .chat-dock:not(.open) .pending-workbook { display: none; }

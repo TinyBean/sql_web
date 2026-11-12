@@ -7,6 +7,7 @@ import type {
   MessageRequest,
   ParsedSseEvent,
   SerializedSession,
+  SessionFile,
   SessionSummary,
 } from "../shared/contracts.ts";
 import type { DashboardState, SessionDashboard } from "../shared/dashboard.ts";
@@ -15,6 +16,7 @@ import {
   decodeAbortResponse,
   decodeDeleteSessionResponse,
   decodeSerializedSession,
+  decodeSessionFile,
   decodeSessionsResponse,
   decodeSseEvent,
   errorMessageFromResponse,
@@ -76,6 +78,9 @@ const elements = {
   composer: requiredElement("#composer", HTMLFormElement),
   composerStatus: requiredElement("#composerStatus", HTMLElement),
   input: requiredElement("#questionInput", HTMLTextAreaElement),
+  uploadWorkbookButton: requiredElement("#uploadWorkbookButton", HTMLButtonElement),
+  workbookInput: requiredElement("#workbookInput", HTMLInputElement),
+  pendingWorkbook: requiredElement("#pendingWorkbook", HTMLElement),
   sendButton: requiredElement("#sendButton", HTMLButtonElement),
   toast: requiredElement("#toast", HTMLElement),
 };
@@ -110,6 +115,7 @@ interface ActiveStream {
   readonly node: StreamNode;
   dashboards: Map<string, DashboardState>;
   readonly requestDashboardId: string;
+  readonly requestFileId?: string;
   readonly pendingDashboardWidgetIds: Set<string>;
   readonly pendingDashboardToolIds: Map<string, { dashboardId: string; widgetIds: readonly string[] }>;
   aborting: boolean;
@@ -132,6 +138,18 @@ const dashboardRenderer = new DashboardRenderer(elements.dashboardGrid);
 let authGeneration = 0;
 let currentLogin: AuthResponse | null = null;
 let authExpiryTimer: number | undefined;
+const workbookFiles = new Map<string, readonly SessionFile[]>();
+const selectedWorkbooks = new Map<string, string>();
+const pendingWorkbooks = new Map<string, string>();
+interface WorkbookSubmission {
+  readonly fileId: string;
+  readonly message: string;
+  readonly attachment: StreamNode;
+  readonly user: StreamNode;
+  readonly assistant: StreamNode;
+}
+const workbookSubmissions = new Map<string, WorkbookSubmission>();
+let uploadingWorkbook = false;
 const pendingRequests = new Set<AbortController>();
 const streamReaders = new Set<ReadableStreamDefaultReader<Uint8Array>>();
 const forkRequests = new Map<string, Promise<SerializedSession>>();
@@ -149,6 +167,11 @@ function clearLogin(message = "请使用域账号登录"): void {
   for (const reader of streamReaders) void reader.cancel().catch(() => {});
   streamReaders.clear();
   forkRequests.clear();
+  workbookFiles.clear();
+  selectedWorkbooks.clear();
+  pendingWorkbooks.clear();
+  workbookSubmissions.clear();
+  uploadingWorkbook = false;
   state.activeStreams = new SessionStreamRegistry<ActiveStream>();
   state.sessions = [];
   state.dashboards.clear();
@@ -224,7 +247,7 @@ async function api<ResponseBody>(
   const controller = new AbortController();
   pendingRequests.add(controller);
   const headers = new Headers(options.headers);
-  if (options.body) headers.set("Content-Type", "application/json");
+  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   try {
     const response = await fetch(path, {
       ...options, headers,
@@ -385,7 +408,7 @@ function renderCurrentDashboard(): void {
 function renderSessions(): void {
   elements.sessionList.replaceChildren();
   const visibleSessions = state.sessions.filter((session) => (
-    session.messageCount > 0 || state.activeStreams.has(session.id)
+    session.messageCount > 0 || (session.fileCount ?? 0) > 0 || state.activeStreams.has(session.id)
   ));
   if (!visibleSessions.length) {
     const placeholder = document.createElement("div");
@@ -808,6 +831,10 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
     return;
   }
   for (const message of messages) {
+    if (message.role === "user" && message.attachmentFileId) {
+      const file = workbookFiles.get(state.sessionId ?? "")?.find((item) => item.id === message.attachmentFileId);
+      if (file) appendFileMessage(file, false);
+    }
     appendMessage(
       message.role,
       message.text,
@@ -816,6 +843,19 @@ function renderTranscript(messages: readonly ChatMessage[]): void {
       false,
     );
   }
+}
+
+function appendFileMessage(file: SessionFile, scrollToBottom = true): StreamNode {
+  const node = appendMessage("user", "", false, [], false);
+  node.article.classList.add("message-file");
+  node.article.dataset["fileId"] = file.id;
+  const link = document.createElement("a");
+  link.href = file.downloadUrl;
+  link.download = file.filename;
+  link.textContent = file.filename;
+  node.text.append(link);
+  if (scrollToBottom) scrollMessagesTo(elements.messages.scrollHeight);
+  return node;
 }
 
 const BOTTOM_THRESHOLD_PX = 4;
@@ -846,12 +886,89 @@ function selectedActiveStream(): ActiveStream | undefined {
   return state.activeStreams.get(state.sessionId);
 }
 
+function syncSessionWorkbooks(session: SerializedSession): void {
+  const files = session.files ?? [];
+  workbookFiles.set(session.id, files);
+  const latestUpload = files.findLast((file) => file.kind === "upload");
+  let selected = latestUpload?.id;
+  for (let depth = 0; selected && depth < files.length; depth++) {
+    const edited = files.findLast((file) => file.kind === "edit" && file.parentFileId === selected);
+    if (!edited) break;
+    selected = edited.id;
+  }
+  if (selected) selectedWorkbooks.set(session.id, selected);
+  else selectedWorkbooks.delete(session.id);
+
+  const attached = new Set(session.messages.map((message) => message.attachmentFileId));
+  if (latestUpload && !attached.has(latestUpload.id)) pendingWorkbooks.set(session.id, latestUpload.id);
+  else pendingWorkbooks.delete(session.id);
+
+  const submission = workbookSubmissions.get(session.id);
+  if (!submission) return;
+  if (attached.has(submission.fileId)) {
+    workbookSubmissions.delete(session.id);
+  } else if (!session.streaming) {
+    submission.attachment.article.remove();
+    submission.user.article.remove();
+    submission.assistant.article.remove();
+    workbookSubmissions.delete(session.id);
+    if (state.sessionId === session.id) {
+      if (!elements.input.value) elements.input.value = submission.message;
+      showToast("消息未发送，请重试");
+    }
+  }
+}
+
+function renderPendingWorkbook(): void {
+  const id = state.sessionId;
+  const files = id ? workbookFiles.get(id) ?? [] : [];
+  const pending = id ? pendingWorkbooks.get(id) : undefined;
+  const file = files.find((item) => item.id === pending);
+  elements.pendingWorkbook.hidden = !file || !!selectedActiveStream();
+  elements.pendingWorkbook.textContent = file ? `待发送：${file.filename}` : "";
+  elements.uploadWorkbookButton.setAttribute("aria-label", uploadingWorkbook ? "正在上传 Excel 文件" : "上传 Excel 文件");
+  elements.uploadWorkbookButton.setAttribute("aria-busy", String(uploadingWorkbook));
+  elements.uploadWorkbookButton.title = uploadingWorkbook ? "正在上传…" : "上传 Excel（仅 .xlsx）";
+  elements.uploadWorkbookButton.disabled = uploadingWorkbook || !!selectedActiveStream() || (!!id && workbookSubmissions.has(id));
+}
+
+async function uploadWorkbook(file: File): Promise<void> {
+  if (uploadingWorkbook) return;
+  if (!/\.xlsx$/iu.test(file.name)) throw new Error("仅支持普通 .xlsx 文件");
+  if (!file.size || file.size > 8 * 1024 * 1024) throw new Error("Excel 文件必须大于 0 且不超过 8 MiB");
+  const generation = authGeneration;
+  uploadingWorkbook = true;
+  syncComposerState();
+  try {
+    if (!state.sessionId) await createSession();
+    await ensurePrivateSession();
+    requireCurrentAccount(generation);
+    const id = state.sessionId;
+    if (!id || state.activeStreams.has(id)) throw new Error("请等待当前回答完成后再上传");
+    const result = await api(`/api/sessions/${encodeURIComponent(id)}/files`, decodeSessionFile, {
+      method: "POST", headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "X-Filename": encodeURIComponent(file.name) }, body: file,
+    });
+    workbookFiles.set(id, [...(workbookFiles.get(id) ?? []), result]);
+    selectedWorkbooks.set(id, result.id);
+    pendingWorkbooks.set(id, result.id);
+    state.sessions = state.sessions.map((item) => item.id === id ? { ...item, fileCount: workbookFiles.get(id)!.length } : item);
+    renderSessions();
+    if (state.sessionId === id) {
+      setChatOpen(true, true);
+      showToast("文件已上传，请填写文字后发送。");
+    }
+  } finally {
+    if (generation === authGeneration) { uploadingWorkbook = false; syncComposerState(); }
+  }
+}
+
 function syncComposerState(): void {
+  renderPendingWorkbook();
   const activeStream = selectedActiveStream();
   const streaming = activeStream !== undefined;
   elements.sendButton.classList.toggle("streaming", streaming);
   elements.sendButton.setAttribute("aria-label", streaming ? "停止回答" : "发送问题");
-  elements.sendButton.disabled = activeStream?.aborting ?? false;
+  elements.sendButton.disabled = uploadingWorkbook || (activeStream?.aborting ?? false);
   elements.input.readOnly = streaming;
   elements.newChatButton.disabled = false;
   elements.chatDock.classList.toggle("streaming", streaming);
@@ -882,6 +999,7 @@ function applyActiveStream(activeStream: ActiveStream): void {
 }
 
 function applySession(session: SerializedSession): void {
+  syncSessionWorkbooks(session);
   const activeStream = state.activeStreams.get(session.id);
   if (activeStream) {
     applyActiveStream(activeStream);
@@ -936,6 +1054,8 @@ async function ensurePrivateSession(): Promise<void> {
         if (positions) state.dashboardScrollPositions.set(session.id, new Map(positions));
         const selected = selectedDashboardId(id);
         if (selected && session.dashboards.some((item) => item.id === selected)) state.selectedDashboardIds.set(session.id, selected);
+        const workbook = selectedWorkbooks.get(id);
+        if (workbook && session.files?.some((file) => file.id === workbook)) selectedWorkbooks.set(session.id, workbook);
         applySession(session);
       }
       return session;
@@ -1013,6 +1133,10 @@ async function deleteSession(id: string): Promise<void> {
     state.dashboards.delete(id);
     state.dashboardOptions.delete(id);
     state.selectedDashboardIds.delete(id);
+    workbookFiles.delete(id);
+    selectedWorkbooks.delete(id);
+    pendingWorkbooks.delete(id);
+    workbookSubmissions.delete(id);
     if (deletedCurrentSession) {
       clearSessionView();
       const nextSession = state.sessions[0];
@@ -1159,7 +1283,7 @@ async function streamQuestion(
     const response = await fetch(`/api/sessions/${encodeURIComponent(activeStream.sessionId)}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, dashboardId: activeStream.requestDashboardId } satisfies MessageRequest),
+      body: JSON.stringify({ message, dashboardId: activeStream.requestDashboardId, ...(activeStream.requestFileId ? { fileId: activeStream.requestFileId } : {}) } satisfies MessageRequest),
       signal: controller.signal,
     });
     if (generation !== authGeneration) throw new Error("登录账号已切换");
@@ -1196,6 +1320,7 @@ async function streamQuestion(
 }
 
 async function submitQuestion(question: string): Promise<void> {
+  if (uploadingWorkbook) return;
   const generation = authGeneration;
   const message = question.trim();
   if (!message) return;
@@ -1204,19 +1329,31 @@ async function submitQuestion(question: string): Promise<void> {
   if (generation !== authGeneration) return;
   const sessionId = state.sessionId;
   if (!sessionId) throw new Error("尚未创建会话");
+  if (workbookSubmissions.has(sessionId)) {
+    syncSessionWorkbooks(await api(`/api/sessions/${encodeURIComponent(sessionId)}`, decodeSerializedSession));
+    syncComposerState();
+    if (workbookSubmissions.has(sessionId)) throw new Error("上次发送状态尚未确认，请稍后重试");
+    if (state.sessionId !== sessionId) return;
+  }
   if (state.activeStreams.has(sessionId)) return;
   if (generation !== authGeneration) return;
-  elements.input.value = "";
-  appendMessage("user", message);
-  const streamNode = appendMessage("assistant", "", true);
   const dashboard = getDashboard(sessionId);
   if (!dashboard) throw new Error("当前会话看板尚未加载");
+  const file = workbookFiles.get(sessionId)?.find((item) => item.id === pendingWorkbooks.get(sessionId));
+  const requestFileId = file?.id ?? selectedWorkbooks.get(sessionId);
+  elements.input.value = "";
+  const attachment = file ? appendFileMessage(file) : undefined;
+  const user = appendMessage("user", message);
+  const streamNode = appendMessage("assistant", "", true);
+  pendingWorkbooks.delete(sessionId);
+  if (file && attachment) workbookSubmissions.set(sessionId, { fileId: file.id, message, attachment, user, assistant: streamNode });
   const activeStream: ActiveStream = {
     sessionId,
     transcript: ensureMessageStream(),
     node: streamNode,
     dashboards: new Map(state.dashboards.get(sessionId)),
     requestDashboardId: selectedDashboardId(sessionId)!,
+    ...(requestFileId ? { requestFileId } : {}),
     pendingDashboardWidgetIds: new Set<string>(),
     pendingDashboardToolIds: new Map(),
     aborting: false,
@@ -1230,6 +1367,7 @@ async function submitQuestion(question: string): Promise<void> {
   try {
     const completed = await streamQuestion(message, activeStream);
     if (completed) {
+      syncSessionWorkbooks(completed);
       for (const item of completed.dashboards) {
         const previous = activeStream.dashboards.get(item.id);
         if (previous && item.state.revision >= previous.revision) {
@@ -1257,6 +1395,15 @@ async function submitQuestion(question: string): Promise<void> {
     );
   } finally {
     if (generation === authGeneration) {
+      if (workbookSubmissions.has(sessionId)) {
+        try {
+          const session = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, decodeSerializedSession);
+          syncSessionWorkbooks(session);
+        } catch (error) {
+          if (generation === authGeneration) showToast(`暂时无法确认发送状态，请稍后重试：${messageFromUnknown(error)}`);
+        }
+      }
+      if (generation !== authGeneration) return;
       state.activeStreams.finish(activeStream);
       renderSessions();
       syncComposerState();
@@ -1306,6 +1453,12 @@ async function initialize(): Promise<void> {
     showToast(`初始化失败:${messageFromUnknown(error)}`);
   }
 }
+elements.uploadWorkbookButton.addEventListener("click", () => elements.workbookInput.click());
+elements.workbookInput.addEventListener("change", () => {
+  const file = elements.workbookInput.files?.[0];
+  elements.workbookInput.value = "";
+  if (file) void uploadWorkbook(file).catch((error) => showToast(messageFromUnknown(error)));
+});
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   if (selectedActiveStream()) void abortAnswer();

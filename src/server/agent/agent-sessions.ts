@@ -14,7 +14,9 @@ import type {
   AgentSession,
   AgentSessionEvent,
   ResourceLoader,
+  InlineExtension,
   SessionInfo,
+  SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
   isAgentToolName,
@@ -37,6 +39,8 @@ import type { EmailConfig } from "../dashboard/email.ts";
 import { SessionDashboardStore, type InitialDashboardProvider } from "./session-dashboard.ts";
 import { assertModelInLocalCatalog } from "./local-model-catalog.ts";
 import { oeeSkillSessionOptions } from "./oee-skill-runtime.ts";
+import { createWorkbookContextExtension } from "./xlsx-context.ts";
+import { createExcelSkillContext, validateUploadedWorkbook, saveUploadedWorkbook } from "./xlsx-skill-runtime.ts";
 import { createDashboardContextExtension } from "./dashboard-context.ts";
 import type { AppLogger } from "../logger.ts";
 import {
@@ -53,6 +57,7 @@ import { SubagentRunner, SUBAGENT_TOOL_NAME, SUBAGENT_AGENT_RULES } from "./suba
 
 const MAX_PROMPT_LENGTH = 4_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
+const UPLOAD_ATTACHMENT_ENTRY = "datalens_upload_attachment_v1";
 
 export interface AgentSessionStoreOptions {
   readonly sharedDashboardPath?: string;
@@ -87,6 +92,7 @@ type AgentProcessLogger = Pick<AppLogger, "info" | "warn" | "error">;
 
 export interface TranscriptSourceMessage {
   readonly role: string;
+  readonly attachmentFileId?: string;
   readonly content?: unknown;
   readonly timestamp?: number;
   readonly errorMessage?: string;
@@ -131,6 +137,7 @@ async function createLockedResourceLoader(
   logger: AgentProcessLogger,
   dashboard: SessionDashboardStore,
   skillOptions: import("./skill-catalog.ts").SkillSessionOptions,
+  workbookExtension?: InlineExtension,
 ): Promise<ResourceLoader> {
   const loader = new DefaultResourceLoader({
     cwd,
@@ -144,6 +151,7 @@ async function createLockedResourceLoader(
     systemPrompt,
     extensionFactories: [
       skillCatalog.createSessionExtension(cwd, skillOptions),
+      ...(workbookExtension ? [workbookExtension] : []),
       createDashboardContextExtension(dashboard, logger),
     ],
     skillsOverride: () => skillCatalog.resources,
@@ -292,6 +300,7 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
         id: `user-${transcript.length + 1}`,
         role: "user",
         text,
+        ...(message.attachmentFileId ? { attachmentFileId: message.attachmentFileId } : {}),
         ...(message.timestamp === undefined ? {} : { timestamp: message.timestamp }),
       });
       response = newResponseAccumulator();
@@ -351,9 +360,27 @@ export function serializeMessages(messages: readonly TranscriptSourceMessage[]):
 export function serializeSessionTranscript(
   session: Pick<AgentSession, "sessionManager">,
 ): ChatMessage[] {
-  const branchMessages = session.sessionManager.getBranch()
-    .flatMap(sessionEntryToContextMessages);
-  return serializeMessages(branchMessages);
+  return serializeSessionBranch(session.sessionManager.getBranch());
+}
+
+function serializeSessionBranch(branch: readonly SessionEntry[]): ChatMessage[] {
+  const attachments = new Map<string, { fileId: string; userTimestamp: number }>();
+  for (const entry of branch) {
+    if (entry.type !== "custom" || entry.customType !== UPLOAD_ATTACHMENT_ENTRY) continue;
+    const data: unknown = entry.data;
+    if (data && typeof data === "object" && "fileId" in data && typeof data.fileId === "string" &&
+        /^[0-9a-f-]{36}$/u.test(data.fileId) && "userTimestamp" in data && typeof data.userTimestamp === "number") {
+      attachments.set(entry.id, { fileId: data.fileId, userTimestamp: data.userTimestamp });
+    }
+  }
+  return serializeMessages(branch.flatMap((entry) => {
+    const attachment = entry.parentId ? attachments.get(entry.parentId) : undefined;
+    return sessionEntryToContextMessages(entry).map((message) => (
+      entry.type === "message" && message.role === "user" && attachment && message.timestamp === attachment.userTimestamp
+        ? { ...message, attachmentFileId: attachment.fileId }
+        : message
+    ));
+  }));
 }
 
 function sessionTitle(session: AgentSession): string {
@@ -463,6 +490,7 @@ function codeInterpreterLogFields(
 }
 
 export class AgentSessionStore {
+  readonly #selectedWorkbooks = new Map<string, string>();
   readonly #owners = new Map<string, SessionOwner>();
   readonly #dashboardForAccount: (account: string) => readonly string[];
   readonly #dashboardTitle: (dashboardId: string) => string;
@@ -573,7 +601,7 @@ export class AgentSessionStore {
             if (record.header.id !== summary.id || (record.owner && record.owner.account !== account)) continue;
             const cachedOwner = this.#owners.get(summary.id);
             if (cachedOwner && !sameSessionOwner(record.owner, cachedOwner)) continue;
-            items.push({ ...summary, ownerAccount: record.owner?.account ?? null,
+            items.push({ ...summary, fileCount: this.#artifacts.forSession(summary.id).exportFiles().list().length, ownerAccount: record.owner?.account ?? null,
               readOnly: record.owner === null, dashboardIds: record.owner?.dashboardIds ?? this.#dashboard.listOrPreview(summary.id).map((item) => item.id) });
           } catch { /* Invalid private files must never degrade into shared history. */ }
         }
@@ -585,18 +613,42 @@ export class AgentSessionStore {
         const { record } = await readable(id);
         if (record.owner) return this.getSerialized(id);
         const branch = sessionBranch(record.entries);
-        const messages = serializeMessages(branch.flatMap(sessionEntryToContextMessages));
+        const messages = serializeSessionBranch(branch);
         const name = record.entries.filter((entry) => entry.type === "session_info").at(-1);
         const dashboards = this.#dashboard.listOrPreview(id);
         return {
           id, ownerAccount: null, readOnly: true, dashboardIds: dashboards.map((item) => item.id),
           title: (name?.type === "session_info" ? name.name : messages.find((message) => message.role === "user")?.text.slice(0, 80)) || "新会话",
           model: null, tools: [...this.#toolNames], streaming: false, messages,
-          dashboards,
+          dashboards, files: this.#artifacts.forSession(id).exportFiles().list(),
         };
       },
       delete: async (id) => { await writable(id); return this.delete(id); },
-      prompt: async (id, text, requestId, dashboardId) => { await writable(id); return this.prompt(id, text, requestId, dashboardId); },
+      openExportFile: async (id, fileId) => {
+        await readable(id);
+        return this.#artifacts.forSession(id).exportFiles().open(fileId);
+      },
+      uploadWorkbook: async (id, filename, bytes, signal) => {
+        const startedAt = Date.now();
+        await writable(id);
+        const session = await this.get(id);
+        if (session.isStreaming) throw new SessionBusyError();
+        const combined = AbortSignal.any([this.#shutdown.signal, ...(signal ? [signal] : [])]);
+        try {
+          await validateUploadedWorkbook(this.#codeInterpreter, filename, bytes, combined);
+          await writable(id);
+          combined.throwIfAborted();
+          if (session.isStreaming) throw new SessionBusyError();
+          const file = saveUploadedWorkbook(this.#artifacts.forSession(id), filename, bytes, combined);
+          if (!session.sessionName || session.sessionName === "新会话") session.setSessionName(file.filename);
+          this.#logger.info("xlsx.upload.completed", { sessionId: id, fileId: file.id, byteCount: file.byteCount, durationMs: Date.now() - startedAt });
+          return file;
+        } catch (error) {
+          this.#logger.error("xlsx.upload.failed", error, { sessionId: id, durationMs: Date.now() - startedAt });
+          throw error;
+        }
+      },
+      prompt: async (id, text, requestId, dashboardId, fileId) => { await writable(id); return this.prompt(id, text, requestId, dashboardId, fileId); },
       abort: async (id) => { await writable(id); return this.abort(id); },
       fork: async (id) => {
         const { info, record } = await readable(id);
@@ -638,7 +690,9 @@ export class AgentSessionStore {
           // Rebind historical tool artifact references as well as snapshot manifests.
           const sourceFile = manager.getSessionFile()!;
           writeFileSync(sourceFile, readFileSync(sourceFile, "utf8")
-            .replaceAll(`artifact://${id}/`, `artifact://${newId}/`).replaceAll(sourceRoot + "/", targetRoot + "/"));
+            .replaceAll(`artifact://${id}/`, `artifact://${newId}/`)
+            .replaceAll(`/api/sessions/${id}/files/`, `/api/sessions/${newId}/files/`)
+            .replaceAll(sourceRoot + "/", targetRoot + "/"));
           const rebound = SessionManager.open(sourceFile, temporary, this.#cwd);
           this.#ensureDashboardMarker(rebound);
           rebound.appendCustomEntry(OWNER_ENTRY, owner);
@@ -820,17 +874,32 @@ export class AgentSessionStore {
     });
   }
 
-  async prompt(id: string, text: string, requestId?: string, dashboardId?: string): Promise<void> {
+  async prompt(id: string, text: string, requestId?: string, dashboardId?: string, fileId?: string): Promise<void> {
     validatePromptText(text);
     const session = await this.get(id);
     if (session.isStreaming) throw new SessionBusyError();
     if (!session.sessionName || session.sessionName === "新会话") {
       session.setSessionName(shortTitle(text));
     }
+    let attachmentFileId: string | undefined;
+    if (fileId) {
+      const { metadata } = this.#artifacts.forSession(id).exportFiles().read(fileId);
+      if (metadata.kind === "upload" && !serializeSessionTranscript(session).some((message) => message.attachmentFileId === fileId)) {
+        attachmentFileId = fileId;
+      }
+      this.#selectedWorkbooks.set(id, fileId);
+    } else this.#selectedWorkbooks.delete(id);
     const selected = dashboardId ?? this.#dashboard.activeDashboardId(id);
     this.#dashboard.setActiveDashboard(id, selected);
+    const unsubscribe = attachmentFileId ? session.subscribe((event) => {
+      if (event.type !== "message_end" || event.message.role !== "user" || !attachmentFileId) return;
+      // AgentSession persists the user message immediately after notifying listeners.
+      // Its direct parent is this marker; an orphan marker never attaches to a later turn.
+      session.sessionManager.appendCustomEntry(UPLOAD_ATTACHMENT_ENTRY, { fileId: attachmentFileId, userTimestamp: event.message.timestamp });
+      attachmentFileId = undefined;
+    }) : undefined;
     try { await this.#promptSession(session, text, requestId); }
-    finally { this.#dashboard.clearActiveDashboard(id); }
+    finally { unsubscribe?.(); this.#dashboard.clearActiveDashboard(id); this.#selectedWorkbooks.delete(id); }
   }
 
   async complete(text: string, options: ChatCompletionOptions = {}): Promise<string> {
@@ -864,7 +933,7 @@ export class AgentSessionStore {
     signal.addEventListener("abort", abort, { once: true });
     try {
       this.#ensureDashboardMarker(manager);
-      session = await this.#createPiSession(manager, signal, API_CHAT_AGENT_RULES);
+      session = await this.#createPiSession(manager, signal, API_CHAT_AGENT_RULES, false);
       signal.throwIfAborted();
       // Capture the current default dashboard before the first model request.
       this.#dashboard.loadOrPreview(id);
@@ -961,6 +1030,7 @@ export class AgentSessionStore {
       readOnly: !this.#owners.has(session.sessionId),
       dashboardIds: this.#owners.get(session.sessionId)?.dashboardIds ?? ["default"],
       id: session.sessionId,
+      files: this.#artifacts.forSession(session.sessionId).exportFiles().list(),
       title: sessionTitle(session),
       model: session.model
         ? { provider: session.model.provider, id: session.model.id, name: session.model.name }
@@ -1009,6 +1079,7 @@ export class AgentSessionStore {
     sessionManager: SessionManager,
     signal?: AbortSignal,
     additionalInstructions = "",
+    enableExcelExport = true,
   ): Promise<AgentSession> {
     const settingsManager = SettingsManager.create(this.#cwd, this.#agentDir, { projectTrusted: false });
     const model = this.#modelRuntime.getModel(this.#model.provider, this.#model.model);
@@ -1019,6 +1090,10 @@ export class AgentSessionStore {
     }
 
     const artifacts = this.#artifacts.forSession(sessionManager.getSessionId());
+    const oeeOptions = oeeSkillSessionOptions(this.#database, artifacts);
+    const skillOptions = { ...oeeOptions, contexts: { ...oeeOptions.contexts,
+      ...(enableExcelExport ? { xlsx: createExcelSkillContext(artifacts, this.#codeInterpreter, this.#logger) } : {}),
+    } };
     const dataReadPolicy = sessionDataReadPolicy({ cwd: this.#cwd, artifactDir: this.#artifacts.rootDir,
       sessionId: sessionManager.getSessionId(), ...(this.#sharedDashboardPath ? { defaultDashboardPath: this.#sharedDashboardPath } : {}) });
     let parent: AgentSession;
@@ -1060,7 +1135,8 @@ export class AgentSessionStore {
         settingsManager,
         this.#logger,
         this.#dashboard,
-        { ...oeeSkillSessionOptions(this.#database, artifacts), readDataDirectory: true, dataReadPolicy },
+        { ...skillOptions, readDataDirectory: true, dataReadPolicy },
+        enableExcelExport ? createWorkbookContextExtension(artifacts.exportFiles(), () => this.#selectedWorkbooks.get(sessionManager.getSessionId())) : undefined,
       );
       ({ session } = await createAgentSession({
         cwd: this.#cwd,

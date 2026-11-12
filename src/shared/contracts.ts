@@ -35,6 +35,7 @@ export interface ChatMessage {
   readonly id: string;
   readonly role: ChatRole;
   readonly text: string;
+  readonly attachmentFileId?: string;
   readonly timestamp?: number;
   readonly trace?: readonly ChatTraceItem[];
 }
@@ -58,6 +59,7 @@ export interface AuthResponse {
 }
 
 export interface SerializedSession extends SessionAccess {
+  readonly files?: readonly SessionFile[];
   readonly id: string;
   readonly title: string;
   readonly model: ModelDescriptor | null;
@@ -67,7 +69,19 @@ export interface SerializedSession extends SessionAccess {
   readonly messages: readonly ChatMessage[];
 }
 
+export interface SessionFile {
+  readonly id: string;
+  readonly filename: string;
+  readonly byteCount: number;
+  readonly createdAt: string;
+  readonly kind: "upload" | "edit" | "export";
+  readonly downloadUrl: string;
+  readonly parentFileId?: string;
+  readonly summary?: string;
+}
+
 export interface SessionSummary extends SessionAccess {
+  readonly fileCount?: number;
   readonly id: string;
   readonly title: string;
   readonly createdAt: string;
@@ -122,6 +136,7 @@ export interface SessionsResponse {
 export interface MessageRequest {
   readonly message: string;
   readonly dashboardId: string;
+  readonly fileId?: string;
 }
 
 export interface ChatCompletionRequest {
@@ -171,6 +186,7 @@ export type ParsedSseEvent = {
 }[keyof SseEventMap];
 
 export type JsonResponseBody =
+  | SessionFile
   | AuthResponse
   | AbortResponse
   | ChatCompletionResponse

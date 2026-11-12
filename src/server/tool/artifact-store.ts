@@ -15,6 +15,7 @@ import {
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { SessionExportFiles } from "./export-files.ts";
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 const ARTIFACT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/u;
@@ -159,6 +160,11 @@ export class SessionArtifactStore {
   /** Shares reads with the parent, but all writes use a private task namespace. */
   scoped(namespace: string): SessionArtifactStore {
     return new SessionArtifactStore(this.#rootDir, this.#sessionId, namespace);
+  }
+
+  exportFiles(): SessionExportFiles {
+    if (this.#namespace !== undefined) throw new ArtifactInputError("子任务不能发布导出文件");
+    return new SessionExportFiles(this.#rootDir, this.#sessionId);
   }
 
   snapshotName(requestedName: string): string {

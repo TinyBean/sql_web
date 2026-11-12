@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import http from "node:http";
@@ -22,6 +23,7 @@ import type {
   SchemaObject,
   SerializedSession,
   SessionSummary,
+  SessionFile,
   SessionsResponse,
   SseEventMap,
 } from "../shared/contracts.ts";
@@ -34,6 +36,8 @@ import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
 import { DashboardInputError } from "./agent/session-dashboard.ts";
 import { DASHBOARD_ID_PATTERN } from "../shared/dashboard.ts";
 import { Authentication, AuthError } from "./auth.ts";
+import { ExportFileNotFoundError, MAX_EXCEL_BYTES, XLSX_CONTENT_TYPE, type OpenExportFile } from "./tool/export-files.ts";
+import { CodeInterpreterError } from "./tool/code-interpreter.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
 type StaticFileRoot = "public" | "vendor";
@@ -80,13 +84,15 @@ export interface WebSessionPort {
   get(id: string): Promise<StreamableAgentSession>;
   getSerialized(id: string): Promise<SerializedSession>;
   delete(id: string): Promise<void>;
-  prompt(id: string, text: string, requestId?: string, dashboardId?: string): Promise<void>;
+  prompt(id: string, text: string, requestId?: string, dashboardId?: string, fileId?: string): Promise<void>;
   complete(text: string, options?: ChatCompletionOptions): Promise<string>;
   abort(id: string): Promise<void>;
 }
 
 export interface ScopedSessionPort extends Omit<WebSessionPort, "forAccount" | "status" | "complete"> {
   fork(id: string): Promise<SerializedSession>;
+  uploadWorkbook(id: string, filename: string, bytes: Buffer, signal?: AbortSignal): Promise<SessionFile>;
+  openExportFile(id: string, fileId: string): Promise<OpenExportFile>;
 }
 
 export interface WebDatabasePort {
@@ -172,7 +178,9 @@ function requireMessageRequest(value: unknown): MessageRequest {
   if (!("dashboardId" in value) || typeof value.dashboardId !== "string" || !DASHBOARD_ID_PATTERN.test(value.dashboardId)) {
     throw new HttpError("dashboardId 必须是合法的看板 ID", 400);
   }
-  return { message: value.message, dashboardId: value.dashboardId };
+  const fileId = "fileId" in value ? value.fileId : undefined;
+  if (fileId !== undefined && (typeof fileId !== "string" || !/^[0-9a-f-]{36}$/u.test(fileId))) throw new HttpError("fileId 无效", 400);
+  return { message: value.message, dashboardId: value.dashboardId, ...(typeof fileId === "string" ? { fileId } : {}) };
 }
 
 function requireChatCompletionRequest(value: unknown): ChatCompletionRequest {
@@ -341,10 +349,11 @@ function errorStatus(error: unknown): number {
   if (error instanceof AuthError) return error.statusCode;
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof SessionNotFoundError) return 404;
+  if (error instanceof ExportFileNotFoundError) return 404;
   if (error instanceof SessionBusyError) return 409;
   if (
     error instanceof TypeError || error instanceof DatabaseInputError ||
-    error instanceof DashboardInputError
+    error instanceof DashboardInputError || error instanceof CodeInterpreterError
   ) return 400;
   return 500;
 }
@@ -379,6 +388,8 @@ function decodeSessionId(match: RegExpExecArray): string {
 }
 
 function requestRoute(pathname: string): string {
+  if (/^\/api\/sessions\/[^/]+\/files$/u.test(pathname)) return "/api/sessions/:id/files";
+  if (/^\/api\/sessions\/[^/]+\/files\/[^/]+$/u.test(pathname)) return "/api/sessions/:id/files/:fileId";
   if (/^\/api\/sessions\/[^/]+\/fork$/u.test(pathname)) return "/api/sessions/:id/fork";
   if (/^\/api\/sessions\/[^/]+\/messages$/u.test(pathname)) return "/api/sessions/:id/messages";
   if (/^\/api\/sessions\/[^/]+\/abort$/u.test(pathname)) return "/api/sessions/:id/abort";
@@ -492,6 +503,54 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         return;
       }
 
+      const uploadMatch = /^\/api\/sessions\/([^/]+)\/files$/u.exec(url.pathname);
+      if (request.method === "POST" && uploadMatch) {
+        const id = decodeSessionId(uploadMatch);
+        const session = await accountSessions!.get(id);
+        if (session.isStreaming) throw new SessionBusyError();
+        if (![XLSX_CONTENT_TYPE, "application/octet-stream"].includes(request.headers["content-type"] ?? "")) throw new HttpError("请上传 XLSX 二进制文件", 415);
+        const rawFilename = request.headers["x-filename"];
+        if (typeof rawFilename !== "string") throw new HttpError("缺少文件名", 400);
+        let filename: string;
+        try { filename = decodeURIComponent(rawFilename); } catch { throw new HttpError("文件名编码无效", 400); }
+        if (!/\.xlsx$/iu.test(filename) || filename.length > 200) throw new HttpError("仅支持普通 .xlsx 文件", 400);
+        const chunks: Buffer[] = [];
+        let size = 0;
+        if (Number(request.headers["content-length"]) > MAX_EXCEL_BYTES) {
+          request.resume(); throw new HttpError("Excel 文件超过 8 MiB 上限", 413);
+        }
+        const abort = new AbortController();
+        const onClose = (): void => { if (!response.writableEnded) abort.abort(); };
+        response.on("close", onClose);
+        try {
+          for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+            size += chunk.length;
+            if (size > MAX_EXCEL_BYTES) { request.resume(); throw new HttpError("Excel 文件超过 8 MiB 上限", 413); }
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          }
+          const file = await accountSessions!.uploadWorkbook(id, filename, Buffer.concat(chunks), abort.signal);
+          json(response, 201, file);
+        } finally { response.off("close", onClose); }
+        return;
+      }
+
+      const fileMatch = /^\/api\/sessions\/([^/]+)\/files\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === "GET" && fileMatch) {
+        let fileId: string;
+        try { fileId = decodeURIComponent(fileMatch[2]!); }
+        catch { throw new ExportFileNotFoundError(); }
+        const file = await accountSessions!.openExportFile(decodeSessionId(fileMatch), fileId);
+        const stream = createReadStream("", { fd: file.fd, autoClose: true });
+        try {
+          response.writeHead(200, { ...securityHeaders(XLSX_CONTENT_TYPE),
+            "Content-Length": file.metadata.byteCount,
+            "Content-Disposition": `attachment; filename="OEE-export.xlsx"; filename*=UTF-8''${encodeURIComponent(file.metadata.filename).replace(/['()*]/gu, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+          });
+          await pipeline(stream, response);
+        } finally { stream.destroy(); }
+        return;
+      }
+
       const forkMatch = /^\/api\/sessions\/([^/]+)\/fork$/u.exec(url.pathname);
       if (request.method === "POST" && forkMatch) {
         await readJson(request);
@@ -527,7 +586,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         response.flushHeaders();
         const unsubscribe = session.subscribe(createAgentEventStreamer(response));
         try {
-          await accountSessions!.prompt(id, body.message, requestId, body.dashboardId);
+          await accountSessions!.prompt(id, body.message, requestId, body.dashboardId, body.fileId);
           writeSse(response, "done", await accountSessions!.getSerialized(id));
         } catch (error) {
           requestLogger.error("http.agent_prompt.failed", error, { sessionId: id });

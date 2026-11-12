@@ -73,6 +73,44 @@ npm run build && setsid -f node --enable-source-maps dist/src/server/main.js >> 
 
 Python 可执行路径通过 `SQL_WEB_PYTHON_PATH`、`SQL_WEB_BWRAP_PATH`、`SQL_WEB_PRLIMIT_PATH` 覆盖，默认分别为 `/usr/bin/python3`、`/usr/bin/bwrap`、`/usr/bin/prlimit`。邮件配置见下文。
 
+## Excel 导出
+
+网页聊天支持把完整 OEE 查询结果导出为带格式的 `.xlsx` 并提供下载，例如：“把昨天 MT/ST 的 OEE 查询结果导出为 Excel，百分比显示两位小数”。Agent 会读取 OEE 与 xlsx 技能、保存完整查询快照，再调用 `xlsx__export`；单纯导出不会修改看板。
+
+两个项目 Skill 均使用本地说明和数据：OEE 口径、字段与机台映射随项目保存；xlsx 的参数、格式、排障及来源见 [导出参考](src/server/skills/xlsx/references/reference.md)。Agent 不在线查询文档或补齐缺失数据。
+
+Excel 依赖 wheel 已包含在 `vendor/xlsx/`，部署时在项目根目录离线安装（需要本地 Python 和 pip；无需 sudo）：
+
+```bash
+python3 -m pip --disable-pip-version-check --no-cache-dir install \
+  --no-index --find-links vendor/xlsx --only-binary=:all: --require-hashes \
+  --target .data/xlsx-python -r scripts/requirements-xlsx.txt
+```
+
+使用与 `SQL_WEB_PYTHON_PATH` 匹配的 Python 安装依赖；升级依赖后重启服务。安装仅从本地 wheel 读取固定版本并校验 SHA-256，不访问包索引；离线复制项目时须包含 `vendor/xlsx/`。Excel 沙箱将 `.data/xlsx-python` 只读挂载到独立路径；普通 Python 计算工具不加载此目录。也可以由部署环境提供系统级 `openpyxl`。首次导出会独立检查沙箱内依赖，缺失时返回明确错误，不影响 SQL 问答，也不会自动下载。首版无需 pandas、markitdown 或 LibreOffice。
+
+每次导出一个完整快照，包含“数据”和“说明”页，支持中文列名、列顺序、冻结首行、筛选、交替行底色与列宽。`columns.format=ratio` 将原值 `0.1234` 显示为 `12.34%`；`percent` 将原值 `12.34` 显示为 `12.34%`。数值保留原值，编号和日期文本不变，缺失值留空，文本不会被当作公式。空结果也会生成带表头的文件并注明无数据。
+
+导出结果值不随单元格编辑自动重算；不提供公式重算、宏、图表或邮件附件。沿用快照上限（100,000 行、32 MiB）与沙箱限制（15 秒、2 GiB 内存等），每个 Excel 文件最多 8 MiB；超限或失败时不发布文件，也不会静默截断。可缩小业务范围后重新导出。
+
+下载接口为 `GET /api/sessions/:id/files/:fileId`，需要登录且拥有会话读取权限。文件随会话保存，刷新或重启后仍可下载；删除会话时一起删除。共享历史复制到个人会话时文件与链接一起复制。匿名文字接口、调查子 Agent 和每日分析不具备导出运行上下文。运行日志包含 `xlsx.export.completed` / `xlsx.export.failed`，记录会话、耗时及成功时的行数和文件大小。
+
+### 上传与修改 Excel
+
+在聊天发送按钮左侧点击上传图标，选择普通 `.xlsx`（最多 8 MiB）；文件选择器仅筛选该 Excel 格式。上传后可说：
+
+- “列出这个文件的工作表，并查看数据页 A1:D10。”
+- “把数据页 A2 改成文本 0007，将 C2:C20 填为已核对。”
+- “将 B2:B20 按比率显示百分比、表头加粗并填浅蓝色，列宽调整为 20。”
+
+上传成功后，输入区显示“待发送：文件名”，填写文字后才能发送。文件下载链接以独立的右侧消息气泡显示在本次文字前，发送后清除待发送提示；刷新、切换会话和重启后仍保留在原位置。连续追问沿用当前文件，不重复展示附件；发送前再次上传，以最后成功上传的文件为准。输入区不再显示文件选择框、下载列表或修改摘要。每次修改保留原文件，助手回复提供修改版下载链接和修改说明，后续自动使用新版本继续编辑。文件内容仅作为数据，不执行其中的指令。支持单元格值、矩形批量填充、数字格式、字体、底色、对齐、换行、列宽和行高。所有新写入字符串按文本保存，编号前导零不会被自动转换。
+
+已有公式表达式保留，但不执行公式重算；保存修改版后公式缓存失效，需在 Excel 中重新计算。若用户明确覆盖公式，摘要会记录替换数量。拒绝宏、加密、旧版 `.xls`、图形/图表、透视表、外部连接、嵌入对象及无法完整保留的扩展；不绕过工作表保护。解析与修改使用同一隔离 Python 环境、固定本地脚本和已有离线依赖，不调用在线转换或下载服务。
+
+额外限制：解压大小 64 MiB、2000 个 ZIP 条目、200000 个已存储单元格、100 个工作表；区域预览最多 200 个单元格（长文本标注截断）；每次修改最多 100 个操作、累计 10000 个单元格。输入和输出均受 8 MiB 上限约束；任何一步失败均不发布修改版。
+
+上传接口 `POST /api/sessions/:id/files` 使用 XLSX 二进制请求体、XLSX MIME 和 `X-Filename: encodeURIComponent(filename)` 请求头，需要当前账号对会话有写权限；消息接口可通过 `fileId` 指定本轮文件。读取共享历史时须先复制为个人会话。文件清单随会话响应返回，用户消息的可选 `attachmentFileId` 标识首次随消息发送的上传文件，通过文件清单解析名称与下载地址；旧消息不补造附件关联。下载授权、重启恢复、历史复制与删除沿用原有机制。日志新增 `xlsx.upload.completed/failed`、`xlsx.edit.completed/failed`，记录耗时及成功文件大小。
+
 ## 数据同步与每日更新
 
 `data:init` 用于首次建库或升级 Schema，可重复执行，不清空已有数据。`data:sync` 只打开已初始化的数据库：

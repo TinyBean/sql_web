@@ -52,6 +52,11 @@ export function renderMarkdownInto(
     const template = element.ownerDocument.createElement("template");
     template.innerHTML = String(DOMPurify.sanitize(parsed, SANITIZE_OPTIONS));
     for (const link of template.content.querySelectorAll("a")) {
+      if (/^\/api\/sessions\/[A-Za-z0-9-]{8,100}\/files\/[0-9a-f-]{36}$/u.test(link.getAttribute("href") ?? "")) {
+        link.removeAttribute("target");
+        link.setAttribute("download", "");
+        continue;
+      }
       link.target = "_blank";
       link.rel = "noopener noreferrer";
     }

@@ -61,6 +61,7 @@ test("tabs preserve independent viewport positions, isolate background updates, 
   expose("history", { replaceState(_state: unknown, _title: string, url: string) { location.hash = url; } });
   for (const name of ["Element", "HTMLElement", "HTMLButtonElement", "HTMLDivElement", "HTMLDetailsElement", "SVGSVGElement"] as const) expose(name, browser[name]);
   expose("HTMLFormElement", document.querySelector("#composer")!.constructor);
+  expose("HTMLInputElement", document.querySelector("#workbookInput")!.constructor);
   expose("HTMLTextAreaElement", document.querySelector("#questionInput")!.constructor);
   let session: SerializedSession = { id: "session-multi", title: "多看板会话", ownerAccount: "alice", readOnly: false,
     dashboardIds: ["default", "analysis"], dashboards: [board("default", 10), board("analysis", 20)],

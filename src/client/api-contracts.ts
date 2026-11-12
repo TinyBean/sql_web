@@ -20,6 +20,7 @@ import type {
   SchemaColumn,
   SchemaResponse,
   SerializedSession,
+  SessionFile,
   SessionSummary,
   SessionsResponse,
 } from "../shared/contracts.ts";
@@ -185,10 +186,15 @@ function chatMessage(value: unknown, path: string): ChatMessage {
   const item = record(value, path);
   const timestamp = item["timestamp"];
   const trace = item["trace"];
+  const role = chatRole(item["role"], `${path}.role`);
+  const attachmentFileId = item["attachmentFileId"];
+  if (attachmentFileId !== undefined && (role !== "user" || typeof attachmentFileId !== "string" ||
+      !/^[0-9a-f-]{36}$/u.test(attachmentFileId))) invalid(`${path}.attachmentFileId`, "用户消息的文件 ID");
   return {
     id: string(item["id"], `${path}.id`),
-    role: chatRole(item["role"], `${path}.role`),
+    role,
     text: string(item["text"], `${path}.text`),
+    ...(typeof attachmentFileId === "string" ? { attachmentFileId } : {}),
     ...(timestamp === undefined
       ? {}
       : { timestamp: nonNegativeInteger(timestamp, `${path}.timestamp`) }),
@@ -244,9 +250,25 @@ function sessionSummary(value: unknown, path: string): SessionSummary {
     createdAt: string(item["createdAt"], `${path}.createdAt`),
     updatedAt: string(item["updatedAt"], `${path}.updatedAt`),
     messageCount: nonNegativeInteger(item["messageCount"], `${path}.messageCount`),
+    ...(item["fileCount"] !== undefined ? { fileCount: nonNegativeInteger(item["fileCount"], `${path}.fileCount`) } : {}),
     active: boolean(item["active"], `${path}.active`),
   };
 }
+
+export const decodeSessionFile: Decoder<SessionFile> = (value, path = "$file") => {
+  const item = record(value, path);
+  const kind = item["kind"];
+  if (kind !== "upload" && kind !== "edit" && kind !== "export") invalid(`${path}.kind`, "文件类型");
+  const downloadUrl = string(item["downloadUrl"], `${path}.downloadUrl`);
+  const id = string(item["id"], `${path}.id`);
+  if (!/^\/api\/sessions\/[A-Za-z0-9-]{8,100}\/files\/[0-9a-f-]{36}$/u.test(downloadUrl) || !downloadUrl.endsWith(`/${id}`)) invalid(`${path}.downloadUrl`, "会话文件下载链接");
+  return { id, kind, downloadUrl,
+    filename: string(item["filename"], `${path}.filename`), byteCount: nonNegativeInteger(item["byteCount"], `${path}.byteCount`),
+    createdAt: string(item["createdAt"], `${path}.createdAt`),
+    ...(item["parentFileId"] !== undefined ? { parentFileId: string(item["parentFileId"], `${path}.parentFileId`) } : {}),
+    ...(item["summary"] !== undefined ? { summary: string(item["summary"], `${path}.summary`) } : {}),
+  };
+};
 
 export const decodeSerializedSession: Decoder<SerializedSession> = (value, path = "$session") => {
   const item = record(value, path);
@@ -258,6 +280,7 @@ export const decodeSerializedSession: Decoder<SerializedSession> = (value, path 
   }
   return {
     ...access,
+    ...(item["files"] !== undefined ? { files: array(item["files"], `${path}.files`, decodeSessionFile) } : {}),
     id: string(item["id"], `${path}.id`),
     title: string(item["title"], `${path}.title`),
     model: model === null ? null : modelDescriptor(model, `${path}.model`),

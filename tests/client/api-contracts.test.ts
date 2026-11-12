@@ -46,6 +46,16 @@ test("decodes a successful session deletion", () => {
   assert.throws(() => decodeDeleteSessionResponse({ ok: false }), /ok/u);
 });
 
+test("decodes optional user attachment IDs and rejects malformed or assistant attachments", () => {
+  const attachmentFileId = "11111111-1111-4111-8111-111111111111";
+  const session = { ...validSession, messages: [{ ...validSession.messages[0]!, attachmentFileId }] };
+  assert.deepEqual(decodeSerializedSession(session), session);
+  for (const invalidId of [123, "", "javascript:alert(1)"]) {
+    assert.throws(() => decodeSerializedSession({ ...session, messages: [{ ...session.messages[0], attachmentFileId: invalidId }] }), /attachmentFileId/u);
+  }
+  assert.throws(() => decodeSerializedSession({ ...session, messages: [{ ...session.messages[0], role: "assistant" }] }), /attachmentFileId/u);
+});
+
 test("decodes request correlation IDs from JSON and SSE errors", () => {
   const payload = { error: "服务器内部错误", requestId: "request-123" };
   assert.deepEqual(decodeErrorResponse(payload), payload);

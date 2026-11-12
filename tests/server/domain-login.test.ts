@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -75,7 +75,7 @@ test("login routes enforce cookies, expiry, logout, origin checks and account ro
   } });
   const initial = createDefaultDashboard();
   const sessions: WebSessionPort = {
-    forAccount(account) { return { ...this, list: async () => [{ id: "session-12345", title: account,
+    forAccount(account) { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, list: async () => [{ id: "session-12345", title: account,
       ownerAccount: account, readOnly: false, dashboardIds: ["default"], createdAt: "now", updatedAt: "now", messageCount: 1, active: false }],
       fork: async () => this.create() }; },
     status: () => ({ tools: [], model: { provider: "test", model: "test" }, codeInterpreter: { available: false, reason: "test" }, availableModelCount: 1, activeSessionCount: 0 }),
@@ -247,7 +247,12 @@ test("legacy history is read-only; private copies preserve snapshots, references
   const env = await sessionFixture(t);
   const legacy = await env.store.create();
   const runtime = await env.store.get(legacy.id);
-  runtime.sessionManager.appendMessage({ role: "user", content: "legacy question", timestamp: Date.now() });
+  const sourceFiles = env.artifacts.forSession(legacy.id).exportFiles();
+  const workbook = sourceFiles.save(Buffer.from("PK\x03\x04test"), { filename: "共享附件.xlsx", kind: "upload", rowCount: 0,
+    source: { name: "upload", version: "1", createdAt: new Date().toISOString() } });
+  const userTimestamp = Date.now();
+  runtime.sessionManager.appendCustomEntry("datalens_upload_attachment_v1", { fileId: workbook.id, userTimestamp });
+  runtime.sessionManager.appendMessage({ role: "user", content: "legacy question", timestamp: userTimestamp });
   runtime.sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "legacy answer" }], api: "openai-completions",
     provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() });
@@ -264,7 +269,9 @@ test("legacy history is read-only; private copies preserve snapshots, references
   const sourceDashboard = readFileSync(path.join(env.artifacts.rootDir, legacy.id, "dashboard.json"), "utf8");
   const alice = env.store.forAccount("3000100562");
   const bob = env.store.forAccount("bob");
-  assert.equal((await alice.getSerialized(legacy.id)).readOnly, true);
+  const shared = await alice.getSerialized(legacy.id);
+  assert.equal(shared.readOnly, true);
+  assert.equal(shared.messages[0]!.attachmentFileId, workbook.id);
   assert.equal((await bob.list())[0]!.ownerAccount, null);
   for (const attempt of [() => alice.get(legacy.id), () => alice.prompt(legacy.id, "write"), () => alice.abort(legacy.id),
     () => alice.delete(legacy.id)]) {
@@ -275,6 +282,9 @@ test("legacy history is read-only; private copies preserve snapshots, references
   assert.equal(copy.readOnly, false);
   assert.equal(copy.dashboards[0]!.state.widgets.length, 14, "legacy copy retains its source dashboard, despite the four-card account binding");
   assert.deepEqual(copy.messages.map((item) => item.text), ["legacy question", "legacy answer"]);
+  assert.equal(copy.messages[0]!.attachmentFileId, workbook.id);
+  assert.equal(copy.files![0]!.downloadUrl, `/api/sessions/${copy.id}/files/${workbook.id}`);
+  assert.deepEqual(env.artifacts.forSession(copy.id).exportFiles().read(workbook.id).bytes, sourceFiles.read(workbook.id).bytes);
   assert.equal(env.artifacts.forSession(copy.id).resolveDataSnapshot("values").rowCount, 1);
   const copiedDashboard = JSON.parse(readFileSync(path.join(env.artifacts.rootDir, copy.id, "dashboard.json"), "utf8"));
   assert.deepEqual(copiedDashboard, JSON.parse(sourceDashboard));
@@ -389,4 +399,47 @@ test("copies multi-board shared history with all current states and reset baseli
   assert.equal(snapshots.apply(copy.id, { action: "reset", baseRevision: 1 }, "analysis").dashboard.widgets.length, 6);
   assert.equal(snapshots.loadOrPreview(copy.id, "default").revision, 0);
   assert.equal(readFileSync(path.join(env.artifacts.rootDir, source.id, "dashboard.json"), "utf8"), sourceDashboard);
+});
+
+test("Excel downloads follow session ownership, survive restarts and rebind copied history links", async (t) => {
+  const env = await sessionFixture(t);
+  const alice = env.store.forAccount("alice");
+  const owned = await alice.create();
+  const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
+  const metadata = { filename: "报表.xlsx", rowCount: 1, source: { name: "values", version: "v1", createdAt: new Date().toISOString() } };
+  const file = env.artifacts.forSession(owned.id).exportFiles().save(bytes, metadata);
+  const opened = await alice.openExportFile(owned.id, file.id);
+  assert.deepEqual(readFileSync(opened.fd), bytes);
+  closeSync(opened.fd);
+  await assert.rejects(env.store.forAccount("bob").openExportFile(owned.id, file.id), { name: "SessionNotFoundError" });
+  await env.store.dispose();
+  const restarted = await env.open();
+  const restored = await restarted.forAccount("alice").openExportFile(owned.id, file.id);
+  assert.deepEqual(readFileSync(restored.fd), bytes);
+  closeSync(restored.fd);
+  await restarted.forAccount("alice").delete(owned.id);
+  await assert.rejects(restarted.forAccount("alice").openExportFile(owned.id, file.id), { name: "SessionNotFoundError" });
+  assert.equal(existsSync(path.join(env.artifacts.rootDir, owned.id)), false);
+
+  const legacy = await restarted.create();
+  const files = env.artifacts.forSession(legacy.id).exportFiles();
+  const legacyFile = files.save(bytes, { ...metadata, kind: "upload" });
+  const legacyEdit = files.save(bytes, { ...metadata, kind: "edit", parentFileId: legacyFile.id, summary: "数据!A1：写入" });
+  const session = await restarted.get(legacy.id);
+  session.sessionManager.appendMessage({ role: "user", content: "导出 Excel", timestamp: Date.now() });
+  session.sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: `[下载](${files.downloadUrl(legacyFile.id)})` }],
+    api: "openai-completions", provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() });
+  const source = readFileSync(session.sessionFile!, "utf8");
+  const copy = await restarted.forAccount("alice").fork(legacy.id);
+  assert.ok(copy.messages.some((message) => message.text.includes(`/api/sessions/${copy.id}/files/${legacyFile.id}`)));
+  assert.equal(copy.files?.length, 2);
+  assert.equal(copy.files?.find((file) => file.id === legacyEdit.id)?.parentFileId, legacyFile.id);
+  assert.ok(copy.files?.every((file) => file.downloadUrl.startsWith(`/api/sessions/${copy.id}/files/`)));
+  await assert.rejects(restarted.forAccount("alice").uploadWorkbook(legacy.id, "test.xlsx", bytes), status(403));
+  assert.equal(readFileSync(session.sessionFile!, "utf8"), source);
+  const copied = await restarted.forAccount("alice").openExportFile(copy.id, legacyFile.id);
+  assert.deepEqual(readFileSync(copied.fd), bytes);
+  closeSync(copied.fd);
+  await assert.rejects(restarted.forAccount("bob").openExportFile(copy.id, legacyFile.id), { name: "SessionNotFoundError" });
 });

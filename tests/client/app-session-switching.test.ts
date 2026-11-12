@@ -69,7 +69,7 @@ test("switches between independent live session answers without stealing the cur
     "HTMLDivElement",
     "HTMLDetailsElement",
     "HTMLFormElement",
-    "HTMLTextAreaElement",
+    "HTMLTextAreaElement", "HTMLInputElement", "HTMLSelectElement",
     "SVGSVGElement",
   ] as const;
   const originals = new Map<string, PropertyDescriptor | undefined>(
@@ -88,6 +88,7 @@ test("switches between independent live session answers without stealing the cur
   });
   for (const name of globalNames.slice(4)) expose(name, browser[name]);
   expose("HTMLFormElement", document.querySelector("#composer")?.constructor);
+  expose("HTMLInputElement", document.querySelector("#workbookInput")!.constructor);
   expose("HTMLTextAreaElement", document.querySelector("#questionInput")?.constructor);
 
   const sessions = [

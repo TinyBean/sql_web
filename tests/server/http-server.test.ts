@@ -54,7 +54,7 @@ async function createFixture(
   initializeOeeDatabase(filePath);
   const database = AppDatabase.open({ filePath });
   const sessions: WebSessionPort = sessionsOverride ?? {
-    forAccount() { return { ...this, fork: async () => this.create() }; },
+    forAccount() { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, fork: async () => this.create() }; },
     status: () => ({
       tools: ["execute_sql", "get_current_time"],
       codeInterpreter: { available: false, reason: "test sandbox unavailable" },
@@ -328,7 +328,7 @@ test("streams ordered turn, text, and tool lifecycle events", async (t) => {
     stopReason: "stop",
   };
   const sessions: WebSessionPort = {
-    forAccount() { return { ...this, fork: async () => this.create() }; },
+    forAccount() { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, fork: async () => this.create() }; },
     status: () => ({
       tools: ["execute_sql", "get_current_time"],
       codeInterpreter: { available: false, reason: "test sandbox unavailable" },
@@ -459,7 +459,7 @@ test("streams a persisted analysis dashboard update before tool end and reconcil
     for (const listener of listeners) listener(event);
   };
   const sessions: WebSessionPort = {
-    forAccount() { return { ...this, fork: async () => this.create() }; },
+    forAccount() { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, fork: async () => this.create() }; },
     status: () => ({
       tools: ["get_dashboard", "update_dashboard"],
       codeInterpreter: { available: false, reason: "test" },
@@ -552,7 +552,7 @@ test("does not stream legacy images from any tool result", async (t) => {
     images: [{ mimeType: "image/png", data: imageData, alt: "不得发送" }],
   };
   const sessions: WebSessionPort = {
-    forAccount() { return { ...this, fork: async () => this.create() }; },
+    forAccount() { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, fork: async () => this.create() }; },
     status: () => ({
       tools: ["code_interpreter", "execute_sql"],
       codeInterpreter: { available: true, reason: null },
@@ -667,7 +667,7 @@ test("streams sanitized automatic compaction lifecycle events", async (t) => {
     details: { privateDetails: "PRIVATE_DETAILS" },
   };
   const sessions: WebSessionPort = {
-    forAccount() { return { ...this, fork: async () => this.create() }; },
+    forAccount() { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, fork: async () => this.create() }; },
     status: () => ({
       tools: [],
       codeInterpreter: { available: false, reason: "test sandbox unavailable" },
@@ -737,7 +737,7 @@ test("requires explicit bound dashboard IDs for messages and routes selected IDs
     dashboards: ["default", "analysis"].map((id) => ({ id, title: id, state: EMPTY_DASHBOARD })) };
   const targets: string[] = [];
   const sessions: WebSessionPort = {
-    forAccount() { return { ...this, fork: async () => session }; },
+    forAccount() { return { ...this, uploadWorkbook: async () => { throw new Error("not implemented"); }, openExportFile: async () => { throw new Error("not used"); }, fork: async () => session }; },
     status: () => ({ tools: [], codeInterpreter: { available: false, reason: "test" }, model: { provider: "test", model: "test" }, availableModelCount: 0, activeSessionCount: 0 }),
     list: async () => [], create: async () => session, getSerialized: async () => session,
     get: async () => ({ isStreaming: false, subscribe: () => () => {} }),

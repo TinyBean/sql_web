@@ -32,7 +32,7 @@ test("login, shared-history copying, logout and account switches discard streams
   const browser = parseHTML(readFileSync(path.join(process.cwd(), "public/index.html"), "utf8"));
   const { document } = browser;
   const names = ["document", "window", "location", "history", "Element", "HTMLElement", "HTMLButtonElement", "HTMLDivElement",
-    "HTMLDetailsElement", "HTMLFormElement", "HTMLTextAreaElement", "SVGSVGElement", "fetch"] as const;
+    "HTMLDetailsElement", "HTMLFormElement", "HTMLTextAreaElement", "HTMLInputElement", "HTMLSelectElement", "SVGSVGElement", "fetch"] as const;
   const originals = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const expose = (name: string, value: unknown) => Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   const location = { hash: "", pathname: "/", search: "" };
@@ -40,6 +40,7 @@ test("login, shared-history copying, logout and account switches discard streams
   expose("history", { replaceState(_state: unknown, _title: string, url: string) { location.hash = url.startsWith("#") ? url : ""; } });
   for (const name of names.slice(4, -1)) expose(name, browser[name]);
   expose("HTMLFormElement", document.querySelector("#composer")!.constructor);
+  expose("HTMLInputElement", document.querySelector("#workbookInput")!.constructor);
   expose("HTMLTextAreaElement", document.querySelector("#questionInput")!.constructor);
   t.after(() => { for (const [name, descriptor] of originals) {
     if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name);

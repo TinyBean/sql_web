@@ -1,5 +1,7 @@
 import {
   closeSync,
+  existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -16,6 +18,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { JsonObject, JsonValue } from "../../shared/contracts.ts";
 import { MAX_QUERY_ARTIFACT_BYTES } from "./artifact-store.ts";
+import { MAX_EXCEL_BYTES } from "./export-files.ts";
 
 const MAX_CODE_BYTES = 20_000;
 const MAX_USER_INPUT_BYTES = 256 * 1024;
@@ -438,6 +441,7 @@ export class CodeInterpreterRuntime {
   readonly #runtimeDir: string | null;
   readonly #runnerPath: string | null;
   readonly #seccompPath: string | null;
+  #xlsxStatus: Promise<CodeInterpreterStatus> | undefined;
 
   private constructor(
     options: CodeInterpreterOptions,
@@ -514,6 +518,51 @@ export class CodeInterpreterRuntime {
     input: CodeInterpreterInput,
     signal: AbortSignal | undefined,
   ): Promise<CodeInterpreterExecution> {
+    return this.#execute(code, input, signal);
+  }
+
+  checkXlsxSupport(): Promise<CodeInterpreterStatus> {
+    this.#xlsxStatus ??= (async () => {
+      if (!this.status.available) return this.status;
+      try {
+        await this.#execute("import sys\nsys.path.insert(0, '/xlsx-dependencies')\nimport openpyxl\nemit_result(summary='Excel dependency ok')",
+          { snapshot: null, userInput: null }, undefined, "probe");
+        return { available: true, reason: null };
+      } catch {
+        return { available: false, reason: "Excel 本地依赖 openpyxl 不可用：请按 README 使用项目随附离线包安装到 .data/xlsx-python 后重启服务" };
+      }
+    })();
+    return this.#xlsxStatus;
+  }
+
+  /** Only this fixed, trusted exporter can collect a file from the sandbox. */
+  async exportWorkbook(input: CodeInterpreterInput, signal?: AbortSignal): Promise<CodeInterpreterExecution & { workbook: Buffer }> {
+    signal?.throwIfAborted();
+    const status = await this.checkXlsxSupport();
+    if (!status.available) throw new CodeInterpreterError(status.reason ?? "Excel 导出不可用");
+    const code = readFileSync(new URL("../skills/xlsx/assets/export.py", import.meta.url), "utf8");
+    const result = await this.#execute(code, input, signal, "export");
+    if (!result.workbook) throw new CodeInterpreterError("Excel 导出未生成文件");
+    return { ...result, workbook: result.workbook };
+  }
+
+  /** Fixed local workbook processor; the uploaded bytes are mounted read-only. */
+  async processWorkbook(bytes: Buffer, userInput: JsonObject, signal?: AbortSignal): Promise<CodeInterpreterExecution & { workbook?: Buffer }> {
+    signal?.throwIfAborted();
+    if (bytes.length < 4 || bytes.length > 8 * 1024 * 1024) throw new CodeInterpreterError("Excel 文件无效或超过 8 MiB 上限");
+    const status = await this.checkXlsxSupport();
+    if (!status.available) throw new CodeInterpreterError(status.reason ?? "Excel 处理不可用");
+    const code = readFileSync(new URL("../skills/xlsx/assets/workbook.py", import.meta.url), "utf8");
+    return this.#execute(code, { snapshot: null, userInput }, signal, userInput["action"] === "edit" ? "edit" : "inspect", bytes);
+  }
+
+  async #execute(
+    code: string,
+    input: CodeInterpreterInput,
+    signal: AbortSignal | undefined,
+    spreadsheetMode?: "probe" | "export" | "inspect" | "edit",
+    workbookInput?: Buffer,
+  ): Promise<CodeInterpreterExecution & { workbook?: Buffer }> {
     if (
       !this.status.available || !this.#runnerPath || !this.#seccompPath
     ) {
@@ -542,7 +591,10 @@ export class CodeInterpreterRuntime {
       writeFileSync(codePath, code, { mode: 0o600 });
       if (input.snapshot === null) writeFileSync(emptyDatabasePath, "null", { mode: 0o600 });
       writeFileSync(userInputPath, userInputJson, { mode: 0o600 });
+      const workbookPath = path.join(inputDir, "workbook.xlsx");
+      if (workbookInput) writeFileSync(workbookPath, workbookInput, { mode: 0o600 });
       const databasePath = input.snapshot?.databasePath ?? emptyDatabasePath;
+      const dependenciesPath = path.join(this.#options.projectRoot, ".data", "xlsx-python");
 
       filterDescriptor = openSync(this.#seccompPath, "r");
       const args = [
@@ -571,6 +623,8 @@ export class CodeInterpreterRuntime {
         "--ro-bind",
         "/etc/ld.so.cache",
         "/etc/ld.so.cache",
+        ...(spreadsheetMode && existsSync(dependenciesPath)
+          ? ["--ro-bind", dependenciesPath, "/xlsx-dependencies"] : []),
         "--proc",
         "/proc",
         "--dev",
@@ -581,6 +635,7 @@ export class CodeInterpreterRuntime {
         "/tmp/home",
         "--dir",
         "/input",
+        ...(workbookInput ? ["--ro-bind", workbookPath, "/input/workbook.xlsx"] : []),
         "--ro-bind",
         this.#runnerPath,
         "/runner.py",
@@ -660,7 +715,19 @@ export class CodeInterpreterRuntime {
         stderrTruncated: processResult.stderr.truncated,
         durationMs: Date.now() - startedAt,
       };
-      return { text: formatCodeInterpreterResult(details), details };
+      let workbook: Buffer | undefined;
+      if (spreadsheetMode === "export" || spreadsheetMode === "edit") {
+        const fd = openSync(path.join(workDir, "workbook.xlsx"), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        try {
+          const metadata = fstatSync(fd);
+          if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size < 4 || metadata.size > MAX_EXCEL_BYTES) {
+            throw new CodeInterpreterError("Excel 文件无效或超过 8 MiB 上限");
+          }
+          workbook = readFileSync(fd);
+        } finally { closeSync(fd); }
+      }
+      signal?.throwIfAborted();
+      return { text: formatCodeInterpreterResult(details), details, ...(workbook ? { workbook } : {}) };
     } finally {
       if (filterDescriptor !== undefined) closeSync(filterDescriptor);
       rmSync(executionDir, { recursive: true, force: true });

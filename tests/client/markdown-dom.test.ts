@@ -78,3 +78,14 @@ test("preserves Markdown image syntax in code blocks and uses inert text on pars
     if (purifier) markdownGlobals.DOMPurify = purifier;
   }
 });
+
+test("renders session Excel downloads without opening another tab", () => {
+  const root = container();
+  const url = "/api/sessions/session-12345678/files/12345678-1234-4123-8123-123456789012";
+  renderMarkdownInto(root, `[下载中文报表.xlsx](${url})\n\n[外链](https://example.com)`);
+  const links = root.querySelectorAll("a");
+  assert.equal(links[0]?.getAttribute("href"), url);
+  assert.equal(links[0]?.hasAttribute("download"), true);
+  assert.equal(links[0]?.hasAttribute("target"), false);
+  assert.equal(links[1]?.getAttribute("target"), "_blank");
+});

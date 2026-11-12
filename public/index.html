@@ -84,9 +84,15 @@
 
       <form class="composer" id="composer">
         <div class="composer-status" id="composerStatus"><span>Agent 指标入口</span><small>点击展开会话</small></div>
+        <div class="pending-workbook" id="pendingWorkbook" aria-live="polite" hidden></div>
         <textarea id="questionInput" rows="1" maxlength="4000" placeholder="询问任意口径的指标…" aria-label="输入指标问题"></textarea>
         <div class="composer-actions">
           <span class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
+          <input type="file" id="workbookInput" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden aria-label="上传普通 xlsx 文件">
+          <button class="upload-button" id="uploadWorkbookButton" type="button" aria-label="上传 Excel 文件" title="上传 Excel（仅 .xlsx）">
+            <svg class="upload-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 15v5h16v-5"/></svg>
+            <svg class="upload-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-8-8"/></svg>
+          </button>
           <button class="send-button" id="sendButton" type="submit" aria-label="发送问题">
             <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>
             <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>

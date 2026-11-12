@@ -18,7 +18,7 @@ export function normalizeAccount(value: unknown): string {
   if (typeof value !== "string") throw new AuthError("请输入工号或短账号", 400);
   const account = value.trim().toLowerCase();
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(account) || account.includes("__")) {
-    throw new AuthError("账号只能包含字母、数字、点、下划线和短横线，请使用工号或短账号", 400);
+    throw new AuthError("账号只能包含字母、数字、点、下划线和短横线,请使用工号或短账号", 400);
   }
   return account;
 }
@@ -65,7 +65,7 @@ export async function verifyDomainAccount(
   } catch (error) {
     if (error instanceof AuthError) throw error;
     // Never propagate upstream errors, URLs or response bodies into request logs.
-    throw new AuthError("域验证服务暂时不可用，请稍后重试", 503);
+    throw new AuthError("域验证服务暂时不可用,请稍后重试", 503);
   }
 }
 
@@ -111,7 +111,7 @@ export class Authentication {
     }
     const keys = [`ip:${source}`, `account:${account}`];
     if (keys.some((key) => (this.#attempts.get(key)?.count ?? 0) >= (key.startsWith("ip:") ? 60 : 10))) {
-      throw new AuthError("登录尝试过于频繁，请 5 分钟后重试", 429);
+      throw new AuthError("登录尝试过于频繁,请 5 分钟后重试", 429);
     }
     for (const key of keys) {
       const attempt = this.#attempts.get(key) ?? { count: 0, expiresAt: now + 5 * 60 * 1000 };

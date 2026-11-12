@@ -7,6 +7,7 @@ description: 查询、计算和解释 Test OEE 与 Effective OEE，支持全类�
 
 ## 读取指引
 
+- 本技能使用项目内 SQLite、已保存的会话快照及下列本地参考资料。业务口径以本地文档为准，不通过在线搜索补充公式、机台映射或数据；缺少记录时说明缺失，缺少口径时请用户提供本地资料。
 - 首次查询或解释口径，读取 [业务规则](references/business-rules.md)；生成或执行 SQL 前读取 [事实表与字段](references/database.md)。
 - 创建或更新概览／趋势看板，另读 [字段映射](references/dashboard.md)；调查导入完整性时另读 [导入审计](references/import-audit.md)。
 - 网站会话询问每日／今天看板是否生成、执行过程、失败原因、指标及改善建议来源时，先读 [每日看板运行与产物](references/daily-dashboard.md)，通过 `read` 查看已有日志、报告和冻结证据。每日分析 Agent 仍使用当前事务及周期证据，不能读取 `.data`。

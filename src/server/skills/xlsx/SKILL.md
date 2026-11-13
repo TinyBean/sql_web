@@ -5,8 +5,6 @@ description: 在网页聊天中将完整 OEE 查询快照导出为带格式的 E
 
 # Excel 导出、读取与修改
 
-这是 Anthropic xlsx skill 的项目适配版，已修改原流程；操作约定见 [本地参考](references/reference.md)，许可证保留在 LICENSE.txt。
-
 ## 本地资料
 
 - 技能指引、字段说明、格式示例和排障均已随项目保存。需要参数示例或排查导出失败时，读取 [导出参考](references/reference.md)，不查询在线文档、外部网站或上游仓库。

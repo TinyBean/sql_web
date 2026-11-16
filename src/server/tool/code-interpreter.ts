@@ -430,9 +430,9 @@ function assertSnapshotInput(snapshot: CodeInterpreterSnapshotInput): void {
 
 function pythonRetryHint(input: CodeInterpreterInput): string {
   const databaseHint = input.snapshot === null
-    ? "本次未传数据快照，input_data.database 为 None，snapshot_rows 为空列表。"
-    : "snapshot_rows 是 list[dict]；每行已经是对象，请直接使用 row['列名']，不要再执行 zip(columns, row)。input_data 同时支持方括号和属性访问。";
-  return `${databaseHint} 最终结果请调用一次 emit_result(...)；notes 可传字符串或字符串数组。`;
+    ? "本次未传数据快照,input_data.database 为 None,snapshot_rows 为空列表。"
+    : "snapshot_rows 是 list[dict];每行已经是对象,请直接使用 row['列名'],不要再执行 zip(columns, row)。input_data 同时支持方括号和属性访问。";
+  return `${databaseHint} 最终结果请调用一次 emit_result(...);notes 可传字符串或字符串数组。`;
 }
 
 export class CodeInterpreterRuntime {
@@ -529,7 +529,7 @@ export class CodeInterpreterRuntime {
           { snapshot: null, userInput: null }, undefined, "probe");
         return { available: true, reason: null };
       } catch {
-        return { available: false, reason: "Excel 本地依赖 openpyxl 不可用：请按 README 使用项目随附离线包安装到 .data/xlsx-python 后重启服务" };
+        return { available: false, reason: "Excel 本地依赖 openpyxl 不可用:请按 README 使用项目随附离线包安装到 .data/xlsx-python 后重启服务" };
       }
     })();
     return this.#xlsxStatus;
@@ -688,12 +688,13 @@ export class CodeInterpreterRuntime {
       filterDescriptor = undefined;
       const processResult = await runChild(child, signal);
       signal?.throwIfAborted();
-      if (processResult.timedOut) throw new CodeInterpreterError("Python 执行超过 15 秒，已终止");
+      if (processResult.timedOut) throw new CodeInterpreterError("Python 执行超过 15 秒,已终止");
       if (processResult.exitCode !== 0) {
         const diagnostic = processResult.stderr.text.trim() ||
           `进程被 ${processResult.signal ?? `退出码 ${processResult.exitCode}`} 终止`;
+        const retryHint = spreadsheetMode ? "" : `\n重试提示:${pythonRetryHint(input)}`;
         throw new CodeInterpreterError(
-          `Python 执行失败：${diagnostic}\n重试提示：${pythonRetryHint(input)}`,
+          `Python 执行失败:${diagnostic}${retryHint}`,
         );
       }
       const details: CodeInterpreterDetails = {

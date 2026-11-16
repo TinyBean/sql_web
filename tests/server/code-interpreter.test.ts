@@ -253,7 +253,7 @@ test("requires one result and safely normalizes common result shapes", async () 
   );
 });
 
-test("adds the exact snapshot row contract to Python retry errors", async () => {
+test("adds Python retry hints with and without a database snapshot", async () => {
   await assert.rejects(
     () => runtime.execute(
       [
@@ -265,6 +265,10 @@ test("adds the exact snapshot row contract to Python retry errors", async () => 
       undefined,
     ),
     /snapshot_rows 是 list\[dict\].*不要再执行 zip/u,
+  );
+  await assert.rejects(
+    () => runtime.execute("raise ValueError('retry me')", noSnapshotInput(), undefined),
+    /重试提示[:：]本次未传数据快照.*emit_result/u,
   );
 });
 

@@ -87,6 +87,62 @@ print(json.dumps({'ok': True}))`, modifiedPath));
   assert.ok(env.events.includes("xlsx.edit.completed"));
 });
 
+test("inspects 201, 210 and 500 cells with complete values, formats and blanks", async (t) => {
+  const env = fixture(t);
+  python(`from openpyxl import Workbook
+w=Workbook()
+s=w.active
+s.title='数据'
+for row in range(1,51):
+    s.append([f'MT-{row:03}',row,0.9985,'机台运行良率记录'*3,None]*2)
+    s.cell(row,3).number_format='0.00%'
+    s.cell(row,8).number_format='0.00%'
+w.save(sys.argv[2])`, env.filename);
+  const bytes = readFileSync(env.filename);
+  const file = saveUploadedWorkbook(env.artifacts, "500-cells.xlsx", bytes);
+  for (const [range, count] of [["A1:A201", 201], ["A1:J21", 210], ["A1:J50", 500]] as const) {
+    const preview = JSON.parse(JSON.stringify(await env.context.inspectWorkbook({ file_id: file.id, sheet: "数据", range })));
+    assert.equal(preview.data.cells.length, count);
+    assert.equal(new Set(preview.data.cells.map((cell: { cell: string }) => cell.cell)).size, count);
+    assert.equal(preview.data.cells[0].value, "MT-001");
+    assert.ok(preview.data.cells.every((cell: { truncated: boolean }) => !cell.truncated));
+    if (count === 500) {
+      assert.deepEqual(preview.data.cells.slice(0, 5).map((cell: { value: unknown }) => cell.value),
+        ["MT-001", 1, 0.9985, "机台运行良率记录".repeat(3), null]);
+      assert.equal(preview.data.cells[492].cell, "C50");
+      assert.equal(preview.data.cells[492].value, 0.9985);
+      assert.equal(preview.data.cells[492].number_format, "0.00%");
+      assert.equal(preview.data.cells.at(-1).cell, "J50");
+      assert.equal(preview.data.cells.at(-1).value, null);
+      assert.ok(Buffer.byteLength(JSON.stringify(preview.data)) > 48000, "exercise a preview larger than the old budget");
+      assert.ok(Buffer.byteLength(JSON.stringify(preview.data)) <= 60 * 1024);
+    }
+  }
+  assert.deepEqual(env.files.read(file.id).bytes, bytes);
+  assert.equal(env.files.list().length, 1);
+});
+
+test("bounds multibyte previews with explicit truncation and actionable size errors", async (t) => {
+  const env = fixture(t);
+  python(`from openpyxl import load_workbook
+w=load_workbook(sys.argv[2])
+s=w['第二页']
+for row in range(1,501):
+    s.cell(row,1,'中'*300)
+w.save(sys.argv[2])`, env.filename);
+  const file = saveUploadedWorkbook(env.artifacts, "long-text.xlsx", readFileSync(env.filename));
+  for (const [range, count, length] of [["A1", 1, 200], ["A1:A200", 200, 40]] as const) {
+    const preview = JSON.parse(JSON.stringify(await env.context.inspectWorkbook({ file_id: file.id, sheet: "第二页", range })));
+    assert.equal(preview.data.cells.length, count);
+    assert.ok(preview.data.cells.every((cell: { value: string; truncated: boolean }) =>
+      cell.truncated && cell.value === "中".repeat(length)));
+    assert.ok(Buffer.byteLength(JSON.stringify(preview.data)) <= 60 * 1024);
+  }
+  await assert.rejects(env.context.inspectWorkbook({ file_id: file.id, sheet: "第二页", range: "A1:A500" }),
+    /区域预览内容.*61440 字节（60 KiB）上限.*缩小查看区域或分批读取/u);
+  assert.equal(env.files.list().length, 1);
+});
+
 test("invalid edits, ranges, cancellation and invalid IDs publish no new files", async (t) => {
   const env = fixture(t);
   const file = saveUploadedWorkbook(env.artifacts, "test.xlsx", env.bytes);
@@ -100,7 +156,15 @@ test("invalid edits, ranges, cancellation and invalid IDs publish no new files",
     [{ type: "fill", sheet: "数据", range: "A2", value: "临时" }, { type: "fill", sheet: "数据", range: "B4", value: "错误" }],
   ];
   for (const operations of invalid) await assert.rejects(env.context.editWorkbook({ file_id: file.id, operations }));
-  await assert.rejects(env.context.inspectWorkbook({ file_id: file.id, sheet: "数据", range: "A1:A201" }));
+  for (const [range, count] of [["A1:A501", 501], ["A1:J51", 510]] as const) {
+    await assert.rejects(env.context.inspectWorkbook({ file_id: file.id, sheet: "数据", range }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(`区域 ${range} 包含 ${count} 个单元格，超过单次上限 500`));
+      assert.match(error.message, /请缩小区域或分批处理，每次不超过 500 个单元格/u);
+      assert.doesNotMatch(error.message, /重试提示|未传数据快照|snapshot_rows|emit_result/u);
+      return true;
+    });
+  }
   await assert.rejects(env.context.inspectWorkbook({ file_id: file.id, sheet: "数据" }));
   await assert.rejects(env.context.inspectWorkbook({ file_id: "../workbook.xlsx" }));
   const abort = new AbortController(); abort.abort();

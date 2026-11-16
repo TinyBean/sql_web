@@ -14,6 +14,8 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, MergedCell
 from openpyxl.utils.cell import range_boundaries, get_column_letter
 
 MAX_CELLS = 200000
+MAX_INSPECT_CELLS = 500
+MAX_PREVIEW_BYTES = 60 * 1024
 MAX_EDIT_CELLS = 10000
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
@@ -78,8 +80,9 @@ def bounds(value, limit):
     left, top, right, bottom = range_boundaries(value.upper())
     if not (1 <= left <= right <= 16384 and 1 <= top <= bottom <= 1048576):
         fail("单元格区域超出 Excel 范围")
-    if (right - left + 1) * (bottom - top + 1) > limit:
-        fail("指定区域超过单次单元格上限")
+    cell_count = (right - left + 1) * (bottom - top + 1)
+    if cell_count > limit:
+        fail(f"区域 {value} 包含 {cell_count} 个单元格，超过单次上限 {limit}；请缩小区域或分批处理，每次不超过 {limit} 个单元格")
     return left, top, right, bottom
 
 
@@ -168,7 +171,7 @@ elif action == "inspect":
         if not options.get("sheet") or not options.get("range"):
             fail("查看区域需要同时指定工作表和区域")
         sheet = sheet_named(options["sheet"])
-        left, top, right, bottom = bounds(options["range"], 200)
+        left, top, right, bottom = bounds(options["range"], MAX_INSPECT_CELLS)
         cells = []
         for row in sheet.iter_rows(min_row=top, max_row=bottom, min_col=left, max_col=right):
             for cell in row:
@@ -177,16 +180,18 @@ elif action == "inspect":
                 cells.append({"cell": cell.coordinate, "value": value[:200] if truncated else value,
                               "type": cell.data_type, "number_format": cell.number_format[:120], "truncated": truncated})
         data.update({"sheet": sheet.title, "range": options["range"], "cells": cells})
-    # Keep previews bounded independently of multibyte text and custom formats.
-    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > 48000:
+    # Match emit_result's compact JSON and leave room under its 64 KiB result limit.
+    preview_bytes = len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if preview_bytes > MAX_PREVIEW_BYTES:
         for cell in data.get("cells", []):
             if isinstance(cell["value"], str) and len(cell["value"]) > 40:
                 cell["value"] = cell["value"][:40]
                 cell["truncated"] = True
         for sheet in data["sheets"]:
             sheet["merged_ranges"] = sheet["merged_ranges"][:5]
-    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > 48000:
-        fail("区域预览内容过大，请缩小查看区域")
+        preview_bytes = len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if preview_bytes > MAX_PREVIEW_BYTES:
+        fail(f"区域预览内容为 {preview_bytes} 字节，超过 {MAX_PREVIEW_BYTES} 字节（60 KiB）上限；即使不超过 {MAX_INSPECT_CELLS} 个单元格，也请缩小查看区域或分批读取")
     emit_result(summary="工作簿读取成功", data=data, notes=notes)
 elif action == "edit":
     operations = options.get("operations")

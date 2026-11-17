@@ -4,6 +4,27 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { loadConfig, loadProjectEnvironment } from "../../src/server/config.ts";
+import { loadDataCommandConfig } from "../../scripts/database/data-command-config.ts";
+
+test("web and daily analysis resolve default and custom virtual environments from the project root", () => {
+  const model = { SQL_WEB_PROVIDER: "test", SQL_WEB_MODEL: "test" };
+  const defaults = loadConfig(model);
+  for (const [configured, expected] of [
+    [undefined, path.join(defaults.projectRoot, ".venv/bin/python")],
+    ["   ", path.join(defaults.projectRoot, ".venv/bin/python")],
+    ["custom-venv/bin/python3", path.join(defaults.projectRoot, "custom-venv/bin/python3")],
+    ["/opt/python-venv/bin/python", "/opt/python-venv/bin/python"],
+  ] as const) {
+    const environment = { ...model, ...(configured === undefined ? {} : { SQL_WEB_PYTHON_PATH: configured }) };
+    assert.equal(loadConfig(environment).codeInterpreter.pythonPath, expected);
+  }
+  const root = "/tmp/sql-web-config-test";
+  assert.equal(loadDataCommandConfig(root, {}).analysis.codeInterpreter.pythonPath, path.join(root, ".venv/bin/python"));
+  assert.equal(loadDataCommandConfig(root, { SQL_WEB_PYTHON_PATH: "custom-venv/bin/python3" }).analysis.codeInterpreter.pythonPath,
+    path.join(root, "custom-venv/bin/python3"));
+  assert.equal(loadDataCommandConfig(root, { SQL_WEB_PYTHON_PATH: "/opt/python-venv/bin/python" }).analysis.codeInterpreter.pythonPath,
+    "/opt/python-venv/bin/python");
+});
 
 test("loads the selected model from the project environment file", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));

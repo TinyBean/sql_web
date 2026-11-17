@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,7 +17,7 @@ const projectRoot = process.cwd();
 const logger = { info() {}, error() {} };
 let runtime: CodeInterpreterRuntime;
 before(async () => {
-  runtime = await CodeInterpreterRuntime.create({ projectRoot, pythonPath: "/usr/bin/python3", bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
+  runtime = await CodeInterpreterRuntime.create({ projectRoot, pythonPath: path.join(process.cwd(), ".venv/bin/python"), bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
   assert.deepEqual(runtime.status, { available: true, reason: null });
   assert.deepEqual(await runtime.checkXlsxSupport(), { available: true, reason: null });
 });
@@ -37,11 +37,11 @@ function fixture(t: TestContext) {
 }
 
 function workbookInfo(filename: string) {
-  const result = spawnSync("/usr/bin/python3", ["-c", [
-    "import sys,json", "sys.path.insert(0,sys.argv[2])", "from openpyxl import load_workbook",
+  const result = spawnSync(path.join(projectRoot, ".venv/bin/python"), ["-I", "-c", [
+    "import sys,json", "from openpyxl import load_workbook",
     "w=load_workbook(sys.argv[1],data_only=False)", "s=w['数据']",
     "print(json.dumps({'sheets':w.sheetnames,'values':list(s.values),'formats':[[c.number_format for c in r] for r in s],'types':[[c.data_type for c in r] for r in s],'freeze':s.freeze_panes,'filter':s.auto_filter.ref,'font':s['A1'].font.name,'fill':s['A1'].fill.fgColor.rgb,'notes':list(w['说明'].values)},ensure_ascii=False))",
-  ].join("\n"), filename, path.join(projectRoot, ".data/xlsx-python")], { encoding: "utf8" });
+  ].join("\n"), filename], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -155,10 +155,12 @@ test("unbound skill tools cannot export in subagents, anonymous chat or daily an
 
 test("missing Excel dependency is isolated from normal Python and SQL availability", async (t) => {
   const env = fixture(t);
-  const dependencies = path.join(env.root, ".data/xlsx-python");
-  mkdirSync(dependencies, { recursive: true });
-  writeFileSync(path.join(dependencies, "openpyxl.py"), "raise ImportError('dependency unavailable for test')\n");
-  const isolated = await CodeInterpreterRuntime.create({ projectRoot: env.root, pythonPath: "/usr/bin/python3", bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
+  const environment = path.join(env.root, ".venv");
+  cpSync(path.join(projectRoot, ".venv"), environment, {
+    recursive: true, verbatimSymlinks: true,
+    filter: (source) => !path.basename(source).startsWith("openpyxl"),
+  });
+  const isolated = await CodeInterpreterRuntime.create({ projectRoot: env.root, pythonPath: path.join(environment, "bin/python"), bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
   t.after(() => isolated.dispose());
   assert.equal(isolated.status.available, true);
   const status = await isolated.checkXlsxSupport();

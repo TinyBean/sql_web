@@ -12,14 +12,14 @@ import type { WorkbookOperation } from "../../src/server/skills/xlsx/assets/runt
 
 let runtime: CodeInterpreterRuntime;
 before(async () => {
-  runtime = await CodeInterpreterRuntime.create({ projectRoot: process.cwd(), pythonPath: "/usr/bin/python3", bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
+  runtime = await CodeInterpreterRuntime.create({ projectRoot: process.cwd(), pythonPath: path.join(process.cwd(), ".venv/bin/python"), bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
   assert.equal(runtime.status.available, true);
   assert.equal((await runtime.checkXlsxSupport()).available, true);
 });
 after(() => runtime.dispose());
 
 function python(code: string, ...args: string[]): string {
-  const result = spawnSync("/usr/bin/python3", ["-c", "import sys,json\nsys.path.insert(0,sys.argv[1])\n" + code, path.join(process.cwd(), ".data/xlsx-python"), ...args], { encoding: "utf8" });
+  const result = spawnSync(path.join(process.cwd(), ".venv/bin/python"), ["-I", "-c", "import sys,json\n" + code, ...args], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout;
 }
@@ -27,7 +27,7 @@ function fixture(t: TestContext) {
   const root = mkdtempSync(path.join(tmpdir(), "xlsx-edit-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const filename = path.join(root, "original.xlsx");
-  python("from openpyxl import Workbook\nfrom openpyxl.styles import Font\nw=Workbook()\ns=w.active\ns.title='数据'\ns.append(['编号','数值','公式'])\ns.append(['0007',1.234567,'=B2*2'])\ns['A4']='保留合并'\ns.merge_cells('A4:B4')\ns['F5']='未修改'\ns['F5'].font=Font(name='Arial',italic=True,color='123456')\ns.freeze_panes='A2'\ns.auto_filter.ref='A1:C2'\nw.create_sheet('第二页')['A1']='中文'\nw.save(sys.argv[2])", filename);
+  python("from openpyxl import Workbook\nfrom openpyxl.styles import Font\nw=Workbook()\ns=w.active\ns.title='数据'\ns.append(['编号','数值','公式'])\ns.append(['0007',1.234567,'=B2*2'])\ns['A4']='保留合并'\ns.merge_cells('A4:B4')\ns['F5']='未修改'\ns['F5'].font=Font(name='Arial',italic=True,color='123456')\ns.freeze_panes='A2'\ns.auto_filter.ref='A1:C2'\nw.create_sheet('第二页')['A1']='中文'\nw.save(sys.argv[1])", filename);
   const bytes = readFileSync(filename);
   const artifacts = new ArtifactStore(path.join(root, "artifacts")).forSession("session-12345678");
   const files = artifacts.exportFiles();
@@ -65,7 +65,7 @@ test("uploads original bytes, inspects sheets and regions, edits a new version w
   const modifiedPath = path.join(env.root, "modified.xlsx");
   writeFileSync(modifiedPath, output.bytes);
   const verified = JSON.parse(python(`from openpyxl import load_workbook
-w=load_workbook(sys.argv[2],data_only=False)
+w=load_workbook(sys.argv[1],data_only=False)
 s=w['数据']; t=w['第二页']
 assert w.sheetnames==['数据','第二页']
 assert s['A2'].value=='0008' and s['B2'].value==0.123456789
@@ -97,7 +97,7 @@ for row in range(1,51):
     s.append([f'MT-{row:03}',row,0.9985,'机台运行良率记录'*3,None]*2)
     s.cell(row,3).number_format='0.00%'
     s.cell(row,8).number_format='0.00%'
-w.save(sys.argv[2])`, env.filename);
+w.save(sys.argv[1])`, env.filename);
   const bytes = readFileSync(env.filename);
   const file = saveUploadedWorkbook(env.artifacts, "500-cells.xlsx", bytes);
   for (const [range, count] of [["A1:A201", 201], ["A1:J21", 210], ["A1:J50", 500]] as const) {
@@ -125,11 +125,11 @@ w.save(sys.argv[2])`, env.filename);
 test("bounds multibyte previews with explicit truncation and actionable size errors", async (t) => {
   const env = fixture(t);
   python(`from openpyxl import load_workbook
-w=load_workbook(sys.argv[2])
+w=load_workbook(sys.argv[1])
 s=w['第二页']
 for row in range(1,501):
     s.cell(row,1,'中'*300)
-w.save(sys.argv[2])`, env.filename);
+w.save(sys.argv[1])`, env.filename);
   const file = saveUploadedWorkbook(env.artifacts, "long-text.xlsx", readFileSync(env.filename));
   for (const [range, count, length] of [["A1", 1, 200], ["A1:A200", 200, 40]] as const) {
     const preview = JSON.parse(JSON.stringify(await env.context.inspectWorkbook({ file_id: file.id, sheet: "第二页", range })));
@@ -187,11 +187,11 @@ test("rejects fake, macro, unsafe XML, expansion and unsupported object packages
     ["../escape.xml", "<x/>"], ["xl/externalLinks/externalLink1.xml", "<x/>"],
   ]) {
     const modified = path.join(env.root, "bad.xlsx");
-    python("import zipfile,shutil\nshutil.copyfile(sys.argv[2],sys.argv[3])\nwith zipfile.ZipFile(sys.argv[3],'a') as z: z.writestr(sys.argv[4],sys.argv[5])", env.filename, modified, name!, value!);
+    python("import zipfile,shutil\nshutil.copyfile(sys.argv[1],sys.argv[2])\nwith zipfile.ZipFile(sys.argv[2],'a') as z: z.writestr(sys.argv[3],sys.argv[4])", env.filename, modified, name!, value!);
     await assert.rejects(validateUploadedWorkbook(runtime, "bad.xlsx", readFileSync(modified)));
   }
   const bomb = path.join(env.root, "bomb.xlsx");
-  python("import zipfile,shutil\nshutil.copyfile(sys.argv[2],sys.argv[3])\nwith zipfile.ZipFile(sys.argv[3],'a',compression=zipfile.ZIP_DEFLATED) as z: z.writestr('xl/oversized.xml',b' '*(65*1024*1024))", env.filename, bomb);
+  python("import zipfile,shutil\nshutil.copyfile(sys.argv[1],sys.argv[2])\nwith zipfile.ZipFile(sys.argv[2],'a',compression=zipfile.ZIP_DEFLATED) as z: z.writestr('xl/oversized.xml',b' '*(65*1024*1024))", env.filename, bomb);
   await assert.rejects(validateUploadedWorkbook(runtime, "bomb.xlsx", readFileSync(bomb)), /64 MiB/u);
   assert.equal(env.files.list().length, 0);
 });

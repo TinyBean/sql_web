@@ -457,7 +457,7 @@ export class CodeInterpreterRuntime {
 
   static async create(options: CodeInterpreterOptions): Promise<CodeInterpreterRuntime> {
     const resolvedOptions = {
-      pythonPath: path.resolve(options.pythonPath),
+      pythonPath: path.resolve(options.projectRoot, options.pythonPath),
       bwrapPath: path.resolve(options.bwrapPath),
       prlimitPath: path.resolve(options.prlimitPath),
       projectRoot: path.resolve(options.projectRoot),
@@ -465,6 +465,10 @@ export class CodeInterpreterRuntime {
     let runtimeDir: string | null = null;
     try {
       if (process.platform !== "linux") throw new CodeInterpreterError("仅支持 Linux 沙箱");
+      const pythonBin = path.dirname(resolvedOptions.pythonPath);
+      if (path.basename(pythonBin) !== "bin" || !existsSync(path.join(pythonBin, "..", "pyvenv.cfg"))) {
+        throw new CodeInterpreterError("Python 虚拟环境不可用:请按 README 创建 .venv 并安装 requirements.txt；SQL_WEB_PYTHON_PATH 必须指向虚拟环境的 bin/python");
+      }
       await Promise.all([
         access(resolvedOptions.pythonPath, fsConstants.X_OK),
         access(resolvedOptions.bwrapPath, fsConstants.X_OK),
@@ -480,7 +484,9 @@ export class CodeInterpreterRuntime {
       );
       const probe = await runtime.execute(
         [
-          "import json, socket",
+          "import json, socket, sys",
+          "if sys.prefix != '/python-venv' or sys.prefix == sys.base_prefix:",
+          "    raise RuntimeError('sandbox must use the configured Python virtual environment')",
           "import numpy, scipy",
           "blocked = False",
           "try:",
@@ -525,11 +531,11 @@ export class CodeInterpreterRuntime {
     this.#xlsxStatus ??= (async () => {
       if (!this.status.available) return this.status;
       try {
-        await this.#execute("import sys\nsys.path.insert(0, '/xlsx-dependencies')\nimport openpyxl\nemit_result(summary='Excel dependency ok')",
+        await this.#execute("import openpyxl\nemit_result(summary='Excel dependency ok')",
           { snapshot: null, userInput: null }, undefined, "probe");
         return { available: true, reason: null };
       } catch {
-        return { available: false, reason: "Excel 本地依赖 openpyxl 不可用:请按 README 使用项目随附离线包安装到 .data/xlsx-python 后重启服务" };
+        return { available: false, reason: "Excel 依赖 openpyxl 不可用:请按 README 在 Python 虚拟环境中安装 requirements.txt 后重启服务" };
       }
     })();
     return this.#xlsxStatus;
@@ -594,7 +600,7 @@ export class CodeInterpreterRuntime {
       const workbookPath = path.join(inputDir, "workbook.xlsx");
       if (workbookInput) writeFileSync(workbookPath, workbookInput, { mode: 0o600 });
       const databasePath = input.snapshot?.databasePath ?? emptyDatabasePath;
-      const dependenciesPath = path.join(this.#options.projectRoot, ".data", "xlsx-python");
+      const pythonBin = path.dirname(this.#options.pythonPath);
 
       filterDescriptor = openSync(this.#seccompPath, "r");
       const args = [
@@ -623,8 +629,9 @@ export class CodeInterpreterRuntime {
         "--ro-bind",
         "/etc/ld.so.cache",
         "/etc/ld.so.cache",
-        ...(spreadsheetMode && existsSync(dependenciesPath)
-          ? ["--ro-bind", dependenciesPath, "/xlsx-dependencies"] : []),
+        "--ro-bind",
+        path.dirname(pythonBin),
+        "/python-venv",
         "--proc",
         "/proc",
         "--dev",
@@ -656,7 +663,7 @@ export class CodeInterpreterRuntime {
         "--clearenv",
         "--setenv",
         "PATH",
-        "/usr/bin:/bin",
+        "/python-venv/bin:/usr/bin:/bin",
         "--setenv",
         "HOME",
         "/tmp/home",
@@ -676,7 +683,7 @@ export class CodeInterpreterRuntime {
         "--nofile=64",
         "--fsize=8388608",
         "--",
-        this.#options.pythonPath,
+        path.join("/python-venv/bin", path.basename(this.#options.pythonPath)),
         "-I",
         "/runner.py",
       ];

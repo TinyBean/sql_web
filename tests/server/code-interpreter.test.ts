@@ -54,7 +54,7 @@ function noSnapshotInput(userInput: JsonObject | null = null): CodeInterpreterIn
 before(async () => {
   directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-code-test-"));
   runtime = await CodeInterpreterRuntime.create({
-    pythonPath: "/usr/bin/python3",
+    pythonPath: path.join(process.cwd(), ".venv/bin/python"),
     bwrapPath: "/usr/bin/bwrap",
     prlimitPath: "/usr/bin/prlimit",
     projectRoot,
@@ -209,6 +209,48 @@ test("runs general Python with an explicit null database input", async () => {
     truncated: false,
     hasUserInput: false,
   });
+});
+
+test("loads scientific and Excel packages from the read-only venv while blocking host files and network", async () => {
+  const result = await runtime.execute([
+    "import errno, os, socket, sys",
+    "import numpy, scipy, openpyxl",
+    "from scipy.linalg import solve",
+    "assert sys.prefix == '/python-venv' and sys.prefix != sys.base_prefix",
+    "assert all(package.__file__.startswith('/python-venv/') for package in (numpy, scipy, openpyxl))",
+    "assert not any('dist-packages' in entry for entry in sys.path)",
+    `assert not os.path.exists(${JSON.stringify(projectRoot)})`,
+    "try:",
+    "    with open('/python-venv/pyvenv.cfg', 'a') as config:",
+    "        pass",
+    "except OSError as error:",
+    "    assert error.errno in (errno.EROFS, errno.EACCES)",
+    "else:",
+    "    raise AssertionError('virtual environment must be read-only')",
+    "try:",
+    "    socket.socket()",
+    "except PermissionError:",
+    "    pass",
+    "else:",
+    "    raise AssertionError('network must be blocked')",
+    "emit_result(metrics={'solution': float(solve([[2.0]], [6.0])[0])})",
+  ].join("\n"), noSnapshotInput(), undefined);
+  assert.equal(result.details.result.metrics?.["solution"], 3);
+});
+
+test("missing virtual environments and system interpreters fail with installation guidance", async () => {
+  for (const pythonPath of [path.join(directory, ".venv/bin/python"), "/usr/bin/python3"]) {
+    const unavailable = await CodeInterpreterRuntime.create({
+      pythonPath, bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit", projectRoot,
+    });
+    try {
+      assert.equal(unavailable.status.available, false);
+      assert.match(unavailable.status.reason!, /虚拟环境.*requirements\.txt/u);
+      await assert.rejects(unavailable.execute("emit_result(metrics={'value': 1})", noSnapshotInput(), undefined), /虚拟环境/u);
+    } finally {
+      unavailable.dispose();
+    }
+  }
 });
 
 test("requires one result and safely normalizes common result shapes", async () => {

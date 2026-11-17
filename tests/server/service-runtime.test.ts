@@ -64,7 +64,7 @@ function fixtureConfig(directory: string): AppConfig {
     model: { provider: "test", model: "test" },
     email: null,
     codeInterpreter: {
-      pythonPath: "/usr/bin/python3",
+      pythonPath: path.join(process.cwd(), ".venv/bin/python"),
       bwrapPath: "/usr/bin/bwrap",
       prlimitPath: "/usr/bin/prlimit",
     },

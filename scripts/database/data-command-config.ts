@@ -62,7 +62,7 @@ export function loadDataCommandConfig(
       contextWindow: tokenSetting("SQL_WEB_DAILY_ANALYSIS_CONTEXT_WINDOW", 262144, 16384),
       maxOutputTokens: tokenSetting("SQL_WEB_DAILY_ANALYSIS_MAX_OUTPUT_TOKENS", 32768, 1024),
       codeInterpreter: {
-        pythonPath: path.resolve(projectRoot, setting("SQL_WEB_PYTHON_PATH")?.trim() || "/usr/bin/python3"),
+        pythonPath: path.resolve(projectRoot, setting("SQL_WEB_PYTHON_PATH")?.trim() || ".venv/bin/python"),
         bwrapPath: path.resolve(projectRoot, setting("SQL_WEB_BWRAP_PATH")?.trim() || "/usr/bin/bwrap"),
         prlimitPath: path.resolve(projectRoot, setting("SQL_WEB_PRLIMIT_PATH")?.trim() || "/usr/bin/prlimit"),
       },

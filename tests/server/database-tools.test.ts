@@ -361,7 +361,7 @@ test("chart metrics computed from a complete snapshot feed direct-data dashboard
   const artifacts = artifactStore.forSession(sessionId);
   const dashboard = new SessionDashboardStore(artifactStore, () => createDefaultDashboard());
   const runtime = await CodeInterpreterRuntime.create({
-    pythonPath: "/usr/bin/python3", bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit", projectRoot: directory,
+    pythonPath: path.join(process.cwd(), ".venv/bin/python"), bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit", projectRoot: directory,
   });
   t.after(() => {
     runtime.dispose();

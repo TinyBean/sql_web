@@ -57,6 +57,7 @@ function fixture(t: TestContext, timeoutMs = 20_000) {
   });
   const config = loadDataCommandConfig(directory, {
     SQL_WEB_PROVIDER: "test", SQL_WEB_MODEL: "test-model", SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS: String(timeoutMs),
+    SQL_WEB_PYTHON_PATH: path.join(process.cwd(), ".venv/bin/python"),
   });
   initializeOeeDatabase(config.databasePath);
   const database = new DatabaseSync(config.databasePath);

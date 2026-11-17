@@ -1,6 +1,4 @@
 """Fixed offline XLSX reader/editor. No user code, formulas or external fetches."""
-import sys
-sys.path.insert(0, "/xlsx-dependencies")
 import json
 import math
 import re

@@ -1,7 +1,4 @@
 """Fixed value-only exporter; input comes from a complete, session-owned snapshot."""
-import sys
-sys.path.insert(0, "/xlsx-dependencies")
-
 import math
 import unicodedata
 from datetime import datetime, timedelta, timezone

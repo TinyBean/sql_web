@@ -138,7 +138,7 @@ export function loadConfig(env: AppEnvironment): AppConfig {
     model: { provider, model },
     email: loadEmailConfig(env),
     codeInterpreter: {
-      pythonPath: path.resolve(env.SQL_WEB_PYTHON_PATH?.trim() || "/usr/bin/python3"),
+      pythonPath: resolveProjectPath(env.SQL_WEB_PYTHON_PATH?.trim() || undefined, ".venv/bin/python"),
       bwrapPath: path.resolve(env.SQL_WEB_BWRAP_PATH?.trim() || "/usr/bin/bwrap"),
       prlimitPath: path.resolve(env.SQL_WEB_PRLIMIT_PATH?.trim() || "/usr/bin/prlimit"),
     },

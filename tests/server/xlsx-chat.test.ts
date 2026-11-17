@@ -105,7 +105,7 @@ test("chat activates xlsx, exports OEE query results, downloads under authentica
   const artifacts = new ArtifactStore(path.join(root, "artifacts"));
   const stores: AgentSessionStore[] = [];
   const openStore = async () => {
-    const interpreter = await CodeInterpreterRuntime.create({ projectRoot: process.cwd(), pythonPath: "/usr/bin/python3", bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
+    const interpreter = await CodeInterpreterRuntime.create({ projectRoot: process.cwd(), pythonPath: path.join(process.cwd(), ".venv/bin/python"), bwrapPath: "/usr/bin/bwrap", prlimitPath: "/usr/bin/prlimit" });
     const store = await AgentSessionStore.open({ cwd: root, database, artifacts, codeInterpreter: interpreter, agentDir, sessionDir: path.join(root, "sessions"),
       model: { provider: "test", model: "test" }, loadInitialDashboard: () => createDefaultDashboard() });
     stores.push(store);

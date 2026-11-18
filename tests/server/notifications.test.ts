@@ -130,8 +130,11 @@ test("daily SMTP config reuses environment precedence and defers validation unti
   ].join("\n"));
   const loaded = loadDataCommandConfig(f.directory, { SQL_WEB_SMTP_HOST: "127.0.0.1" });
   assert.equal(loaded.notificationOptions.configPath, path.join(f.directory, ".data", "notifications.json"));
-  assert.deepEqual(loaded.notificationOptions.loadEmail(), { host: "127.0.0.1", port: 2525,
+  assert.deepEqual(loaded.notificationOptions.loadEmail(), { host: "relay.example.com", port: 2525,
     fromAddress: '"JV OEE Agent"@sdsscn.com', fromName: "JV OEE Agent" });
-  const incomplete = loadDataCommandConfig(f.directory, { SQL_WEB_MAIL_FROM_ADDRESS: "" });
-  assert.throws(() => incomplete.notificationOptions.loadEmail());
+  writeFileSync(path.join(f.directory, ".env"), "SQL_WEB_SMTP_HOST=relay.example.com\nSQL_WEB_MAIL_FROM_ADDRESS=\n");
+  const incomplete = loadDataCommandConfig(f.directory, {
+    SQL_WEB_MAIL_FROM_ADDRESS: "shell@example.com", SQL_WEB_MAIL_FROM_NAME: "Sender",
+  });
+  assert.throws(() => incomplete.notificationOptions.loadEmail(), /SQL_WEB_MAIL_FROM_ADDRESS/u);
 });

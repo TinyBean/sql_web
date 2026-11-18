@@ -1,7 +1,9 @@
 /// <reference lib="dom" />
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -14,6 +16,8 @@ import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import { parseHTML } from "linkedom";
+import { stageProjectCli } from "../helpers/project-cli.ts";
+import { loadConfig, loadProjectEnvironment } from "../../src/server/config.ts";
 import {
   exportSessionHtml,
   resolveSessionFile,
@@ -560,6 +564,27 @@ test("exports a header-only persisted session for diagnostics", (t) => {
   const { document } = executeViewer(html);
   assert.equal(document.querySelectorAll(".timeline-entry").length, 1);
   assert.match(document.querySelector(".timeline-entry")?.textContent ?? "", /header-session/u);
+});
+
+test("session export uses the web session directory unless --session-dir is supplied", (t) => {
+  const root = temporaryDirectory(t, "sql-web-export-config-");
+  const entry = stageProjectCli(root, "session-to-html");
+  const env = { ...process.env, SQL_WEB_SESSION_DIR: "shell-sessions" };
+  const file = path.join(root, ".env");
+  writeFileSync(file, "SQL_WEB_PROVIDER=test\nSQL_WEB_MODEL=test\nSQL_WEB_SESSION_DIR=file-sessions\n");
+  const web = loadConfig(loadProjectEnvironment(file, { SQL_WEB_SESSION_DIR: env.SQL_WEB_SESSION_DIR }), root);
+  const explicit = path.join(root, "explicit");
+  for (const directory of [web.sessionDir, explicit]) {
+    mkdirSync(directory);
+    writeFileSync(path.join(directory, "session.jsonl"), jsonLines([{
+      type: "session", version: 3, id: path.basename(directory), timestamp: "2026-09-07T04:00:00Z", cwd: root,
+    }]));
+  }
+  const output = path.join(root, "export.html");
+  for (const [directory, flags] of [[web.sessionDir, []], [explicit, ["--session-dir", explicit]]] as const) {
+    execFileSync(process.execPath, [...entry, ...flags, "latest", output], { env, stdio: "pipe" });
+    assert.equal(embeddedSessionData(readFileSync(output, "utf8")).id, path.basename(directory));
+  }
 });
 
 test("resolves an exact session ID and selects latest from JSONL modification times", (t) => {

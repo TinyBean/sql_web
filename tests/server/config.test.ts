@@ -26,6 +26,43 @@ test("web and daily analysis resolve default and custom virtual environments fro
     "/opt/python-venv/bin/python");
 });
 
+test("web and data commands resolve the same per-field settings from conflicting environments", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "sql-web-shared-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, ".env");
+  writeFileSync(file, [
+    "SQL_WEB_DB_PATH=db/file.sqlite", "SQL_WEB_DEFAULT_DASHBOARD_PATH=snapshots/file.json",
+    "SQL_WEB_PYTHON_PATH=", "SQL_WEB_BWRAP_PATH=bin/file-bwrap",
+    "SQL_WEB_PROVIDER=file-provider", "SQL_WEB_MODEL=file-model",
+    "SQL_WEB_SMTP_HOST=file.example", "SQL_WEB_MAIL_FROM_ADDRESS=sender@example.com",
+  ].join("\n"));
+  const inherited = {
+    SQL_WEB_DB_PATH: "shell.sqlite", SQL_WEB_DEFAULT_DASHBOARD_PATH: "shell.json",
+    SQL_WEB_PYTHON_PATH: "bin/shell-python", SQL_WEB_BWRAP_PATH: "bin/shell-bwrap", SQL_WEB_PRLIMIT_PATH: "bin/prlimit",
+    SQL_WEB_PROVIDER: "shell-provider", SQL_WEB_MODEL: "shell-model",
+    SQL_WEB_SMTP_HOST: "shell.example", SQL_WEB_MAIL_FROM_NAME: "Sender",
+  };
+  const web = loadConfig(loadProjectEnvironment(file, { ...inherited }), root);
+  const command = loadDataCommandConfig(root, inherited);
+  for (const config of [web, command]) {
+    assert.equal(config.databasePath, path.join(root, "db/file.sqlite"));
+    assert.equal(config.defaultDashboardPath, path.join(root, "snapshots/file.json"));
+  }
+  for (const interpreter of [web.codeInterpreter, command.analysis.codeInterpreter]) {
+    assert.deepEqual(interpreter, {
+      pythonPath: path.join(root, ".venv/bin/python"), bwrapPath: path.join(root, "bin/file-bwrap"),
+      prlimitPath: path.join(root, "bin/prlimit"),
+    });
+  }
+  for (const email of [web.email, command.notificationOptions.loadEmail()]) {
+    assert.deepEqual(email, { host: "file.example", port: 25, fromAddress: "sender@example.com", fromName: "Sender" });
+  }
+  for (const { provider, model } of [web.model, command.analysis]) {
+    assert.equal(provider, "file-provider");
+    assert.equal(model, "file-model");
+  }
+});
+
 test("loads the selected model from the project environment file", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));
   const envPath = path.join(directory, ".env");
@@ -43,7 +80,10 @@ test("loads the selected model from the project environment file", (t) => {
   );
   t.after(() => rmSync(directory, { recursive: true, force: true }));
 
-  const environment = loadProjectEnvironment(envPath, {});
+  const target: NodeJS.ProcessEnv = { SHELL_ONLY: "inherited" };
+  const environment = loadProjectEnvironment(envPath, target);
+  assert.equal(target["SQL_WEB_MODEL"], "test-model");
+  assert.ok(!("SHELL_ONLY" in environment));
   const config = loadConfig(environment);
 
   assert.equal(config.host, "0.0.0.0");
@@ -112,17 +152,24 @@ test("domain login has HTTP defaults, configurable routing and explicit Secure c
   }
 });
 
-test("does not inherit the selected model from the shell", (t) => {
+test("web and data commands only select models from the file, including when a field is missing", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "sqlite-qa-config-"));
   const envPath = path.join(directory, ".env");
-  writeFileSync(envPath, "PORT=3000\n");
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-
-  const environment = loadProjectEnvironment(envPath, {
-    SQL_WEB_PROVIDER: "shell-provider",
-    SQL_WEB_MODEL: "shell-model",
-  });
-  assert.throws(() => loadConfig(environment), /SQL_WEB_PROVIDER 和 SQL_WEB_MODEL/u);
+  const shell = { SQL_WEB_PROVIDER: "shell-provider", SQL_WEB_MODEL: "shell-model", SQL_WEB_DB_PATH: "shell.sqlite" };
+  const withoutFile = loadDataCommandConfig(directory, shell);
+  assert.equal(withoutFile.databasePath, path.join(directory, "shell.sqlite"));
+  assert.equal(withoutFile.analysis.provider, "");
+  assert.equal(withoutFile.analysis.model, "");
+  for (const [content, provider, model] of [
+    ["", "", ""], ["SQL_WEB_PROVIDER=file-provider", "file-provider", ""], ["SQL_WEB_MODEL=file-model", "", "file-model"],
+  ] as const) {
+    writeFileSync(envPath, content);
+    assert.throws(() => loadConfig(loadProjectEnvironment(envPath, { ...shell })), /SQL_WEB_PROVIDER 和 SQL_WEB_MODEL/u);
+    const { analysis } = loadDataCommandConfig(directory, shell);
+    assert.equal(analysis.provider, provider);
+    assert.equal(analysis.model, model);
+  }
 });
 
 test("reports a missing project environment file", (t) => {

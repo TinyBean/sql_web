@@ -22,7 +22,11 @@ npm run build && setsid -f node --enable-source-maps dist/src/server/main.js >> 
 
 ## 配置与登录
 
-完整配置见 [.env.example](.env.example)，相对路径均以项目根目录为基准。首次启动前：
+Web、数据命令、每日任务和会话导出都优先读取项目 `.env`。进程环境变量只能补充文件中缺少的配置项，两处均缺时使用该项的默认值。文件中显式留空的值按该项的空值规则处理。此顺序也适用于 OEE API 地址、凭据和每日分析参数。配置中的相对路径以项目根目录为基准。完整配置见 [.env.example](.env.example)。
+
+Web 和每日分析只从项目 `.env` 读取模型。数据初始化、数据同步和每日任务的 `--dry-run` 可在缺少 `.env` 或模型时运行。
+
+首次启动前：
 
 1. 在项目 `.env` 中设置 `SQL_WEB_PROVIDER`、`SQL_WEB_MODEL`。
 2. 在 `.data/agent/models.json` 或 `models-store.json` 中声明模型，凭据放在 `.data/agent/auth.json`；服务不读取用户主目录的 Pi 配置。

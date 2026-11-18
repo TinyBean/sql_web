@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { stageProjectCli } from "../helpers/project-cli.ts";
 import test, { type TestContext } from "node:test";
 import type { DashboardState } from "../../src/shared/dashboard.ts";
 import type { AppLogger } from "../../src/server/logger.ts";
@@ -165,25 +165,25 @@ test("the update runner rejects dry-run before loading snapshots, updating, or w
 });
 
 test("daily CLI dry-run reports database requests and registered updates without predictions or legacy fields", (t) => {
-  const { directory, config } = fixture(t);
-  const compiled = import.meta.url.endsWith(".js");
-  const entry = fileURLToPath(new URL(compiled ? "../../scripts/oee-daily.js" : "../../scripts/oee-daily.ts", import.meta.url));
-  const result = spawnSync(process.execPath, [...(compiled ? [] : ["--import", "tsx"]), entry,
-    "--dry-run", "--through-date", "2026-01-12"], { encoding: "utf8", timeout: 10_000, env: {
-    ...process.env, SQL_WEB_DB_PATH: config.databasePath, SQL_WEB_DEFAULT_DASHBOARD_PATH: config.defaultDashboardPath,
-  } });
+  const { directory } = fixture(t);
+  const entry = stageProjectCli(directory, "oee-daily");
+  writeFileSync(path.join(directory, ".env"), "SQL_WEB_DB_PATH=data/file.sqlite\n");
+  const initialFiles = readdirSync(directory);
+  const result = spawnSync(process.execPath, [...entry, "--dry-run", "--through-date", "2026-01-12"], {
+    encoding: "utf8", timeout: 10_000, env: { ...process.env, SQL_WEB_DB_PATH: "shell.sqlite" },
+  });
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
   assert.equal(output.dryRun, true);
   assert.equal(output.requests.length, 2);
-  assert.equal(output.databasePath, config.databasePath);
+  assert.equal(output.databasePath, path.join(directory, "data/file.sqlite"));
   assert.deepEqual(output.dashboards, [{ dashboardId: "default", hasUpdate: true }, { dashboardId: "analysis", hasUpdate: true }]);
   assert.deepEqual(Object.keys(output).sort(), ["dashboards", "databasePath", "dryRun", "requests", "throughDate", "timezone"]);
   assert.deepEqual(output.requests, [
     { dataset: "availability", date: "2026-01-12" },
     { dataset: "dut_utilization", date: "2026-01-12" },
   ]);
-  assert.deepEqual(readdirSync(directory), []);
+  assert.deepEqual(readdirSync(directory), initialFiles);
 });
 
 test("shared registration loads initial snapshots without requiring an update agent", () => {

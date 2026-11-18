@@ -1,5 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { PROJECT_ROOT as projectRoot } from "../src/server/config.ts";
 import { loadDataCommandConfig } from "./database/data-command-config.ts";
 import { DailyFileLogger, type AppLogger } from "../src/server/logger.ts";
 import { assertDate } from "../src/server/database/business-dates.ts";
@@ -11,9 +12,6 @@ import {
   type SyncOptions,
 } from "./database/oee-data-store.ts";
 
-const projectRoot = path.basename(path.resolve(import.meta.dirname, "..")) === "dist"
-  ? path.resolve(import.meta.dirname, "../..")
-  : path.resolve(import.meta.dirname, "..");
 let logger: AppLogger | undefined;
 
 function usage(): never {

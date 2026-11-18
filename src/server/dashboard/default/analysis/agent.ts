@@ -23,6 +23,7 @@ import {
   createRankMachinesTool, rankMachinesParameters, RANK_MACHINES_LOCAL_TOOL_NAME,
   type MachineRankingMeasurement, type MachineRankingScope, type MachineRankingCache,
 } from "../../../skills/test-oee-calculator/assets/machine-ranking.ts";
+import { requireProjectModel } from "../../../config.ts";
 import { assertModelInLocalCatalog } from "../../../agent/local-model-catalog.ts";
 import { loadAgentSkillCatalog, type SkillSessionOptions } from "../../../agent/skill-catalog.ts";
 import { createOeeSkillRuntime } from "../../../agent/oee-skill-runtime.ts";
@@ -490,7 +491,7 @@ export async function runAnalysisAgent(
   onCheckpoint?: (result: AnalysisResult) => void,
 ): Promise<void> {
   const lifetime = AbortSignal.any([AbortSignal.timeout(Math.max(0, deadline - Date.now())), ...(signal ? [signal] : [])]);
-  assertModelInLocalCatalog(config.agentDir, { provider: config.provider, model: config.model });
+  assertModelInLocalCatalog(config.agentDir, requireProjectModel(config.provider, config.model));
   const interpreter = await CodeInterpreterRuntime.create({ ...config.codeInterpreter, projectRoot: config.cwd });
   try {
     lifetime.throwIfAborted();

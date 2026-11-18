@@ -404,9 +404,17 @@ test("calculation failures never publish a partial dashboard", async (t) => {
 
 test("data commands share storage overrides and environment precedence", (t) => {
   const { directory } = fixture(t);
-  writeFileSync(path.join(directory, ".env"), "SQL_WEB_DB_PATH=from-file.sqlite\nSQL_WEB_DEFAULT_DASHBOARD_PATH=custom/default.json\nAPI_USER=test-user\nAPI_PWD=test-pass\n");
-  const config = loadDataCommandConfig(directory, { SQL_WEB_DB_PATH: "from-env.sqlite" });
-  assert.equal(config.databasePath, path.join(directory, "from-env.sqlite"));
+  writeFileSync(path.join(directory, ".env"), [
+    "SQL_WEB_DB_PATH=from-file.sqlite", "SQL_WEB_DEFAULT_DASHBOARD_PATH=custom/default.json",
+    "API_USER=test-user", "API_PWD=test-pass", "SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS=60000",
+  ].join("\n"));
+  const config = loadDataCommandConfig(directory, {
+    SQL_WEB_DB_PATH: "from-env.sqlite", API_USER: "shell-user", API_PWD: "shell-pass",
+    SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS: "500",
+  });
+  assert.equal(config.databasePath, path.join(directory, "from-file.sqlite"));
   assert.equal(config.defaultDashboardPath, path.join(directory, "custom/default.json"));
   assert.equal(config.apiUsername, "test-user");
+  assert.equal(config.apiPassword, "test-pass");
+  assert.equal(config.analysis.timeoutMs, 60000);
 });

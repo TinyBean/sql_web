@@ -55,8 +55,9 @@ function fixture(t: TestContext, timeoutMs = 20_000) {
     for (const connection of connections) connection.close();
     rmSync(directory, { recursive: true, force: true });
   });
+  writeFileSync(path.join(directory, ".env"), "SQL_WEB_PROVIDER=test\nSQL_WEB_MODEL=test-model\n");
   const config = loadDataCommandConfig(directory, {
-    SQL_WEB_PROVIDER: "test", SQL_WEB_MODEL: "test-model", SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS: String(timeoutMs),
+    SQL_WEB_DAILY_ANALYSIS_TIMEOUT_MS: String(timeoutMs),
     SQL_WEB_PYTHON_PATH: path.join(process.cwd(), ".venv/bin/python"),
   });
   initializeOeeDatabase(config.databasePath);
@@ -647,6 +648,16 @@ test("fatal worker validation errors preserve structured issues in the command r
   assert.deepEqual(saved.validation, result.validation);
   assert.equal(saved.validation.issues[0].expected, "frozen-minimum");
   assert.equal(saved.validation.issues[0].actual, "wrong-evidence");
+});
+
+test("missing project model is reported during analysis after the numeric dashboard is available", async (t) => {
+  const { directory } = fixture(t);
+  writeFileSync(path.join(directory, ".env"), "SQL_WEB_PROVIDER=test\n");
+  const config = loadDataCommandConfig(directory, { SQL_WEB_MODEL: "shell-model" });
+  const result = await generateDefaultDashboard(config, "2026-01-12", new Date(), [], logger);
+  assert.equal(result.analysisStatus, "failed");
+  assert.match(result.analysisReason ?? "", /SQL_WEB_PROVIDER 和 SQL_WEB_MODEL/u);
+  assertNumericCardsUnchanged(result.state, result.analysisArtifactDir);
 });
 
 test("invalid timeout settings fail early", (t) => {

@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { parseEnv } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   migrateSessionEntries,
@@ -23,15 +22,13 @@ import {
   serializeMessages,
   type TranscriptSourceMessage,
 } from "../src/server/agent/agent-sessions.ts";
+import { PROJECT_ROOT as projectRoot, readCommandEnvironment, resolveSessionDirectory } from "../src/server/config.ts";
 import type { ChatMessage } from "../src/shared/contracts.ts";
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{8,100}$/u;
 const HTML_EXTENSION_PATTERN = /\.html?$/iu;
 
-const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-export const projectRoot = path.basename(path.resolve(moduleDirectory, "..")) === "dist"
-  ? path.resolve(moduleDirectory, "../..")
-  : path.resolve(moduleDirectory, "..");
+export { projectRoot };
 
 export interface SessionHtmlBranch {
   readonly leafId: string;
@@ -941,16 +938,6 @@ export function renderSessionHtml(data: SessionHtmlData): string {
 `;
 }
 
-function configuredSessionDirectory(): string {
-  let fileValue: string | undefined;
-  try {
-    fileValue = parseEnv(readFileSync(path.join(projectRoot, ".env"), "utf8"))["SQL_WEB_SESSION_DIR"];
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  return path.resolve(projectRoot, process.env["SQL_WEB_SESSION_DIR"] ?? fileValue ?? ".data/sessions");
-}
-
 function sessionFiles(sessionDir: string): string[] {
   try {
     return readdirSync(sessionDir, { withFileTypes: true })
@@ -978,7 +965,9 @@ export function resolveSessionFile(input: string, sessionDir?: string): string {
     normalized.includes("/") || normalized.includes("\\");
   if (looksLikePath) throw new Error(`找不到 session 文件:${directPath}`);
 
-  const resolvedSessionDir = path.resolve(sessionDir ?? configuredSessionDirectory());
+  const resolvedSessionDir = sessionDir === undefined
+    ? resolveSessionDirectory(readCommandEnvironment(projectRoot), projectRoot)
+    : path.resolve(sessionDir);
   const files = sessionFiles(resolvedSessionDir);
   if (normalized === "latest") {
     const latest = files

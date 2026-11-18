@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { stageProjectCli } from "../helpers/project-cli.ts";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -546,16 +546,18 @@ test("logs malformed API response import failures and preserves failed audit", a
   assert.equal(f.database.prepare("SELECT status FROM oee_import_windows").get()?.["status"], "failed");
 });
 
-function cli(args: readonly string[], databasePath: string, apiBaseUrl: string) {
-  const compiled = import.meta.url.endsWith(".js");
-  const entry = fileURLToPath(new URL(compiled ? "../../scripts/oee-data.js" : "../../scripts/oee-data.ts", import.meta.url));
-  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, [...(compiled ? [] : ["--import", "tsx"]), entry, ...args], {
-      env: {
-        ...process.env, NODE_NO_WARNINGS: "1", SQL_WEB_DB_PATH: databasePath, OEE_API_BASE_URL: apiBaseUrl,
-        API_USER: "test-user", API_PWD: "test-password",
-      },
-    });
+function dataCli(f: Awaited<ReturnType<typeof fixture>>) {
+  const entry = stageProjectCli(f.directory, "oee-data");
+  writeFileSync(path.join(f.directory, ".env"), [
+    "SQL_WEB_DB_PATH=oee.sqlite", "OEE_API_BASE_URL=" + f.apiBaseUrl,
+    "API_USER=test-user", "API_PWD=test-password",
+  ].join("\n"));
+  const env = {
+    ...process.env, NODE_NO_WARNINGS: "1", SQL_WEB_DB_PATH: "shell.sqlite",
+    OEE_API_BASE_URL: "http://127.0.0.1:1/", API_USER: "shell-user", API_PWD: "shell-password",
+  };
+  return (args: readonly string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [...entry, ...args], { env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
@@ -567,13 +569,14 @@ function cli(args: readonly string[], databasePath: string, apiBaseUrl: string) 
 
 test("CLI rejects removed commands and invalid arguments before opening the database", async (t) => {
   const f = await fixture(t);
+  const cli = dataCli(f);
   f.database.exec(`INSERT INTO oee_import_runs(id,command,parameters_json,status,owner_pid,started_at)
     VALUES('untouched','sync','{}','running',999999999,'2026-08-20T00:00:00+08:00');`);
   for (const args of [[], ["import"], ["pull"], ["reimport"], ["status"], ["repair-dut"], ["init", "extra"],
     ["sync"], ["sync", "all"], ["sync", "unknown", "2026-08-21"], ["sync", "all", "2026-02-30"],
     ["sync", "all", "2026-08-21", "bad"], ["sync", "all", "2026-08-21", "2026-08-22"],
     ["sync", "all", "2026-08-21", "2026-08-20", "extra"]]) {
-    const result = await cli(args, f.databasePath, f.apiBaseUrl);
+    const result = await cli(args);
     assert.equal(result.code, 1, result.stderr);
     assert.match(result.stderr, /用法|数据集|日期|不能晚于/u);
     assert.equal(f.database.prepare("SELECT status FROM oee_import_runs WHERE id='untouched'").get()?.["status"], "running", args.join(" "));
@@ -583,19 +586,21 @@ test("CLI rejects removed commands and invalid arguments before opening the data
 
 test("CLI init preserves facts and sync supports all datasets, single datasets and warning exits", async (t) => {
   const f = await fixture(t);
-  const initialized = await cli(["init"], f.databasePath, f.apiBaseUrl);
+  const cli = dataCli(f);
+  const initialized = await cli(["init"]);
   assert.equal(initialized.code, 0, initialized.stderr);
-  assert.equal((JSON.parse(initialized.stdout) as { initialized: boolean }).initialized, true);
-  const all = await cli(["sync", "all", "2026-08-21", "2026-08-20"], f.databasePath, f.apiBaseUrl);
+  assert.deepEqual(JSON.parse(initialized.stdout), { initialized: true, databasePath: f.databasePath });
+  const all = await cli(["sync", "all", "2026-08-21", "2026-08-20"]);
   assert.equal(all.code, 0, all.stderr);
   assert.equal((JSON.parse(all.stdout) as SyncResult).datasets.length, 2);
   const before = f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all();
-  assert.equal((await cli(["init"], f.databasePath, f.apiBaseUrl)).code, 0);
+  assert.equal((await cli(["init"])).code, 0);
   assert.deepEqual(f.database.prepare("SELECT * FROM oee_availability ORDER BY id").all(), before);
-  const single = await cli(["sync", "dut_utilization", "2026-08-21"], f.databasePath, f.apiBaseUrl);
+  const single = await cli(["sync", "dut_utilization", "2026-08-21"]);
   assert.equal(single.code, 0, single.stderr);
   assert.deepEqual((JSON.parse(single.stdout) as SyncResult).datasets.map(({ dataset }) => dataset), ["dut_utilization"]);
   f.reply.body = emptyAvailabilityResponse();
-  const warning = await cli(["sync", "availability", "2026-08-21"], f.databasePath, f.apiBaseUrl);
+  const warning = await cli(["sync", "availability", "2026-08-21"]);
   assert.equal(warning.code, 2, warning.stderr);
+  assert.equal(existsSync(path.join(f.directory, "shell.sqlite")), false);
 });

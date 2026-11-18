@@ -105,6 +105,24 @@ async function createFixture(
   return baseUrl;
 }
 
+test("returns a correlated 400 on URL parse failure and continues serving requests", async (t) => {
+  const baseUrl = await createFixture(t);
+  const target = "/test-url-parse-failure";
+  const parse = URL.parse;
+  t.mock.method(URL, "parse", (input: string | URL, base?: string | URL) =>
+    input === target ? null : parse(input, base));
+
+  const response = await fetch(`${baseUrl}${target}`);
+  assert.equal(response.status, 400);
+  const requestId = response.headers.get("x-request-id");
+  assert.ok(requestId);
+  assert.deepEqual(decodeErrorResponse(await response.json()), { error: "请求 URL 无效", requestId });
+
+  const health = await fetch(`${baseUrl}/api/health`);
+  assert.equal(health.status, 200);
+  assert.equal(decodeHealthResponse(await health.json()).ok, true);
+});
+
 test("returns and logs one correlation ID for each API request", async (t) => {
   const entries: Array<{ event: string; requestId?: string; statusCode?: unknown }> = [];
   const logger: NonNullable<WebServerOptions["logger"]> = {

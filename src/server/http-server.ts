@@ -400,37 +400,39 @@ function requestRoute(pathname: string): string {
 export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console,
   authentication = new Authentication(), dashboardForAccount = () => ["default"] }: WebServerOptions): Server {
   return http.createServer(async (request, response) => {
-    const url = new URL(request.url ?? "/", "http://localhost");
     const requestId = randomUUID();
-    const apiRequest = url.pathname.startsWith("/api/") || url.pathname === "/chat/compeletion";
     const requestLogger = logger.child?.({ requestId }) ?? logger;
     const requestStartedAt = Date.now();
-    let requestSettled = false;
     response.setHeader("X-Request-Id", requestId);
-    if (apiRequest) {
-      requestLogger.info?.("http.request.started", {
-        method: request.method ?? "UNKNOWN",
-        route: requestRoute(url.pathname),
-        pathname: url.pathname,
-      });
-      const settleRequest = (aborted: boolean): void => {
-        if (requestSettled) return;
-        requestSettled = true;
+    let url: URL | null = null;
+    try {
+      url = URL.parse(request.url ?? "/", "http://localhost");
+      if (!url) throw new HttpError("请求 URL 无效", 400);
+
+      const { pathname } = url;
+      if (pathname.startsWith("/api/") || pathname === "/chat/compeletion") {
         const fields = {
           method: request.method ?? "UNKNOWN",
-          route: requestRoute(url.pathname),
-          pathname: url.pathname,
-          statusCode: response.statusCode,
-          durationMs: Date.now() - requestStartedAt,
-          aborted,
+          route: requestRoute(pathname),
+          pathname,
         };
-        if (aborted) requestLogger.warn?.("http.request.completed", fields);
-        else requestLogger.info?.("http.request.completed", fields);
-      };
-      response.once("finish", () => settleRequest(false));
-      response.once("close", () => settleRequest(!response.writableFinished));
-    }
-    try {
+        requestLogger.info?.("http.request.started", fields);
+        let requestSettled = false;
+        const settleRequest = (aborted: boolean): void => {
+          if (requestSettled) return;
+          requestSettled = true;
+          const result = {
+            ...fields,
+            statusCode: response.statusCode,
+            durationMs: Date.now() - requestStartedAt,
+            aborted,
+          };
+          if (aborted) requestLogger.warn?.("http.request.completed", result);
+          else requestLogger.info?.("http.request.completed", result);
+        };
+        response.once("finish", () => settleRequest(false));
+        response.once("close", () => settleRequest(!response.writableFinished));
+      }
       if (request.method === "GET" && (await serveStatic(response, publicDir, vendorDir, url.pathname))) return;
 
       if (url.pathname.startsWith("/api/") && !["GET", "HEAD"].includes(request.method ?? "")) authentication.requireSameOrigin(request);
@@ -614,7 +616,7 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       if (error instanceof AuthError && error.statusCode === 429) response.setHeader("Retry-After", "300");
       requestLogger.error("http.request.failed", error, {
         method: request.method ?? "UNKNOWN",
-        pathname: url.pathname,
+        pathname: url?.pathname,
         statusCode: errorStatus(error),
       });
       if (response.destroyed) return;

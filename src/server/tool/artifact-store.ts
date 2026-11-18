@@ -12,7 +12,7 @@ import {
   rmSync,
   writeSync,
 } from "node:fs";
-import { rm } from "node:fs/promises";
+import { open, rm } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SessionExportFiles } from "./export-files.ts";
@@ -64,6 +64,8 @@ export interface CreatedDataSnapshot<Value> extends DataSnapshotDescriptor {
 export interface ResolvedDataSnapshot extends DataSnapshotDescriptor {
   readonly filePath: string;
 }
+
+type SnapshotNameMode = "replace" | "unique";
 
 interface SnapshotWriteMetadata {
   readonly columns: readonly string[];
@@ -222,12 +224,17 @@ export class SessionArtifactStore {
     }
   }
 
-  createJson<Value>(write: (fileDescriptor: number) => Value): CreatedArtifact<Value> {
+  #jsonPaths() {
     mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
     chmodSync(this.#sessionDir, 0o700);
     const artifactName = `${randomUUID()}.json`;
     const finalPath = path.join(this.#sessionDir, artifactName);
     const temporaryPath = path.join(this.#sessionDir, `.${artifactName}.tmp`);
+    return { finalPath, temporaryPath, fileUri: `artifact://${this.#sessionId}/${artifactName}` };
+  }
+
+  createJson<Value>(write: (fileDescriptor: number) => Value): CreatedArtifact<Value> {
+    const { finalPath, temporaryPath, fileUri } = this.#jsonPaths();
     let fileDescriptor: number | undefined;
     try {
       fileDescriptor = openSync(temporaryPath, "wx", 0o600);
@@ -238,7 +245,7 @@ export class SessionArtifactStore {
       renameSync(temporaryPath, finalPath);
       const metadata = lstatSync(finalPath);
       return {
-        fileUri: `artifact://${this.#sessionId}/${artifactName}`,
+        fileUri,
         byteCount: metadata.size,
         value,
       };
@@ -285,22 +292,69 @@ export class SessionArtifactStore {
   createDataSnapshot<Value extends SnapshotWriteMetadata>(
     requestedName: string,
     write: (fileDescriptor: number) => Value,
+    nameMode: SnapshotNameMode = "replace",
   ): CreatedDataSnapshot<Value> {
-    const name = this.snapshotName(requestedName);
-    const manifest = this.#readSnapshotManifest();
-    const previous = manifest.snapshots[name];
+    const name = normalizeDataSnapshotName(requestedName);
     const created = this.createJson(write);
+    try {
+      return this.#commitSnapshot(name, created, nameMode);
+    } catch (error) {
+      rmSync(this.resolveJsonUri(created.fileUri), { force: true });
+      throw error;
+    }
+  }
+
+  async createDataSnapshotAsync<Value extends SnapshotWriteMetadata>(
+    requestedName: string,
+    write: (fileDescriptor: number) => Promise<Value>,
+    signal?: AbortSignal,
+    nameMode: SnapshotNameMode = "replace",
+  ): Promise<CreatedDataSnapshot<Value>> {
+    signal?.throwIfAborted();
+    const base = normalizeDataSnapshotName(requestedName);
+    const { finalPath, temporaryPath, fileUri } = this.#jsonPaths();
+    const file = await open(temporaryPath, "wx", 0o600);
+    try {
+      let value: Value;
+      let byteCount: number;
+      try {
+        signal?.throwIfAborted();
+        value = await write(file.fd);
+        await file.sync();
+        byteCount = (await file.stat()).size;
+      } finally {
+        await file.close();
+      }
+      signal?.throwIfAborted();
+      renameSync(temporaryPath, finalPath);
+      return this.#commitSnapshot(base, { fileUri, byteCount, value }, nameMode);
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      rmSync(finalPath, { force: true });
+      throw error;
+    }
+  }
+
+  #commitSnapshot<Value extends SnapshotWriteMetadata>(
+    requestedName: string, created: CreatedArtifact<Value>, nameMode: SnapshotNameMode,
+  ): CreatedDataSnapshot<Value> {
+    // Choose the name and merge into the current manifest without yielding between reads and rename.
+    const manifest = this.#readSnapshotManifest();
+    let name = this.snapshotName(requestedName);
+    for (let suffix = 2; nameMode === "unique" && Object.hasOwn(manifest.snapshots, name); suffix++) {
+      const ending = "-" + suffix;
+      name = this.snapshotName(requestedName.slice(0, MAX_SNAPSHOT_NAME_CHARACTERS - ending.length) + ending);
+    }
+    const previous = Object.hasOwn(manifest.snapshots, name) ? manifest.snapshots[name] : undefined;
     const artifactMatch = ARTIFACT_URI_PATTERN.exec(created.fileUri);
     const artifactName = artifactMatch?.[2];
     if (!artifactName || !ARTIFACT_ID_PATTERN.test(artifactName)) {
-      rmSync(this.resolveJsonUri(created.fileUri), { force: true });
       throw new ArtifactInputError("新建数据快照的内部标识无效");
     }
     if (
       !Number.isInteger(created.value.rowCount) || created.value.rowCount < 0 ||
       !isStringArray(created.value.columns)
     ) {
-      rmSync(this.resolveJsonUri(created.fileUri), { force: true });
       throw new ArtifactInputError("新建数据快照的元数据无效");
     }
     const descriptor: SnapshotManifestEntry = {
@@ -312,15 +366,10 @@ export class SessionArtifactStore {
       byteCount: created.byteCount,
       createdAt: new Date().toISOString(),
     };
-    try {
-      this.#writeSnapshotManifest({
-        version: SNAPSHOT_MANIFEST_VERSION,
-        snapshots: { ...manifest.snapshots, [name]: descriptor },
-      });
-    } catch (error) {
-      rmSync(this.resolveJsonUri(created.fileUri), { force: true });
-      throw error;
-    }
+    this.#writeSnapshotManifest({
+      version: SNAPSHOT_MANIFEST_VERSION,
+      snapshots: { ...manifest.snapshots, [name]: descriptor },
+    });
     if (previous) {
       try {
         rmSync(this.resolveJsonUri(previous.fileUri), { force: true });

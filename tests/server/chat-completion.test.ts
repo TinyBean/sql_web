@@ -10,7 +10,9 @@ import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore } from "../../src/server/agent/agent-sessions.ts";
 import { API_CHAT_AGENT_RULES, NUMBER_DISPLAY_RULES } from "../../src/server/agent/prompts.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
-import { AppDatabase } from "../../src/server/database/database.ts";
+import { QueryExecutor } from "../../src/server/database/query-executor.ts";
+import { Authentication } from "../../src/server/auth.ts";
+import { pausedAggregate, pausingWorker, queryPid } from "../helpers/query-marker.ts";
 import { createWebServer } from "../../src/server/http-server.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { CodeInterpreterRuntime } from "../../src/server/tool/code-interpreter.ts";
@@ -58,6 +60,7 @@ async function close(server: Server): Promise<void> {
 async function fixture(
   t: TestContext,
   respond: (body: ModelRequest, response: ServerResponse) => ModelReply | Promise<ModelReply> = () => ({ text: "完整回答" }),
+  worker?: URL,
 ) {
   const directory = mkdtempSync(path.join(tmpdir(), "sql-web-completion-"));
   const requests: ModelRequest[] = [];
@@ -105,7 +108,7 @@ async function fixture(
   writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false } }));
   const databasePath = path.join(directory, "test.sqlite");
   initializeOeeDatabase(databasePath);
-  const database = AppDatabase.open({ filePath: databasePath });
+  const database = new QueryExecutor(databasePath, 30_000, worker);
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
   const interpreter = await CodeInterpreterRuntime.create({
     projectRoot: directory, pythonPath: "/nonexistent/python",
@@ -131,6 +134,7 @@ async function fixture(
     loadInitialDashboard: () => createDefaultDashboard(), logger,
   });
   const httpServer = createWebServer({
+    authentication: new Authentication({ verify: async () => true }),
     database, sessions: store, publicDir: path.join(process.cwd(), "public"),
     vendorDir: path.join(process.cwd(), "node_modules"), logger,
   });
@@ -139,7 +143,7 @@ async function fixture(
     await store.dispose();
     await close(httpServer);
     await close(modelServer);
-    database.close();
+    await database.close();
     rmSync(directory, { recursive: true, force: true });
     assert.deepEqual(modelErrors, []);
   });
@@ -155,6 +159,33 @@ async function fixture(
   };
   return { directory, artifacts, store, interpreter, httpServer, baseUrl, post, requests, events, assertEmpty };
 }
+
+test("login, health and session abort respond during a SQLite aggregate before its first row", { timeout: 15000 }, async (t) => {
+  let marker: string;
+  const env = await fixture(t, () => ({
+    calls: [{ name: "execute_sql", args: { sql: pausedAggregate, parameters: [marker] } }],
+  }), pausingWorker);
+  marker = path.join(env.directory, "aggregate-started");
+  const page = await env.store.forAccount("alice").create();
+  const pending = env.store.forAccount("alice").prompt(page.id, "查汇总");
+  const pid = await queryPid(marker);
+  const [health, login] = await Promise.all([
+    fetch(env.baseUrl + "/api/health"),
+    fetch(env.baseUrl + "/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: "alice", password: "test" }) }),
+  ]);
+  assert.equal(health.status, 200);
+  assert.equal(login.status, 200);
+  assert.doesNotThrow(() => process.kill(pid, 0));
+  const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+  const abort = await fetch(env.baseUrl + "/api/sessions/" + page.id + "/abort", {
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie }, body: "{}",
+  });
+  assert.equal(abort.status, 200);
+  await pending;
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  assert.equal((await fetch(env.baseUrl + "/api/schema", { headers: { Cookie: cookie } })).status, 200);
+});
 
 test("completion returns final text after tools, shares website configuration and deletes temporary artifacts", { timeout: 15000 }, async (t) => {
   const env = await fixture(t, (body) => body.messages.some((message) => message.role === "tool")

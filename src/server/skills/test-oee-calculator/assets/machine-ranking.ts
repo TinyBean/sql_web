@@ -113,10 +113,10 @@ export function machineLossSummaries(record: { readonly rows: readonly Dashboard
   });
 }
 
-export function rankMachines(
+export async function rankMachines(
   runtime: TestOeeRuntime,
   params: Static<typeof rankMachinesParameters>, signal?: AbortSignal, cache?: MachineRankingCache,
-): MachineRankingMeasurement {
+): Promise<MachineRankingMeasurement> {
   signal?.throwIfAborted();
   if (!Value.Check(rankMachinesParameters, params)) throw new Error("机台排名参数无效");
   // Reuse the Skill's date validation, including cached requests.
@@ -146,7 +146,7 @@ export function rankMachines(
       WHERE f.kind IN ('MT','ST') AND f.state_group<>'Machine_Running'
       GROUP BY f.machine, f.kind, f.state_group ORDER BY f.kind, f.machine, f.state_group`;
     } else sql = machinePeriodSql(range, true);
-    const data = runtime.querySnapshot("rank-source-" + range.start.replaceAll("-", "") + "-" + range.end.replaceAll("-", ""), sql, signal);
+    const data = await runtime.querySnapshot("rank-source-" + range.start.replaceAll("-", "") + "-" + range.end.replaceAll("-", ""), sql, signal);
     if (data.truncated) throw new Error("机台排名源数据超过快照上限,请缩小日期范围");
     source = { sql, rows: data.rows };
     cache?.set(key, source);
@@ -185,7 +185,7 @@ export function createRankMachinesTool(
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       if (!runtime) throw new Error("OEE Skill 排名工具缺少会话运行依赖");
-      const measurement = rankMachines(runtime, params, signal, cache);
+      const measurement = await rankMachines(runtime, params, signal, cache);
       const evidenceId = recordEvidence?.(measurement);
       const details = { source: "rank_machines", ...(evidenceId ? { evidence_id: evidenceId,
         report_usage: {

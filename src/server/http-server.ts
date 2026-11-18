@@ -97,7 +97,7 @@ export interface ScopedSessionPort extends Omit<WebSessionPort, "forAccount" | "
 
 export interface WebDatabasePort {
   readonly filePath: string;
-  getSchema(): readonly SchemaObject[];
+  getSchema(signal?: AbortSignal): readonly SchemaObject[] | Promise<readonly SchemaObject[]>;
 }
 
 export interface StreamableAgentSession {
@@ -486,10 +486,17 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
       }
 
       if (request.method === "GET" && url.pathname === "/api/schema") {
-        const body = {
-          objects: database.getSchema().map(({ sql: _sql, ...item }) => item),
-        } satisfies SchemaResponse;
-        json(response, 200, body);
+        const controller = new AbortController();
+        const onClose = (): void => controller.abort();
+        response.once("close", onClose);
+        try {
+          const schema = await database.getSchema(controller.signal);
+          if (!response.destroyed) json(response, 200, {
+            objects: schema.map(({ sql: _sql, ...item }) => item),
+          } satisfies SchemaResponse);
+        } finally {
+          response.off("close", onClose);
+        }
         return;
       }
 

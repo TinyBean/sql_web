@@ -39,7 +39,7 @@ function fixture(t: TestContext) {
 }
 const range = { start_date: "2026-01-01", end_date: "2026-01-03" };
 
-test("Effective Availability and Effective OEE rank by NoWIP rather than total Idle", (t) => {
+test("Effective Availability and Effective OEE rank by NoWIP rather than total Idle", async (t) => {
   const { a, d, queries, artifacts } = fixture(t);
   a("ADH001", 5, "Test(Normal)"); a("ADH001", 1, "IDLE_NoWIP(NoTask)"); a("ADH001", 4, "IDLE");
   a("ADH002", 4, "Test(Normal)"); a("ADH002", 6, "PM");
@@ -48,7 +48,7 @@ test("Effective Availability and Effective OEE rank by NoWIP rather than total I
   for (const machine of ["ADH001", "ADH002", "ADH003", "ADH004"]) d(machine);
   const runtime = createOeeSkillRuntime(queries, artifacts);
   for (const metric of ["effective_availability", "effective_oee"] as const) {
-    const measurement = rankMachines(runtime, { ...range, kind: "MT", metric });
+    const measurement = await rankMachines(runtime, { ...range, kind: "MT", metric });
     const view = machineRankingView(measurement);
     assert.equal(view.machine_count, 4);
     assert.deepEqual(view.top3.map((row) => row.machine), ["ADH002", "ADH004", "ADH001"]);
@@ -85,7 +85,7 @@ test("analysis Skill wrappers require root period and bind child evidence and sn
   const { database, a, artifacts } = fixture(t);
   a("ADH001", 4);
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
-  const context = evidence.context(calculatedDashboard(database, "2026-01-01"), "2026-01-01");
+  const context = await evidence.context(calculatedDashboard(database, "2026-01-01"), "2026-01-01");
   const params = { start_date: "2026-01-01", end_date: "2026-01-01", kind: "MT", metric: "loss_hours" };
   const definition = createTools().find((tool) => tool.name === "rank_machines")!;
   const root = createAnalysisSkillOptions(evidence).decorateTool!("test-oee-calculator", definition);
@@ -134,7 +134,7 @@ test("the complete v4 inventory is frozen and formats business prose without cha
   assert.equal(formatMachineMentions(expected), expected);
 });
 
-test("loss TOP3 aggregates distinct machines across states, uses all scoped losses, and preserves candidate snapshots", (t) => {
+test("loss TOP3 aggregates distinct machines across states, uses all scoped losses, and preserves candidate snapshots", async (t) => {
   const { a, queries, artifacts } = fixture(t);
   a("ADH001", 6); a("ADH001", 5, "PM"); a("ADH002", 10); a("ADH003", 9); a("ADH161", 8);
   a("ADH001", 20, "Machine_Running", "MT", "2026-01-02");
@@ -142,7 +142,7 @@ test("loss TOP3 aggregates distinct machines across states, uses all scoped loss
   a("ADH004", 1000, "Conversion", "MT", "2026-01-01", "Q1");
   a("ADH005", 1000, "Conversion", "MT", "2026-01-01", "E1");
   a("TSPH001", 1000);
-  const result = rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["Conversion", "PM"] });
+  const result = await rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["Conversion", "PM"] });
   const view = machineRankingView(result);
   assert.equal(result.rows.length, 4);
   assert.deepEqual(view.top3.map((r) => [r.machine, r.value]), [["ADH001", 11], ["ADH002", 10], ["ADH003", 9]]);
@@ -157,7 +157,7 @@ test("loss TOP3 aggregates distinct machines across states, uses all scoped loss
   const saved = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(result.snapshot.name).filePath, "utf8"));
   assert.deepEqual(saved.rows, result.rows);
   assert.deepEqual(saved.scope, result.scope);
-  const stateOnly = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["Conversion"] }));
+  const stateOnly = machineRankingView(await rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["Conversion"] }));
   assert.equal(stateOnly.total_loss_hours, 33);
   assert.deepEqual(stateOnly.top3.map((r) => r.machine), ["ADH002", "ADH003", "ADH161"]);
 });
@@ -174,24 +174,24 @@ test("ranking summaries round fractional values without altering structured evid
   assert.deepEqual(rows, original);
 });
 
-test("empty, zero, NULL and unrounded tie cases retain actual counts and never infer full coverage", (t) => {
+test("empty, zero, NULL and unrounded tie cases retain actual counts and never infer full coverage", async (t) => {
   const { a, queries, artifacts } = fixture(t);
   a("ADH001", 1); a("ADH002", 1.00001); a("ADH003", 1); a("ADH004", 0);
-  const view = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours" }));
+  const view = machineRankingView(await rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours" }));
   assert.deepEqual(view.top3.map((r) => r.machine), ["ADH002", "ADH001", "ADH003"]);
   assert.equal(view.top3[0]!.value, 1.00001);
   assert.match(view.summary, /T5773\/ADH002 1\.00 小时/u);
-  const zero = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["PM"] }));
+  const zero = machineRankingView(await rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["PM"] }));
   assert.equal(zero.machine_count, 0); assert.equal(zero.total_loss_hours, null);
   assert.match(zero.summary, /无匹配记录不代表零损失/u);
   a("ADH005", 0, "PM");
-  const onlyZero = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["PM"] }));
+  const onlyZero = machineRankingView(await rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "loss_hours", states: ["PM"] }));
   assert.equal(onlyZero.top3.length, 1); assert.equal(onlyZero.top3_share_percent, null);
-  const nulls = machineRankingView(rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "final_yield" }));
+  const nulls = machineRankingView(await rankMachines(createOeeSkillRuntime(queries, artifacts), { ...range, kind: "MT", metric: "final_yield" }));
   assert.equal(nulls.machine_count, 0); assert.equal(nulls.observed_machine_count, 5);
 });
 
-test("period component ratios use sums, isolate types, retain Yield-only eligibility, and cache only frozen source scans", (t) => {
+test("period component ratios use sums, isolate types, retain Yield-only eligibility, and cache only frozen source scans", async (t) => {
   const { a, d, queries, artifacts } = fixture(t);
   a("ADH001", 10, "Test(Normal)"); a("ADH001", 10); d("ADH001", 10, 8, 20);
   a("ADH001", 5, "Test(Normal)", "ST"); d("ADH001", 10, 10, 10, "ST");
@@ -200,16 +200,16 @@ test("period component ratios use sums, isolate types, retain Yield-only eligibi
   const cache: MachineRankingCache = new Map();
   let scans = 0;
   const counted = { exportQueryJson: (...args: Parameters<typeof queries.exportQueryJson>) => { scans++; return queries.exportQueryJson(...args); } };
-  const dut = machineRankingView(rankMachines(createOeeSkillRuntime(counted, artifacts), { ...range, kind: "MT", metric: "dut_on" }, undefined, cache));
+  const dut = machineRankingView(await rankMachines(createOeeSkillRuntime(counted, artifacts), { ...range, kind: "MT", metric: "dut_on" }, undefined, cache));
   assert.deepEqual(dut.top3.map((r) => r.machine), ["ADH001", "ADH002"]);
   assert.equal(dut.top3[0]!.value, 50); assert.equal(dut.top3[1]!.value, 100 / 110 * 100);
-  const yieldRanking = machineRankingView(rankMachines(createOeeSkillRuntime(counted, artifacts), { ...range, kind: "MT", metric: "final_yield" }, undefined, cache));
+  const yieldRanking = machineRankingView(await rankMachines(createOeeSkillRuntime(counted, artifacts), { ...range, kind: "MT", metric: "final_yield" }, undefined, cache));
   assert.deepEqual(yieldRanking.top3.map((r) => [r.machine, r.value]), [["ADH003", 0], ["ADH002", 20], ["ADH001", 80]]);
-  const st = machineRankingView(rankMachines(createOeeSkillRuntime(counted, artifacts), { ...range, kind: "ST", metric: "dut_on" }, undefined, cache));
+  const st = machineRankingView(await rankMachines(createOeeSkillRuntime(counted, artifacts), { ...range, kind: "ST", metric: "dut_on" }, undefined, cache));
   assert.equal(st.top3[0]!.value, 100); assert.equal(scans, 1);
 });
 
-test("Yield and OEE rankings reject F LOTs while DUT-On rankings retain them and exclude T prefixes", (t) => {
+test("Yield and OEE rankings reject F LOTs while DUT-On rankings retain them and exclude T prefixes", async (t) => {
   const { database, a, d, queries, artifacts } = fixture(t);
   a("ADH001", 10, "Test(Normal)");
   a("ADH002", 10, "Test(Normal)");
@@ -221,31 +221,31 @@ test("Yield and OEE rankings reject F LOTs while DUT-On rankings retain them and
   d("ADH001", 100_000, 100_000, 200_000, "MT", range.start_date, "T1");
   const runtime = createOeeSkillRuntime(queries, artifacts);
   for (const metric of ["final_yield", "oee", "effective_oee"] as const) {
-    const view = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric }));
+    const view = machineRankingView(await rankMachines(runtime, { ...range, kind: "MT", metric }));
     assert.equal(view.observed_machine_count, 2);
     assert.deepEqual(view.top3.map((row) => row.machine), ["ADH001"]);
     assert.ok(Math.abs(view.top3[0]!.value - (metric === "final_yield" ? 75 : metric === "effective_oee" ? .895 * .75 * 100 : 45)) < 1e-12);
   }
-  const dut = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
+  const dut = machineRankingView(await rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
   assert.deepEqual(dut.top3.map((row) => [row.machine, row.value]), [["ADH001", 60], ["ADH002", 60]]);
   // A later ST retest changes this LOT's label even for the earlier MT report.
   d("ADH009", 20, 20, 100, "ST", "2026-02-01", "P-GOOD");
   database.exec("UPDATE oee_dut_utilization SET test_stage='Rescreen' WHERE machine_id='ADH009'");
   for (const metric of ["final_yield", "oee", "effective_oee"] as const) {
-    const view = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric }));
+    const view = machineRankingView(await rankMachines(runtime, { ...range, kind: "MT", metric }));
     assert.equal(view.observed_machine_count, 2);
     assert.deepEqual(view.top3, []);
   }
-  const unchangedDut = machineRankingView(rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
+  const unchangedDut = machineRankingView(await rankMachines(runtime, { ...range, kind: "MT", metric: "dut_on" }));
   assert.deepEqual(unchangedDut.top3, dut.top3);
 });
 
-test("single-day ranking uses the period standard, preserves history, and rejects retired basis parameters without writes", (t) => {
+test("single-day ranking uses the period standard, preserves history, and rejects retired basis parameters without writes", async (t) => {
   const { a, d, queries, artifacts } = fixture(t);
   a("ADH001", 24, "Test(Normal)"); d("ADH001", 10, 10, 10, "MT", "2026-01-01", "P1", 10);
   a("ADH002", 24, "Test(Normal)"); d("ADH002", 10, 10, 10, "MT", "2026-01-01", "P1", 30);
   const oneDay = { start_date: range.start_date, end_date: range.start_date, kind: "MT" as const, metric: "test_time_performance" as const };
-  const measurement = rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay);
+  const measurement = await rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay);
   const period = machineRankingView(measurement);
   const { testTimeRule, ...legacyScope } = measurement.scope;
   assert.equal(testTimeRule, "machine_period_1pct");
@@ -261,11 +261,11 @@ test("single-day ranking uses the period standard, preserves history, and reject
   assert.deepEqual(historicalDay.top3, period.top3);
   const names = artifacts.listDataSnapshots().map((r) => r.name);
   for (const basis of ["report_period", "machine_day"]) {
-    assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, basis } as never), /参数无效/u);
+    await assert.rejects(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, basis } as never), /参数无效/u);
   }
-  assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, states: ["PM"] }), /states/u);
-  assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, metric: "oee; DROP TABLE" } as never), /参数无效/u);
-  assert.throws(() => rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay, AbortSignal.abort()));
+  await assert.rejects(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, states: ["PM"] }), /states/u);
+  await assert.rejects(() => rankMachines(createOeeSkillRuntime(queries, artifacts), { ...oneDay, metric: "oee; DROP TABLE" } as never), /参数无效/u);
+  await assert.rejects(() => rankMachines(createOeeSkillRuntime(queries, artifacts), oneDay, AbortSignal.abort()));
   assert.deepEqual(artifacts.listDataSnapshots().map((r) => r.name), names);
 });
 
@@ -282,28 +282,28 @@ test("the existing loss tool exposes distinct-machine TOP3 without changing raw 
   assert.deepEqual(output.machine_summaries![0]!.top3.map((r) => [r.machine, r.value]), [["ADH001", 12], ["ADH002", 10]]);
 });
 
-test("reports and email share server TOP3 text and reject wrong type, period, metric, basis, truncation and missing references", (t) => {
+test("reports and email share server TOP3 text and reject wrong type, period, metric, basis, truncation and missing references", async (t) => {
   const { a, d, database, queries, artifacts } = fixture(t);
   a("ADH001", 10, "Test(Normal)"); d("ADH001");
   a("ADH092", 10, "Test(Normal)", "ST"); d("ADH092", 10, 8, 20, "ST");
   a("ADH001", 4, "Conversion"); a("ADH092", 3, "Conversion", "ST");
   const base = calculatedDashboard(database, "2026-01-01");
   const evidence = new AnalysisEvidence(database, undefined, artifacts);
-  const context = evidence.context(base, "2026-01-01");
-  const report = { periods: (["day", "week"] as const).map((period) => ({
+  const context = await evidence.context(base, "2026-01-01");
+  const report = { periods: await Promise.all((["day", "week"] as const).map(async (period) => ({
     period, comparison: "覆盖有限，根因待验证。", minimum_evidence: context.comparisons[period].minimum.id,
     history_evidence: context.comparisons[period].history.id,
-    groups: (["MT", "ST"] as const).map((kind) => ({ kind, evidence_ids: [context.comparisons[period].current.id, context.losses[period].evidence_id],
-      no_findings_reason: "无匹配损失记录，覆盖需核查", items: context.losses[period].by_kind[kind].map((candidate) => {
-        const ranking = evidence.recordMachineRanking(rankMachines(createOeeSkillRuntime(queries, artifacts), {
+    groups: await Promise.all((["MT", "ST"] as const).map(async (kind) => ({ kind, evidence_ids: [context.comparisons[period].current.id, context.losses[period].evidence_id],
+      no_findings_reason: "无匹配损失记录，覆盖需核查", items: await Promise.all(context.losses[period].by_kind[kind].map(async (candidate) => {
+        const ranking = evidence.recordMachineRanking(await rankMachines(createOeeSkillRuntime(queries, artifacts), {
           start_date: context.periods[period].start, end_date: context.periods[period].end, kind, metric: "loss_hours", states: [candidate.state_group],
         }), { period, agentId: "test" });
         return { priority: candidate.priority, category: "availability", issue: "Conversion（换线）损失，ADH001 的准备过程需核查。", measure: "核查准备过程并复测换线时长", suggested_owner: "测试工程",
           evidence_ids: [context.comparisons[period].current.id, context.losses[period].evidence_id, ranking.id], machine_evidence_ids: [ranking.id],
           loss_reference: { evidence_id: context.losses[period].evidence_id, row_index: candidate.row_index } };
-      }),
-    })),
-  })) };
+      })),
+    }))),
+  }))) };
   const result = validateAnalysisReport(report, context, evidence.records);
   assert.match(result.rows.day[0]!["issue"] as string, /T5773\/ADH001.*4 小时/u);
   assert.match(result.rows.day[1]!["issue"] as string, /T5851\/ADH092/u);

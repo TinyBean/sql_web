@@ -9,8 +9,7 @@ import {
   formatCodeInterpreterResult,
   type CodeInterpreterRuntime,
 } from "./code-interpreter.ts";
-import type { AppDatabase } from "../database/database.ts";
-import type { QueryResult } from "../database/database.ts";
+import type { QueryDatabase, QueryResult } from "../database/database.ts";
 import { createMeasureLossTool, MEASURE_LOSS_TOOL_NAME } from "./loss-tools.ts";
 import type { SessionDashboardStore } from "../agent/session-dashboard.ts";
 import {
@@ -121,7 +120,7 @@ export const executeSqlParameters = Type.Object({
 });
 
 export function createExecuteSqlTool(
-  database: Pick<AppDatabase, "query" | "exportQueryJson">,
+  database: QueryDatabase,
   artifacts: SessionArtifactStore,
 ) {
   return defineTool({
@@ -142,8 +141,8 @@ export function createExecuteSqlTool(
       }
       if (params.save_as !== undefined) {
         const previewRows = Math.min(params.limit ?? SNAPSHOT_PREVIEW_ROWS, SNAPSHOT_PREVIEW_ROWS);
-        const created = artifacts.createDataSnapshot(params.save_as, (fileDescriptor) => {
-          const exported = database.exportQueryJson(
+        const created = await artifacts.createDataSnapshotAsync(params.save_as, async (fileDescriptor) => {
+          const exported = await database.exportQueryJson(
             params.sql,
             params.parameters,
             {
@@ -161,7 +160,7 @@ export function createExecuteSqlTool(
             );
           }
           return exported;
-        });
+        }, signal);
         const result: SnapshotQueryDetails = {
           mode: "snapshot",
           snapshot: {
@@ -190,10 +189,11 @@ export function createExecuteSqlTool(
           details: result,
         };
       }
-      const result = database.query(
+      const result = await database.query(
         params.sql,
         params.parameters,
         { maxRows: params.limit ?? INLINE_MAX_ROWS },
+        signal,
       );
       signal?.throwIfAborted();
       return {
@@ -205,7 +205,7 @@ export function createExecuteSqlTool(
 }
 
 export function createAgentTools(
-  database: Pick<AppDatabase, "query" | "exportQueryJson">,
+  database: QueryDatabase,
   artifacts: SessionArtifactStore,
   codeInterpreter: CodeInterpreterRuntime,
   dashboardContext?: DashboardToolContext,

@@ -37,7 +37,7 @@ function fixture(t: TestContext) {
   };
 }
 
-function adviceFor(evidence: AnalysisEvidence, context: ReturnType<AnalysisEvidence["context"]>) {
+function adviceFor(evidence: AnalysisEvidence, context: Awaited<ReturnType<AnalysisEvidence["context"]>>) {
   const groups: MachineGroup[] = machineSelectionContext(context.machines).map(({ kind, ranking, selected }) => ({
     kind: kind as "MT" | "ST", ranking, no_findings_reason: "",
     items: selected.map(({ machine, evidence_reference }) => ({ machine: String(machine), measure: "核查最低子项，试行调整并用次日同口径指标验证", suggested_owner: "测试工程", evidence_reference })),
@@ -124,11 +124,11 @@ test("earlier daily publications gain platform labels in both dashboards without
   assert.equal(projected.widgets[4]!.data[0]!["machine_label"], "平台待维护/UNMAPPED");
 });
 
-test("per-machine evidence rejects duplicates, omissions, wrong date/type/machine and retains valid advice", (t) => {
+test("per-machine evidence rejects duplicates, omissions, wrong date/type/machine and retains valid advice", async (t) => {
   const f = fixture(t); f.machine("A", "MT"); f.machine("B", "MT"); f.machine("A", "ST");
   const base = calculateDefaultDashboard(f.db, day);
   const evidence = new AnalysisEvidence(f.db, undefined, new SessionArtifactStore(f.directory, "evidence"));
-  const context = evidence.context(base, day);
+  const context = await evidence.context(base, day);
   assert.deepEqual(Object.keys(context.losses), ["day", "week"]);
   const { groups, state } = adviceFor(evidence, context);
   assert.equal(state.inspect().status, "completed");
@@ -154,11 +154,11 @@ test("per-machine evidence rejects duplicates, omissions, wrong date/type/machin
   assert.equal(inspectMachineCandidate("broken JSON", "MT", context.machines, evidence.records, day).status, "needs_repair");
 });
 
-test("machine alerts identify the platform, failing count and exact date/type/machine/owner problem", (t) => {
+test("machine alerts identify the platform, failing count and exact date/type/machine/owner problem", async (t) => {
   const f = fixture(t); f.machine("ADH001", "MT"); f.machine("ADH092", "MT"); f.machine("ADH001", "ST");
   const base = calculateDefaultDashboard(f.db, day);
   const evidence = new AnalysisEvidence(f.db, undefined, new SessionArtifactStore(f.directory, "machine-alerts"));
-  const context = evidence.context(base, day);
+  const context = await evidence.context(base, day);
   const { groups, state } = adviceFor(evidence, context);
   const advice = (input: MachineGroup[]) => input[0]!.items.find((item) => item.machine === "ADH001")!;
   const cases = [
@@ -189,11 +189,11 @@ test("machine alerts identify the platform, failing count and exact date/type/ma
   }
 });
 
-test("missing, duplicate and extra advice have distinct alerts and preserve valid machine actions", (t) => {
+test("missing, duplicate and extra advice have distinct alerts and preserve valid machine actions", async (t) => {
   const f = fixture(t); f.machine("ADH001", "MT"); f.machine("ADH092", "MT");
   const base = calculateDefaultDashboard(f.db, day);
   const evidence = new AnalysisEvidence(f.db, undefined, new SessionArtifactStore(f.directory, "coverage-alerts"));
-  const { groups, state } = adviceFor(evidence, evidence.context(base, day));
+  const { groups, state } = adviceFor(evidence, await evidence.context(base, day));
   const missing = structuredClone(groups); missing[0]!.items = [];
   state.submit(missing);
   assert.match(applyMachineAnalysis(base, state.inspect()).widgets[11]!.warnings.join(" "), /2\/2 台.*缺少该机台的改善建议/u);
@@ -208,11 +208,11 @@ test("missing, duplicate and extra advice have distinct alerts and preserve vali
   assert.ok(card.data.every((row) => String(row["action_and_owner"]).startsWith("改善措施：")));
 });
 
-test("machine feedback addresses original group/item fields and supplies expected, actual and repair hints", (t) => {
+test("machine feedback addresses original group/item fields and supplies expected, actual and repair hints", async (t) => {
   const f = fixture(t); f.machine("ADH001", "MT"); f.machine("ADH092", "MT"); f.machine("ADH001", "ST");
   const base = calculateDefaultDashboard(f.db, day);
   const evidence = new AnalysisEvidence(f.db, undefined, new SessionArtifactStore(f.directory, "structured-feedback"));
-  const context = evidence.context(base, day);
+  const context = await evidence.context(base, day);
   const { groups, state } = adviceFor(evidence, context);
   const changed = structuredClone(groups).reverse();
   changed[3]!.items.reverse();
@@ -259,11 +259,11 @@ test("machine feedback addresses original group/item fields and supplies expecte
   }
 });
 
-test("machine interruption explains timeout or failure while preserving accepted advice and evidence errors", (t) => {
+test("machine interruption explains timeout or failure while preserving accepted advice and evidence errors", async (t) => {
   const f = fixture(t); f.machine("ADH001", "MT"); f.machine("ADH092", "MT");
   const base = calculateDefaultDashboard(f.db, day);
   const evidence = new AnalysisEvidence(f.db, undefined, new SessionArtifactStore(f.directory, "interruption-alerts"));
-  const { groups, state } = adviceFor(evidence, evidence.context(base, day));
+  const { groups, state } = adviceFor(evidence, await evidence.context(base, day));
   groups[0]!.items[0]!.suggested_owner = ""; state.submit(groups);
   const analyzed = applyMachineAnalysis(base, state.inspect());
   for (const [status, label] of [["timed_out", "分析超时"], ["failed", "分析失败"]] as const) {

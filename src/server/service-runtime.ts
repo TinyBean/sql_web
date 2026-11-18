@@ -2,7 +2,8 @@ import type { Server } from "node:http";
 import path from "node:path";
 import { AgentSessionStore } from "./agent/agent-sessions.ts";
 import type { AppConfig } from "./config.ts";
-import { AppDatabase } from "./database/database.ts";
+import { QueryExecutor } from "./database/query-executor.ts";
+import type { QueryDatabase } from "./database/database.ts";
 import { createWebServer } from "./http-server.ts";
 import type { WebDatabasePort, WebSessionPort } from "./http-server.ts";
 import type { AppLogger } from "./logger.ts";
@@ -24,8 +25,8 @@ export interface RunningWebService {
   shutdown(reason: string): Promise<ServiceShutdownResult>;
 }
 
-interface RuntimeDatabase extends WebDatabasePort {
-  close(): void;
+interface RuntimeDatabase extends WebDatabasePort, QueryDatabase {
+  close(): void | Promise<void>;
 }
 
 interface RuntimeCodeInterpreter {
@@ -47,7 +48,7 @@ interface OpenRuntimeSessionsOptions {
 
 export interface ServiceRuntimeDependencies {
   readonly shutdownTimeoutMs?: number;
-  openDatabase(filePath: string): RuntimeDatabase;
+  openDatabase(filePath: string, timeoutMs: number): RuntimeDatabase;
   createArtifacts(directory: string): unknown;
   createCodeInterpreter(config: AppConfig): Promise<RuntimeCodeInterpreter>;
   openSessions(options: OpenRuntimeSessionsOptions): Promise<RuntimeSessions>;
@@ -60,7 +61,7 @@ export interface ServiceRuntimeDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
-  openDatabase: (filePath) => AppDatabase.open({ filePath }),
+  openDatabase: (filePath, timeoutMs) => new QueryExecutor(filePath, timeoutMs),
   createArtifacts: (directory) => new ArtifactStore(directory),
   createCodeInterpreter: (config) => CodeInterpreterRuntime.create({
     ...config.codeInterpreter,
@@ -74,7 +75,7 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
       dashboardTitle: (id) => dashboards.title(id),
       loadAccountDashboard: (id) => dashboards.loadInitial(id),
       sharedDashboardPath: config.defaultDashboardPath,
-      database: database as AppDatabase,
+      database,
       artifacts: artifacts as ArtifactStore,
       codeInterpreter: codeInterpreter as CodeInterpreterRuntime,
       cwd: config.projectRoot,
@@ -144,7 +145,7 @@ export async function startWebService(
 
   try {
     const openedDatabase = await runStage(logger, "database", () =>
-      dependencies.openDatabase(config.databasePath));
+      dependencies.openDatabase(config.databasePath, config.queryTimeoutMs));
     database = openedDatabase;
     const artifacts = await runStage(logger, "artifacts", () =>
       dependencies.createArtifacts(config.artifactDir));
@@ -197,7 +198,7 @@ export async function startWebService(
     }
     if (database) {
       try {
-        database.close();
+        await database.close();
       } catch (cleanupError) {
         logger.error("system.cleanup.failed", cleanupError, { stage: "database" });
       }
@@ -244,6 +245,11 @@ export async function startWebService(
             resolve();
           });
         });
+        // Stop scheduling immediately, including queries owned by HTTP requests still draining.
+        const shutdownLogger = logger.child({ action: "shutdown" });
+        const databaseClosed = runStage(shutdownLogger, "database", () => activeDatabase.close()).catch(() => {
+          failed = true;
+        });
         let timeout: NodeJS.Timeout | undefined;
         await Promise.race([
           closeCompleted,
@@ -263,28 +269,11 @@ export async function startWebService(
         ]);
         if (timeout) clearTimeout(timeout);
 
-        for (const [stage, cleanup] of [
-          ["agent_store", () => activeSessions.dispose()],
-          ["database", () => activeDatabase.close()],
-        ] as const) {
-          const cleanupStartedAt = Date.now();
-          logger.info("system.stage.started", { stage, action: "shutdown" });
-          try {
-            await cleanup();
-            logger.info("system.stage.completed", {
-              stage,
-              action: "shutdown",
-              durationMs: Date.now() - cleanupStartedAt,
-            });
-          } catch (error) {
-            failed = true;
-            logger.error("system.stage.failed", error, {
-              stage,
-              action: "shutdown",
-              durationMs: Date.now() - cleanupStartedAt,
-              retryable: false,
-            });
-          }
+        await databaseClosed;
+        try {
+          await runStage(shutdownLogger, "agent_store", () => activeSessions.dispose());
+        } catch {
+          failed = true;
         }
         logger.info("system.stopped", {
           reason,

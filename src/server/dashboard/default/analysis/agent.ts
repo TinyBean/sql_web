@@ -192,7 +192,7 @@ export class AnalysisEvidence {
     return { sql, parameters, rows, truncated };
   }
 
-  context(state: DashboardState, throughDate: string, machineRows?: readonly DashboardRow[]): AnalysisContext {
+  async context(state: DashboardState, throughDate: string, machineRows?: readonly DashboardRow[]): Promise<AnalysisContext> {
     if (!this.artifacts) throw new Error("每日分析需要独立的数据快照存储");
     const periods = dashboardPeriods(throughDate);
     const source = this.query(getPeriodTestOeeSql(periods.syncStart, throughDate, "day").sql, [], 1200);
@@ -214,7 +214,7 @@ export class AnalysisEvidence {
           start: periods.trend.start, end: addDays(periods[key].start, -1),
         } : undefined),
       };
-      const loss = this.recordLoss(measureLoss(this.queries, this.artifacts.scoped("baseline/" + key), {
+      const loss = this.recordLoss(await measureLoss(this.queries, this.artifacts.scoped("baseline/" + key), {
         start_date: periods[key].start, end_date: periods[key].end,
       }), { period: key, agentId: "baseline" });
       losses[key] = { evidence_id: loss.id, snapshot: loss.snapshot!,
@@ -835,7 +835,7 @@ export async function analyzeCards(
   };
   const artifacts = new SessionArtifactStore(runDir, "analysis-data");
   const evidence = new AnalysisEvidence(database, (record) => log("evidence", record), artifacts);
-  const context = evidence.context(state, throughDate, machineRows);
+  const context = await evidence.context(state, throughDate, machineRows);
   writeFileSync(path.join(runDir, "context.json"), JSON.stringify(context), { mode: 0o600 });
   const publishResult = (result: AnalysisResult, checkpoint = false): void => {
     const prefix = checkpoint ? "checkpoint-" : "";

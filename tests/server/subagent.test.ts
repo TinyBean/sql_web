@@ -9,7 +9,7 @@ import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
 import { AgentSessionStore } from "../../src/server/agent/agent-sessions.ts";
 import { loadAgentSkillCatalog } from "../../src/server/agent/skill-catalog.ts";
 import { SubagentRunner, type SubagentResult, type SubagentRunnerOptions } from "../../src/server/agent/subagent.ts";
-import { AppDatabase } from "../../src/server/database/database.ts";
+import { QueryExecutor } from "../../src/server/database/query-executor.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
 import { AnalysisToolCallBudget } from "../../src/server/dashboard/default/analysis/agent.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
@@ -68,7 +68,7 @@ async function fixture(t: TestContext, respond: (body: RequestBody) => unknown |
   } } }));
   const filePath = path.join(directory, "test.sqlite");
   initializeOeeDatabase(filePath);
-  const database = AppDatabase.open({ filePath });
+  const database = new QueryExecutor(filePath, 30_000);
   const interpreter = await CodeInterpreterRuntime.create({ projectRoot: directory,
     pythonPath: "/nonexistent/python", bwrapPath: "/nonexistent/bwrap", prlimitPath: "/nonexistent/prlimit" });
   const artifacts = new ArtifactStore(path.join(directory, "artifacts"));
@@ -94,7 +94,7 @@ async function fixture(t: TestContext, respond: (body: RequestBody) => unknown |
   t.after(async () => {
     await Promise.all(runners.map((runner) => runner.dispose()));
     await store.dispose();
-    database.close();
+    await database.close();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(directory, { recursive: true, force: true });

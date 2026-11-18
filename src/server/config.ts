@@ -9,7 +9,7 @@ import { DEFAULT_DOMAIN_VERIFY_URL } from "./auth.ts";
 const webEnvironmentKeys = [
   "HOST", "PORT", "SQL_WEB_DOMAIN_VERIFY_URL", "SQL_WEB_AUTH_COOKIE_SECURE",
   "SQL_WEB_USER_DASHBOARDS_PATH", "SQL_WEB_DB_PATH", "SQL_WEB_SESSION_DIR", "SQL_WEB_ARTIFACT_DIR",
-  "SQL_WEB_DEFAULT_DASHBOARD_PATH", "SQL_WEB_PYTHON_PATH", "SQL_WEB_BWRAP_PATH", "SQL_WEB_PRLIMIT_PATH",
+  "SQL_WEB_QUERY_TIMEOUT_MS", "SQL_WEB_DEFAULT_DASHBOARD_PATH", "SQL_WEB_PYTHON_PATH", "SQL_WEB_BWRAP_PATH", "SQL_WEB_PRLIMIT_PATH",
   "SQL_WEB_PROVIDER", "SQL_WEB_MODEL", "SQL_WEB_SMTP_HOST", "SQL_WEB_SMTP_PORT",
   "SQL_WEB_MAIL_FROM_ADDRESS", "SQL_WEB_MAIL_FROM_NAME",
 ] as const;
@@ -24,6 +24,7 @@ export interface AppConfig {
   readonly host: string;
   readonly port: number;
   readonly databasePath: string;
+  readonly queryTimeoutMs: number;
   readonly sessionDir: string;
   readonly artifactDir: string;
   readonly defaultDashboardPath: string;
@@ -121,7 +122,13 @@ export function loadConfig(env: AppEnvironment, projectRoot = PROJECT_ROOT): App
     throw new Error("SQL_WEB_AUTH_COOKIE_SECURE 必须是 true 或 false");
   }
 
+  const queryTimeoutMs = Number(env.SQL_WEB_QUERY_TIMEOUT_MS ?? 30_000);
+  if (!Number.isInteger(queryTimeoutMs) || queryTimeoutMs < 1 || queryTimeoutMs > 2_147_483_647) {
+    throw new Error("SQL_WEB_QUERY_TIMEOUT_MS 必须是 1 到 2147483647 之间的整数毫秒数");
+  }
+
   return {
+    queryTimeoutMs,
     domainVerifyUrl,
     authCookieSecure: env.SQL_WEB_AUTH_COOKIE_SECURE === "true",
     userDashboardsPath: path.resolve(projectRoot, env.SQL_WEB_USER_DASHBOARDS_PATH ?? ".data/user-dashboards.json"),

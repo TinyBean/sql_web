@@ -13,10 +13,10 @@ export interface RankingSnapshot {
   readonly createdAt: string;
 }
 export interface TestOeeRuntime {
-  querySnapshot(name: string, sql: string, signal?: AbortSignal): {
+  querySnapshot(name: string, sql: string, signal?: AbortSignal): Promise<{
     readonly rows: readonly MachineRow[];
     readonly truncated: boolean;
-  };
+  }>;
   saveSnapshot(name: string, data: {
     readonly columns: readonly string[];
     readonly rows: readonly MachineRow[];

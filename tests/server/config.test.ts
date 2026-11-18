@@ -180,3 +180,16 @@ test("reports a missing project environment file", (t) => {
     /找不到环境配置文件/u,
   );
 });
+
+test("web query timeout loads from the project environment and fits a Node timer", (t) => {
+  const env = { SQL_WEB_PROVIDER: "test", SQL_WEB_MODEL: "test" };
+  assert.equal(loadConfig(env).queryTimeoutMs, 30_000);
+  const root = mkdtempSync(path.join(tmpdir(), "web-query-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, ".env");
+  writeFileSync(file, "SQL_WEB_PROVIDER=test\nSQL_WEB_MODEL=test\nSQL_WEB_QUERY_TIMEOUT_MS=500\n");
+  assert.equal(loadConfig(loadProjectEnvironment(file, {})).queryTimeoutMs, 500);
+  for (const value of ["", "0", "-1", "0.5", "bad", "2147483648"]) {
+    assert.throws(() => loadConfig({ ...env, SQL_WEB_QUERY_TIMEOUT_MS: value }), /SQL_WEB_QUERY_TIMEOUT_MS/u);
+  }
+});

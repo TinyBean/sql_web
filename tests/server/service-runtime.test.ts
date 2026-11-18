@@ -54,6 +54,7 @@ function fixtureConfig(directory: string): AppConfig {
     projectRoot: directory,
     host: "127.0.0.1",
     port: 0,
+    queryTimeoutMs: 30_000,
     databasePath: path.join(directory, "database.sqlite"),
     sessionDir: path.join(directory, "sessions"),
     artifactDir: path.join(directory, "artifacts"),
@@ -76,7 +77,9 @@ function fakeDependencies(events: string[]): ServiceRuntimeDependencies {
     openDatabase: (filePath) => ({
       filePath,
       getSchema: () => [],
-      close: () => events.push("database.close"),
+      query() { throw new Error("not used"); },
+      exportQueryJson() { throw new Error("not used"); },
+      close: () => { events.push("database.close"); },
     }),
     createArtifacts: () => ({}),
     createCodeInterpreter: async () => ({
@@ -162,7 +165,7 @@ test("attributes early and late startup failures to the correct stage", async (t
   }
 });
 
-test("shuts a running service down once and releases sessions before the database", async (t) => {
+test("shuts a running service down once and stops database work while HTTP requests drain", async (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "service-runtime-shutdown-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const events: string[] = [];
@@ -179,7 +182,7 @@ test("shuts a running service down once and releases sessions before the databas
   ]);
   assert.deepEqual(first, { failed: false, timedOut: false });
   assert.deepEqual(second, first);
-  assert.deepEqual(events, ["sessions.dispose", "database.close"]);
+  assert.deepEqual(events, ["database.close", "sessions.dispose"]);
   assert.equal(logger.entries.filter((entry) => entry.event === "system.stopped").length, 1);
 });
 
@@ -208,5 +211,5 @@ test("forces open connections closed after the shutdown deadline", async (t) => 
   );
   const result = await runtime.shutdown("timeout-test");
   assert.deepEqual(result, { failed: true, timedOut: true });
-  assert.deepEqual(events, ["server.force-close", "sessions.dispose", "database.close"]);
+  assert.deepEqual(events, ["database.close", "server.force-close", "sessions.dispose"]);
 });

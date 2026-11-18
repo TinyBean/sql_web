@@ -56,6 +56,13 @@ export interface QueryJsonExportResult {
   readonly truncationReason: QueryTruncationReason | null;
 }
 
+// Daily analysis supplies synchronous reads from its frozen transaction.
+// The web service supplies a process-backed executor with the same result contracts.
+export interface QueryDatabase {
+  query(sql: string, parameters?: readonly SqlParameter[], options?: QueryOptions, signal?: AbortSignal): QueryResult | Promise<QueryResult>;
+  exportQueryJson(sql: string, parameters: readonly SqlParameter[] | undefined, options: QueryJsonExportOptions): QueryJsonExportResult | Promise<QueryJsonExportResult>;
+}
+
 const DEFAULT_MAX_ROWS = 200;
 const ABSOLUTE_MAX_ROWS = 200;
 const ABSOLUTE_MAX_EXPORT_ROWS = 100_000;

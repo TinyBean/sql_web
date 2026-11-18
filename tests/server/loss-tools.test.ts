@@ -5,7 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { initializeOeeDatabase } from "../../scripts/database/initialize.ts";
-import { AppDatabase } from "../../src/server/database/database.ts";
+import { QueryExecutor } from "../../src/server/database/query-executor.ts";
 import { AnalysisEvidence, createAnalysisTools } from "../../src/server/dashboard/default/analysis/agent.ts";
 
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
@@ -33,35 +33,35 @@ function fixture(t: TestContext) {
   insert.run("TSPH001", "P1", "Conversion", "5000", "2026-01-03", 360000);
   insert.run("UNKNOWN", "P1", "Conversion", "1000", "2026-01-03", 360000);
   insert.run("MT-01", "P1", "Conversion", "5000", "2026-01-04", 360000);
-  const database = AppDatabase.open({ filePath: databasePath });
+  const database = new QueryExecutor(databasePath, 30_000);
   const store = new ArtifactStore(path.join(directory, "artifacts"));
   const artifacts = store.forSession(sessionId);
-  t.after(() => { database.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); });
+  t.after(async () => { await database.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); });
   return { directory, databasePath, writer, database, store, artifacts };
 }
 
-test("standard losses preserve canonical filtering, inclusive dates and type-wide coverage", (t) => {
+test("standard losses preserve canonical filtering, inclusive dates and type-wide coverage", async (t) => {
   const { database, artifacts } = fixture(t);
-  const measured = measureLoss(database, artifacts, range);
+  const measured = await measureLoss(database, artifacts, range);
   assert.deepEqual(measured.rows.map((row) => [row["kind"], row["loss_hours"], row["kind_availability_days"], row["observed_days"], row["selected_days"]]), [
     ["MT", 103, 3, 2, 3], ["ST", 3, 1, 1, 3],
   ]);
   assert.equal(measured.rows[0]?.["hours_per_kind_available_day"], 103 / 3);
   assert.equal(measured.rows[0]?.["hours_per_selected_day"], 103 / 3);
-  const filtered = measureLoss(database, artifacts, { ...range, states: ["Conversion"], machines: ["MT-01"], by_machine: true });
+  const filtered = await measureLoss(database, artifacts, { ...range, states: ["Conversion"], machines: ["MT-01"], by_machine: true });
   assert.equal(filtered.rows.length, 1);
   assert.equal(filtered.rows[0]?.["machine"], "MT-01");
   assert.equal(filtered.rows[0]?.["loss_hours"], 101);
   assert.equal(filtered.rows[0]?.["kind_availability_days"], 3, "loss filters do not reduce the coverage denominator");
   assert.equal(filtered.rows[0]?.["hours_per_kind_available_day"], 101 / 3);
-  assert.equal(measureLoss(database, artifacts, { ...range, states: ["Machine_Running"] }).rows.length, 0);
-  assert.equal(measureLoss(database, artifacts, { ...range, machines: ["MT-01') OR 1=1 --"] }).rows.length, 0);
+  assert.equal((await measureLoss(database, artifacts, { ...range, states: ["Machine_Running"] })).rows.length, 0);
+  assert.equal((await measureLoss(database, artifacts, { ...range, machines: ["MT-01') OR 1=1 --"] })).rows.length, 0);
 });
 
-test("Q/E losses and Q/E-only days are excluded before coverage and user scope filters", (t) => {
+test("Q/E losses and Q/E-only days are excluded before coverage and user scope filters", async (t) => {
   const { database, artifacts, writer } = fixture(t);
-  const baseline = measureLoss(database, artifacts, range).rows;
-  const byMachine = measureLoss(database, artifacts, { ...range, machines: ["ST-01"], by_machine: true }).rows;
+  const baseline = (await measureLoss(database, artifacts, range)).rows;
+  const byMachine = (await measureLoss(database, artifacts, { ...range, machines: ["ST-01"], by_machine: true })).rows;
   const insert = writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)");
   for (const [lot, day] of [["Q1", "2026-01-01"], ["E1", "2026-01-02"]] as const) {
     insert.run("ST-01", lot, "Conversion", "7000", day, 360_000);
@@ -69,18 +69,18 @@ test("Q/E losses and Q/E-only days are excluded before coverage and user scope f
     insert.run("EXCLUDED", lot, "IDLE", "5000", day, 360_000);
   }
   const facts = writer.prepare("SELECT * FROM oee_availability ORDER BY id").all();
-  assert.deepEqual(measureLoss(database, artifacts, range).rows, baseline);
-  assert.deepEqual(measureLoss(database, artifacts, { ...range, machines: ["ST-01"], by_machine: true }).rows, byMachine);
-  assert.deepEqual(measureLoss(database, artifacts, { ...range, machines: ["EXCLUDED"] }).rows, []);
-  assert.deepEqual(measureLoss(database, artifacts, { ...range, states: ["IDLE"] }).rows, []);
+  assert.deepEqual((await measureLoss(database, artifacts, range)).rows, baseline);
+  assert.deepEqual((await measureLoss(database, artifacts, { ...range, machines: ["ST-01"], by_machine: true })).rows, byMachine);
+  assert.deepEqual((await measureLoss(database, artifacts, { ...range, machines: ["EXCLUDED"] })).rows, []);
+  assert.deepEqual((await measureLoss(database, artifacts, { ...range, states: ["IDLE"] })).rows, []);
   assert.deepEqual(writer.prepare("SELECT * FROM oee_availability ORDER BY id").all(), facts);
 });
 
-test("None LOT states remain available to canonical loss classification", (t) => {
+test("None LOT states remain available to canonical loss classification", async (t) => {
   const { database, artifacts, writer } = fixture(t);
   const insert = writer.prepare("INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES('NONE','None',?,'5000','2026-01-02',3600)");
   for (const state of ["Assistance", "HangUp", "Temp_Up(Normal Retest)"]) insert.run(state);
-  const measured = measureLoss(database, artifacts, { ...range, machines: ["NONE"] });
+  const measured = await measureLoss(database, artifacts, { ...range, machines: ["NONE"] });
   assert.deepEqual(measured.rows.map((row) => [row["state_group"], row["loss_hours"], row["kind_availability_days"]]), [
     ["IDLE", 2, 3], ["Other", 1, 3],
   ]);
@@ -88,10 +88,10 @@ test("None LOT states remain available to canonical loss classification", (t) =>
 
 test("loss snapshots survive restoration, never replace earlier measurements, and feed dashboards", async (t) => {
   const { database, writer, store, artifacts, directory } = fixture(t);
-  const first = measureLoss(database, artifacts, range);
+  const first = await measureLoss(database, artifacts, range);
   writer.prepare("UPDATE oee_availability SET time_span=time_span*2").run();
   const restored = new ArtifactStore(store.rootDir).forSession(sessionId);
-  const second = measureLoss(database, restored, range);
+  const second = await measureLoss(database, restored, range);
   assert.equal(first.snapshot.name, "loss-20260101-20260103");
   assert.equal(second.snapshot.name, first.snapshot.name + "-2");
   assert.notEqual(second.snapshot.version, first.snapshot.version);
@@ -115,12 +115,12 @@ test("loss snapshots survive restoration, never replace earlier measurements, an
   assert.equal(existsSync(path.join(directory, "artifacts", sessionId)), false);
 });
 
-test("child loss measurements keep distinct immutable snapshots readable by the parent", (t) => {
+test("child loss measurements keep distinct immutable snapshots readable by the parent", async (t) => {
   const { database, artifacts } = fixture(t);
   const child = artifacts.scoped("child-task-one");
-  const first = measureLoss(database, child, range);
-  const second = measureLoss(database, child, { ...range, machines: ["MT-01"] });
-  const sibling = measureLoss(database, artifacts.scoped("child-task-two"), range);
+  const first = await measureLoss(database, child, range);
+  const second = await measureLoss(database, child, { ...range, machines: ["MT-01"] });
+  const sibling = await measureLoss(database, artifacts.scoped("child-task-two"), range);
   assert.equal(new Set([first.snapshot.name, second.snapshot.name, sibling.snapshot.name]).size, 3);
   for (const measurement of [first, second, sibling]) {
     assert.deepEqual(JSON.parse(readFileSync(artifacts.resolveDataSnapshot(measurement.snapshot.name).filePath, "utf8")).rows, measurement.rows);
@@ -160,28 +160,28 @@ test("daily tools add period ownership while retaining chat loss parameters, row
   await assert.rejects(() => sql.execute("overwrite", { period: "week", sql: "SELECT 0", save_as: b.snapshot.name }, undefined, undefined, undefined as never), /已固定/u);
 });
 
-test("invalid or cancelled measurements do not create snapshots", (t) => {
+test("invalid or cancelled measurements do not create snapshots", async (t) => {
   const { database, artifacts, directory } = fixture(t);
   for (const params of [
     { start_date: "2026-02-30", end_date: "2026-03-01" },
     { start_date: "2026-01-02", end_date: "2026-01-01" },
     { start_date: "2026-1-1", end_date: "2026-01-03" },
-  ]) assert.throws(() => measureLoss(database, artifacts, params), /日期|晚于/u);
-  assert.throws(() => measureLoss(database, artifacts, range, AbortSignal.abort()), /abort/iu);
+  ]) await assert.rejects(() => measureLoss(database, artifacts, params), /日期|晚于/u);
+  await assert.rejects(() => measureLoss(database, artifacts, range, AbortSignal.abort()), /abort/iu);
   assert.deepEqual(artifacts.listDataSnapshots(), []);
   assert.equal(existsSync(path.join(directory, "artifacts", sessionId)), false);
 });
 
-test("row and byte overflow remove partial files and preserve existing snapshots", (t) => {
+test("row and byte overflow remove partial files and preserve existing snapshots", async (t) => {
   const { database, writer, artifacts, directory } = fixture(t);
-  const previous = measureLoss(database, artifacts, range);
+  const previous = await measureLoss(database, artifacts, range);
   const files = readdirSync(path.join(directory, "artifacts", sessionId)).sort();
   for (const [count, prefix, expected] of [[100001, "M", /行数/u], [17000, "M".repeat(2200), /字节/u]] as const) {
     writer.exec("DELETE FROM oee_availability");
     writer.prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?)
       INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span)
       SELECT ? || i,'P1','Conversion','5000','2026-01-01',3600 FROM n`).run(count, prefix);
-    assert.throws(() => measureLoss(database, artifacts, { ...range, by_machine: true }), expected);
+    await assert.rejects(() => measureLoss(database, artifacts, { ...range, by_machine: true }), expected);
     assert.deepEqual(artifacts.listDataSnapshots(), [previous.snapshot]);
     assert.deepEqual(readdirSync(path.join(directory, "artifacts", sessionId)).sort(), files);
   }

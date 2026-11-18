@@ -1,8 +1,8 @@
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import type { DashboardRow } from "../../shared/dashboard.ts";
-import type { AppDatabase, SqlParameter } from "../database/database.ts";
+import type { QueryDatabase, SqlParameter } from "../database/database.ts";
 import { assertDate, type DatePeriod } from "../database/business-dates.ts";
 import { getTestOeeSqlExpressions } from "../skills/test-oee-calculator/assets/test-oee-calculator.ts";
 import { MAX_QUERY_ARTIFACT_BYTES, type DataSnapshotDescriptor, type SessionArtifactStore } from "./artifact-store.ts";
@@ -40,12 +40,12 @@ export interface LossMeasurement extends LossResult {
 }
 
 /** Query and freeze one complete measurement on the caller's read connection. */
-export function measureLoss(
-  database: Pick<AppDatabase, "exportQueryJson">,
+export async function measureLoss(
+  database: Pick<QueryDatabase, "exportQueryJson">,
   artifacts: SessionArtifactStore,
   params: Static<typeof measureLossParameters>,
   signal?: AbortSignal,
-): LossMeasurement {
+): Promise<LossMeasurement> {
   signal?.throwIfAborted();
   assertDate(params.start_date);
   assertDate(params.end_date);
@@ -79,13 +79,9 @@ export function measureLoss(
     loss_hours / ${selectedDays} AS hours_per_selected_day
   FROM losses JOIN coverage USING (kind)
   ORDER BY kind, loss_hours DESC, state_group${scope.byMachine ? ", machine" : ""}`;
-  // Look at persisted names so repeated queries and restored sessions never replace a measurement.
-  const names = new Set(artifacts.listDataSnapshots().map((entry) => entry.name));
   const baseName = "loss-" + range.start.replaceAll("-", "") + "-" + range.end.replaceAll("-", "");
-  let name = baseName;
-  for (let suffix = 2; names.has(artifacts.snapshotName(name)); suffix += 1) name = baseName + "-" + suffix;
-  const { value: _value, replaced: _replaced, ...snapshot } = artifacts.createDataSnapshot(name, (fileDescriptor) => {
-    const exported = database.exportQueryJson(sql, parameters, {
+  const { value: _value, replaced: _replaced, ...snapshot } = await artifacts.createDataSnapshotAsync(baseName, async (fileDescriptor) => {
+    const exported = await database.exportQueryJson(sql, parameters, {
       fileDescriptor, maxRows: 100_000, maxBytes: MAX_QUERY_ARTIFACT_BYTES, previewRows: 0,
       ...(signal === undefined ? {} : { signal }),
     });
@@ -93,13 +89,13 @@ export function measureLoss(
       throw new Error("损失查询结果超过" + (exported.truncationReason === "row_limit" ? "行数" : "字节") + "上限,快照未保存,请缩小查询范围");
     }
     return exported;
-  });
-  const data = JSON.parse(readFileSync(artifacts.resolveDataSnapshot(snapshot.name).filePath, "utf8")) as { rows: DashboardRow[] };
+  }, signal, "unique");
+  const data = JSON.parse(await readFile(artifacts.resolveDataSnapshot(snapshot.name).filePath, "utf8")) as { rows: DashboardRow[] };
   return { sql, parameters, range, scope, rows: data.rows, snapshot, truncated: false };
 }
 
 export function createMeasureLossTool(
-  database: Pick<AppDatabase, "exportQueryJson">,
+  database: Pick<QueryDatabase, "exportQueryJson">,
   artifacts: SessionArtifactStore,
   recordEvidence?: (measurement: LossMeasurement) => string,
 ) {
@@ -111,7 +107,7 @@ export function createMeasureLossTool(
     executionMode: "sequential",
     parameters: measureLossParameters,
     async execute(_id, params, signal) {
-      const measurement = measureLoss(database, artifacts, params, signal);
+      const measurement = await measureLoss(database, artifacts, params, signal);
       return lossOutput(measurement, recordEvidence?.(measurement));
     },
   });

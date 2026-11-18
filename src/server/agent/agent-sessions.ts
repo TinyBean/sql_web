@@ -30,7 +30,7 @@ import {
   type SessionSummary,
 } from "../../shared/contracts.ts";
 import type { DashboardState } from "../../shared/dashboard.ts";
-import type { AppDatabase } from "../database/database.ts";
+import type { QueryDatabase } from "../database/database.ts";
 import type { ArtifactStore } from "../tool/artifact-store.ts";
 import type { CodeInterpreterRuntime } from "../tool/code-interpreter.ts";
 import { activeAgentToolNames, createAgentTools } from "../tool/database-tools.ts";
@@ -64,7 +64,7 @@ export interface AgentSessionStoreOptions {
   readonly dashboardForAccount?: (account: string) => readonly string[];
   readonly dashboardTitle?: (dashboardId: string) => string;
   readonly loadAccountDashboard?: (dashboardId: string) => DashboardState;
-  readonly database: AppDatabase;
+  readonly database: QueryDatabase;
   readonly cwd: string;
   readonly sessionDir: string;
   readonly agentDir: string;
@@ -496,7 +496,7 @@ export class AgentSessionStore {
   readonly #dashboardTitle: (dashboardId: string) => string;
   readonly #loadAccountDashboard: ((dashboardId: string) => DashboardState) | undefined;
   readonly #sharedDashboardPath: string | undefined;
-  readonly #database: AppDatabase;
+  readonly #database: QueryDatabase;
   readonly #cwd: string;
   readonly #sessionDir: string;
   readonly #agentDir: string;

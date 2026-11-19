@@ -11,7 +11,7 @@ export function dailyDashboard(throughDate = "2026-09-14"): DashboardState {
     title: day.title + "（" + period.end + "）",
     subtitle: "最新业务日 · " + period.end + " · 临时 Agent 分析",
     metricDefinition: period.start + " 至 " + period.end + " 的" + day.metricDefinition,
-    warnings: ["责任人列为职能建议，需管理层确认后指派到人"],
+    warnings: [], notes: ["责任人列为职能建议，需管理层确认后指派到人"],
     data: [
       { kind: "MT", priority: 1, issue: "换线时间偏长", measure: "复查换线步骤",
         suggested_owner: "生产主管（职能建议，待人工确认）", loss_hours: 2.5 },

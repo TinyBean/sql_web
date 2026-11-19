@@ -508,6 +508,8 @@ export class AgentSessionStore {
   readonly #toolNames: readonly AgentToolName[];
   readonly #skillCatalog: AgentSkillCatalog;
   readonly #sessions = new Map<string, AgentSession>();
+  readonly #restoring = new Map<string, Promise<AgentSession>>();
+  readonly #deleting = new Map<string, Promise<void>>();
   readonly #subagents = new Map<string, SubagentRunner>();
   readonly #sessionTimes = new Map<string, SessionTimes>();
   readonly #modelRuntime: ModelRuntime;
@@ -807,9 +809,19 @@ export class AgentSessionStore {
 
   async get(id: string): Promise<AgentSession> {
     this.#assertValidId(id);
+    this.#shutdown.signal.throwIfAborted();
+    if (this.#deleting.has(id)) throw new SessionNotFoundError(id);
     const cached = this.#sessions.get(id);
     if (cached) return cached;
 
+    const pending = this.#restoring.get(id);
+    if (pending) return pending;
+    const restoration = this.#restore(id).finally(() => this.#restoring.delete(id));
+    this.#restoring.set(id, restoration);
+    return restoration;
+  }
+
+  async #restore(id: string): Promise<AgentSession> {
     const infos = await this.#listPersistedSessions();
     const info = infos.find((candidate) => candidate.id === id);
     if (!info) throw new SessionNotFoundError(id);
@@ -830,6 +842,17 @@ export class AgentSessionStore {
 
   async delete(id: string): Promise<void> {
     this.#assertValidId(id);
+    this.#shutdown.signal.throwIfAborted();
+    const pending = this.#deleting.get(id);
+    if (pending) return pending;
+    const deletion = this.#delete(id).finally(() => this.#deleting.delete(id));
+    this.#deleting.set(id, deletion);
+    return deletion;
+  }
+
+  async #delete(id: string): Promise<void> {
+    // A failed restore can still leave a persisted session to delete.
+    await this.#restoring.get(id)?.catch(() => {});
     const infos = await this.#listPersistedSessions();
     const info = infos.find((candidate) => candidate.id === id);
     const session = this.#sessions.get(id);
@@ -1061,7 +1084,7 @@ export class AgentSessionStore {
   async #dispose(): Promise<void> {
     this.#logger.info("agent.store.disposing", { activeSessionCount: this.#sessions.size });
     this.#shutdown.abort(new Error("Agent 服务正在关闭"));
-    await Promise.allSettled([...this.#completions]);
+    await Promise.allSettled([...this.#completions, ...this.#restoring.values(), ...this.#deleting.values()]);
     for (const unsubscribe of this.#unsubscribers.values()) unsubscribe();
     for (const session of this.#sessions.values()) session.dispose();
     this.#unsubscribers.clear();

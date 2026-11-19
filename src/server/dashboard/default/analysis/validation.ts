@@ -429,11 +429,11 @@ export function applyAnalysisReport(
         ...result.exclusions.filter((entry) => entry.period === key).map((entry) =>
           (ANALYSIS_PERIOD_NAMES[key] + " " + entry.kind + " 原第 " + entry.priority + " 条建议未通过证据校验，已剔除；其余有效建议正常展示。原因：" +
             validationMessages(entry.issues)).slice(0, 300)),
-        ...report.groups.filter((group) => !group.items.length).map((group) =>
-          (group.kind + " 未生成建议：" + group.no_findings_reason).slice(0, 300)),
         ...result.rows[key].filter((row) => typeof row["issue"] === "string" && row["issue"].includes("平台待维护/"))
           .map(() => "机台平台映射待维护；未知平台机台保留真实数值与排名，请补充映射"),
       ],
+      notes: [...(widget.notes ?? []), ...report.groups.filter((group) => !group.items.length).map((group) =>
+        (group.kind + " 未生成建议：" + group.no_findings_reason).slice(0, 300))],
     };
   }) });
 }
@@ -1158,8 +1158,8 @@ export function applyMachineAnalysis(state: DashboardState, result: MachineAnaly
       const advice = group.items.find((item) => item.machine === row["machine"]);
       return { ...row, action_and_owner: advice ? `改善措施：${advice.measure}\n建议责任人：${advice.suggested_owner}（职能建议，待人工确认）` :
         bounded(`${advicePrefix}未通过校验（${reasonsForMachine(issues, String(row["machine"]))}）`) };
-    }), warnings: [...warnings, ...widget.warnings.filter((warning) => !warning.startsWith(MACHINE_ADVICE_UNAVAILABLE)),
-      ...(!widget.data.length && group.no_findings_reason ? [bounded(group.no_findings_reason)] : [])].slice(0, 20) };
+    }), warnings: [...warnings, ...widget.warnings.filter((warning) => !warning.startsWith(MACHINE_ADVICE_UNAVAILABLE))].slice(0, 20),
+      notes: [...(widget.notes ?? []), ...(!widget.data.length && group.no_findings_reason ? [bounded(group.no_findings_reason)] : [])] };
   }) });
   return result.interruption ? machineAnalysisInterrupted(analyzed, result.interruption, result) : analyzed;
 }

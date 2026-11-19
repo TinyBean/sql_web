@@ -11,7 +11,9 @@ import { loadDataCommandConfig } from "../../scripts/database/data-command-confi
 import { dailyUpdatePlan } from "../../scripts/database/daily-update.ts";
 import { runDailyUpdate } from "../../scripts/scheduling/daily-update.ts";
 import { DashboardRegistry } from "../../src/server/dashboard/index.ts";
-import { createDefaultDashboardDefinition } from "../../src/server/dashboard/default/index.ts";
+import { createDefaultDashboardDefinition, writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
+import { createAnalysisDashboardDefinition } from "../../src/server/dashboard/analysis/index.ts";
+import { outcomeExitCode } from "../../scripts/database/oee-data-store.ts";
 import { dashboardPeriods, weekLabel } from "../../src/server/dashboard/default/calculate/periods.ts";
 import { addDays, latestClosedBusinessDate, latestCompleteWeek } from "../../src/server/database/business-dates.ts";
 import { createDefaultDashboard } from "../../src/server/dashboard/default/template.ts";
@@ -31,14 +33,14 @@ function fixture(t: TestContext) {
   return { directory, config };
 }
 
-function seed(database: DatabaseSync, date: string, kind = "MT", sockets = 20): void {
+function seed(database: DatabaseSync, date: string, kind = "MT", sockets = 20, machine = kind + "-01"): void {
   const step = kind === "MT" ? "5000" : "7000";
   database.prepare(
     "INSERT INTO oee_availability(tool_name,lot_id,final_state,step,date,time_span) VALUES(?,?,?,?,?,?)",
-  ).run(kind + "-01", "P-LOT", "Test(Normal)", step, date, 43_200);
+  ).run(machine, "P-LOT", "Test(Normal)", step, date, 43_200);
   database.prepare(
     "INSERT INTO oee_dut_utilization(machine_id,lot_id,in_qty,out_qty,test_stage,dut_num,step_id,date,touchdown_index,start_time,end_time) VALUES(?,?,?,?,?,?,?,?,'1','2026-01-01T00:00:00.000Z','2026-01-01T00:00:10.000Z')",
-  ).run(kind + "-01", "P-LOT", "10", "8", "1st", String(sockets), step, date);
+  ).run(machine, "P-LOT", "10", "8", "1st", String(sockets), step, date);
 }
 
 test("resolves closed business dates at 08:30 and across month, year, and leap day", () => {
@@ -231,7 +233,7 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
   assert.deepEqual(weekly.data.map((row) => [row["period_label"], row["oee_percent"], row["max_point"], row["min_point"]]), [
     ["2026-W00", 40, 40, null], ["2026-W01", 20 / 50 * .8 * 100, null, null], ["2026-W02", 10, null, 10],
   ]);
-  assert.equal(weekly.warnings.find((warning) => warning.startsWith("部分周：")),
+  assert.equal(weekly.notes?.find((note) => note.startsWith("部分周：")),
     "部分周：2026-W00、2026-W02；与完整周期比较时需注意覆盖天数");
   assert.match(weekly.metricDefinition, /周日至周六/u);
   const extremes = state.widgets[7]!.data.filter((row) => row["grain"] === "周");
@@ -243,7 +245,7 @@ test("weekly trends, extrema, machine rankings and complete-week analysis share 
     row["period_label"], row["top10_machines"],
   ]), [["2026-W02", "1.平台待维护/MT-01(MT 10%)"], ["2026-W00", "1.平台待维护/MT-01(MT 40%)"]]);
   assert.ok(machines.warnings.some((warning) => warning.includes("2026-W00（2026-01-01 至 2026-01-03）")));
-  assert.ok(machines.warnings.some((warning) => warning.includes("2026-W02（2026-01-11 至 2026-01-11）")));
+  assert.ok(machines.notes?.some((note) => note.includes("2026-W02（2026-01-11 至 2026-01-11）")));
   assert.match(state.widgets[9]!.subtitle, /最新业务日 · 2026-01-11/u);
   assert.match(state.widgets[10]!.subtitle, /最近完整周 · 2026-01-04 至 2026-01-10/u);
 });
@@ -323,12 +325,50 @@ test("empty and cross-year dashboards contain null metrics and accurate period w
   assert.match(empty.widgets[9]!.subtitle, /最新业务日 · 2027-01-01/u);
   assert.match(empty.widgets[10]!.subtitle, /2026-12-20 至 2026-12-26/u);
   assert.match(empty.widgets[4]!.title, /2027/u);
-  assert.match(empty.widgets[11]!.warnings.join(" "), /不足 10 台/u);
+  assert.match(empty.widgets[11]!.notes!.join(" "), /不足 10 台/u);
 });
 
 function result(status: SyncResult["status"], dataset: "availability" | "dut_utilization"): SyncResult {
   return { runId: dataset, status, datasets: [{ dataset, plannedWindows: [], imports: [] }] };
 }
+
+test("complete daily coverage with explanatory notes exits 0, missing DUT coverage exits 2", async (t) => {
+  const { config } = fixture(t);
+  const writer = new DatabaseSync(config.databasePath);
+  t.after(() => writer.close());
+  const throughDate = "2023-01-07"; // First full Sunday–Saturday week and full year-to-date coverage.
+  for (let date = "2023-01-01"; date <= throughDate; date = addDays(date, 1)) {
+    seed(writer, date, "MT", 20, "ADH001");
+    seed(writer, date, "ST", 20, "ADH092");
+  }
+  const definition = createDefaultDashboardDefinition(config, {
+    async generate(config, day, now, warnings) {
+      const calculated = readCalculatedDashboard(config.databasePath, day, now, warnings);
+      // Stand in for a successful model report, keeping all calculated coverage and notes.
+      const state = { ...calculated, widgets: calculated.widgets.map((widget) => ({
+        ...widget, warnings: widget.warnings.filter((warning) =>
+          !warning.startsWith("本次分析暂不可用") && !warning.startsWith("改善建议暂不可用")),
+      })) };
+      return { state, analysisStatus: "completed", analysisReason: null, analysisRunId: "test", analysisArtifactDir: "test" };
+    },
+    publish: writeDefaultDashboard,
+  });
+  const registry = new DashboardRegistry([definition, createAnalysisDashboardDefinition(definition)]);
+  const plan = dailyUpdatePlan(["--through-date", throughDate], new Date("2023-01-08T01:00:00Z"));
+  const update = () => runDailyUpdate(config, plan, registry, logger, {
+    openStore: () => ({ async importNewDay({ dataset }) { return result("completed", dataset); }, close() {} }),
+  });
+  const complete = await update();
+  assert.deepEqual(complete.dashboards.map((dashboard) => dashboard.status), ["completed", "completed"]);
+  assert.equal(outcomeExitCode(complete.status), 0);
+  assert.ok(registry.loadInitial().widgets[8]!.notes?.some((note) => note.includes("缺失或零分母")));
+  assert.ok(registry.loadInitial("analysis").widgets[0]!.notes?.some((note) => note.includes("职能建议")));
+
+  writer.prepare("DELETE FROM oee_dut_utilization WHERE date = ? AND machine_id = ?").run(throughDate, "ADH092");
+  const incomplete = await update();
+  assert.deepEqual(incomplete.dashboards.map((dashboard) => dashboard.status), ["completed_with_warnings", "completed_with_warnings"]);
+  assert.equal(outcomeExitCode(incomplete.status), 2);
+});
 
 test("hard sync failures preserve the published default and still attempt the other dataset", async (t) => {
   const { config } = fixture(t);

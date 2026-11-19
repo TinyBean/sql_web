@@ -84,14 +84,14 @@ export function calculateDefaultDashboard(
     const grouped = groupPeriods(readPeriodOee(database, periods.trend, key));
     const { high, low } = extremes(grouped);
     const partials = grouped.filter((period) => isPartialPeriod(period, grain));
-    const warnings = [...commonWarnings];
-    if (partials.length) warnings.push("部分" + grain + "：" + partials.map((period) => period.label).join("、") + "；与完整周期比较时需注意覆盖天数");
-    if (grain === "周") warnings.push("业务周为周日至周六；周标签采用周日起始的 %U 编号，年初首个周日之前为 W00");
+    const notes: string[] = [];
+    if (partials.length) notes.push("部分" + grain + "：" + partials.map((period) => period.label).join("、") + "；与完整周期比较时需注意覆盖天数");
+    if (grain === "周") notes.push("业务周为周日至周六；周标签采用周日起始的 %U 编号，年初首个周日之前为 W00");
     cards.set(template.id, {
       ...template,
       title: template.title + "（" + periods.year + " 年至今）",
       subtitle: rangeText + " · MT/ST 周期池化 OEE",
-      warnings,
+      warnings: commonWarnings, notes,
       data: grouped.map((period) => ({
         period_label: period.label,
         oee_percent: percentage(periodMetric(period, "test_oee")),
@@ -236,6 +236,7 @@ export function buildMachineExtremesTable(
   }
   const cache = new Map<string, MachineOee[]>();
   const warnings = new Set(sourceWarnings);
+  const notes = new Set<string>();
   const missingPlatforms = new Set<string>();
   const data: DashboardRow[] = [];
   for (const grain of ["周", "月", "季"] as const) {
@@ -266,10 +267,13 @@ export function buildMachineExtremesTable(
         const days = top.map((machine) => machine[column]);
         return Math.min(...days) + "–" + Math.max(...days) + "/" + selectedDays;
       };
-      warnings.add(`${grain} ${row["period_label"]}（${period.start} 至 ${period.end}）：` +
+      const incomplete = !top.length || calculable.length < machines.length ||
+        top.some((machine) => machine.availabilityDays < selectedDays || machine.dutDays < selectedDays);
+      const coverageMessage = `${grain} ${row["period_label"]}（${period.start} 至 ${period.end}）：` +
         `可计算机台 ${calculable.length}/${machines.length}，展示 ${top.length} 台；` +
         (top.length ? `入榜机台 Availability 覆盖 ${coverage("availabilityDays")} 天，DUT 覆盖 ${coverage("dutDays")} 天；` : "") +
-        "缺失或零分母为 NULL，不参与排名");
+        "缺失或零分母为 NULL，不参与排名";
+      (incomplete ? warnings : notes).add(coverageMessage);
     }
   }
   if (missingPlatforms.size) warnings.add(("平台映射待维护 " + missingPlatforms.size + " 台：" +
@@ -277,7 +281,7 @@ export function buildMachineExtremesTable(
   return {
     ...createMachineExtremesTemplate(),
     subtitle: "与 OEE 极值明细逐项对应的机台 TOP10 · 本机台周期 Test Time 1% 截尾、上限 100%",
-    data, warnings: [...warnings],
+    data, warnings: [...warnings], notes: [...notes],
   };
 }
 
@@ -293,11 +297,12 @@ function prepareAnalysisCards(
     const label = key === "day" ? period.end : periodLabel(key === "week" ? period.start : period.end, PERIOD_GRAINS[key]);
     const subtitle = key === "day" ? "最新业务日 · " + period.end : (key === "week" ? "最近完整周" : grain + "累计") + " · " + periodText;
     const warnings = [...syncWarnings, ...coverageWarnings(readPeriodOee(database, period, "report_period")),
-      "本次分析暂不可用：尚未生成临时 Agent 报告", "责任人列为职能建议，需管理层确认后指派到人"];
+      "本次分析暂不可用：尚未生成临时 Agent 报告"];
     return {
       ...template, title: template.title + "（" + label + "）",
       subtitle: subtitle + " · 临时 Agent 分析",
       metricDefinition: periodText + " 的" + template.metricDefinition, warnings,
+      notes: ["责任人列为职能建议，需管理层确认后指派到人"],
     };
   });
 }

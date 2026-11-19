@@ -78,7 +78,7 @@ export function createDailyImprovementEmail(state: DashboardState, throughDate: 
       typeof value === "number" ? formatDisplayNumber(value) : String(value);
   }));
   const emptyMessage = "本期未生成改善建议,原因见下方提示。";
-  const notes = ["统计口径:" + card.metricDefinition, ...card.warnings.map((warning) => "提示:" + warning)];
+  const notes = ["统计口径:" + card.metricDefinition, ...card.warnings.map((warning) => "提示:" + warning), ...(card.notes ?? [])];
   return {
     subject: (quality?.status === "degraded" ? "【报告降级】" : "") + title + " · 截止 " + throughDate,
     text: [title, ...description, "", headers.join("\t"),
@@ -154,8 +154,7 @@ export function createDefaultDashboardDefinition(
         const notificationReason = notification && notification.status !== "accepted" && notification.status !== "skipped"
           ? notification.reason : null;
         const hasWarnings = context.syncWarnings.length > 0 || details.analysisStatus !== "completed" || notificationReason !== null ||
-          state.widgets.some((widget) => widget.warnings.some((warning) =>
-            warning.includes("缺") || warning.includes("尚未") || warning.includes("仅反映已有数据")));
+          state.widgets.some((widget) => widget.warnings.length > 0);
         return {
           status: hasWarnings ? "completed_with_warnings" : "completed",
           published: true, dataAsOf: state.dataAsOf,

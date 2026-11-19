@@ -100,7 +100,7 @@ test("15/6 card templates retain all trends and four wide tables of exactly ten 
       assert.equal(row["machine_label"], row["machine"] === "ADH001" ? "T5773/ADH001" :
         row["machine"] === "ADH092" ? "T5851/ADH092" : "平台待维护/" + row["machine"]);
     }
-    assert.match(card.title, /2026-10-20/u); assert.match(card.warnings.join(" "), /实际展示/u);
+    assert.match(card.title, /2026-10-20/u); assert.match(card.notes!.join(" "), /实际展示/u);
     assert.ok(card.data.every((row) => row["action_and_owner"] === "改善建议暂不可用"));
   }
 });

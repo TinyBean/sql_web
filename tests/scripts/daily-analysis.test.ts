@@ -700,9 +700,9 @@ test("empty current periods and missing minima retain nulls and allow empty no-f
   for (const period of result.report.periods) for (const group of period.groups) assert.equal(group.no_findings_reason, reason);
   const analyzed = applyAnalysisReport(base, result);
   assert.equal(analyzed.widgets[1]?.data[0]?.["overall_oee_percent"], null);
-  assert.ok(analyzed.widgets.slice(9, 11).every((widget) => widget.data.length === 0 && widget.warnings.some((warning) => warning.includes("无可计算"))));
+  assert.ok(analyzed.widgets.slice(9, 11).every((widget) => widget.data.length === 0 && widget.notes?.some((note) => note.includes("无可计算"))));
   for (const widget of analyzed.widgets.slice(9, 11)) for (const kind of ["MT", "ST"]) {
-    assert.ok(widget.warnings.includes((kind + " 未生成建议：" + reason).slice(0, 300)));
+    assert.ok(widget.notes?.includes((kind + " 未生成建议：" + reason).slice(0, 300)));
   }
   report.periods[0]!.groups[0]!.no_findings_reason = " ";
   assert.equal(validateAnalysisReport(report, context, evidence.records).report.periods[0]!.groups[0]!.no_findings_reason, " ");

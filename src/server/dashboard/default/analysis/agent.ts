@@ -405,6 +405,7 @@ ${NUMBER_DISPLAY_RULES}
 export function analysisPrompt(context: AnalysisContext, period?: PeriodKey): string {
   const child = period !== undefined;
   const keys = period ? [period] : ANALYSIS_PERIOD_KEYS;
+  const widgets = context.dashboard.widgets.filter((widget) => !period || widget.id === createAnalysisTemplate(period).id);
   const comparisons = Object.fromEntries(keys.map((key) => [key, {
     current: summary(context.comparisons[key].current),
     minimum: summary(context.comparisons[key].minimum),
@@ -480,7 +481,8 @@ comparison 简述相对最低点和历史的持续、改善或新出现情况及
 【初始上下文】
 ${JSON.stringify({ throughDate: context.throughDate, periods: Object.fromEntries(keys.map((key) => [key, context.periods[key]])), comparisons,
     losses: Object.fromEntries(keys.map((key) => [key, context.losses[key]])),
-    warnings: [...new Set(context.dashboard.widgets.filter((widget) => !period || widget.id === createAnalysisTemplate(period).id).flatMap((widget) => widget.warnings))] })}`;
+    warnings: [...new Set(widgets.flatMap((widget) => widget.warnings))],
+    notes: [...new Set(widgets.flatMap((widget) => widget.notes ?? []))] })}`;
 }
 
 export async function runAnalysisAgent(

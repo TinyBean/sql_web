@@ -176,7 +176,7 @@ export function createExecuteSqlTool(
           preview: {
             rows: created.value.previewRows,
             rowCount: created.value.previewRows.length,
-            truncated: created.rowCount > created.value.previewRows.length,
+            truncated: created.value.previewTruncated,
           },
           pythonInput: {
             rows: "snapshot_rows",

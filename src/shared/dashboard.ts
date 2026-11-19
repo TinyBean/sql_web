@@ -80,6 +80,8 @@ interface DashboardWidgetBase {
   readonly format: { readonly unit: string; readonly precision: number };
   readonly metricDefinition: string;
   readonly warnings: readonly string[];
+  /** Explanatory text displayed alongside warnings, including on healthy publications. */
+  readonly notes?: readonly string[];
 }
 
 export interface DashboardKpiWidget extends DashboardWidgetBase {
@@ -313,6 +315,8 @@ function widget(value: unknown, path: string): DashboardWidget {
       (item, itemPath) => nonEmptyString(item, itemPath, 300),
       20,
     ),
+    ...(source["notes"] === undefined ? {} : { notes: array(source["notes"], `${path}.notes`,
+      (item, itemPath) => nonEmptyString(item, itemPath, 300), 20) }),
   };
   return common as DashboardWidget;
 }

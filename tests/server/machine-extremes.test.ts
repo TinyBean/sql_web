@@ -177,8 +177,8 @@ test("rows follow grain and low/high order, preserve fleet OEE, and clip W00 and
     assert.equal(row["oee_percent"], 51.23);
     assert.equal(row["top10_machines"], "1.平台待维护/CURRENT(MT 40%)");
   }
-  assert.match(table.warnings.join(" "), /2027-01-01 至 2027-01-01/u);
-  assert.equal(table.warnings.filter((warning) => !warning.startsWith("平台映射")).length, 3, "shared high/low periods should share coverage notes");
+  assert.match(table.notes!.join(" "), /2027-01-01 至 2027-01-01/u);
+  assert.equal(table.notes!.length, 3, "shared high/low periods should share coverage notes");
 });
 
 test("empty extrema and periods without calculable machines stay empty rather than inventing rankings", (t) => {

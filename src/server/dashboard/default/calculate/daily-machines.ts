@@ -70,13 +70,18 @@ export function buildDailyMachineCards(rows: readonly DashboardRow[], day: strin
     const selected = selectDailyMachines(rows, kind, ranking);
     const observed = rows.filter((row) => row["kind"] === kind).length;
     const calculable = rows.filter((row) => row["kind"] === kind && typeof row["oee"] === "number").length;
+    const coverageWarnings = [...warnings];
+    const notes = ["责任人为职能建议,待人工确认"];
+    if (!observed || calculable < observed) {
+      coverageWarnings.push(`${kind} 可计算机台 ${calculable}/${observed} 台,缺失不补零`);
+    }
+    if (selected.length < 10) notes.push(`${kind} 可计算机台不足 10 台,实际展示 ${selected.length} 台`);
     return { ...template, title: `${template.title}(${day})`,
       subtitle: `业务日 ${day}(08:30 至次日 08:30)· 可计算 ${calculable}/${observed} 台`,
       data: selected.map(({ row, rank }) => ({ kind, rank, machine: row["machine"]!, machine_label: machineLabel(String(row["machine"])), oee: row["oee"]!,
         availability: row["availability"]!, dut_on: row["dut_on"]!, test_time_performance: row["test_time_performance"]!,
         final_yield: row["final_yield"]!, loss_and_bottleneck: machineLossAndBottleneck(row), action_and_owner: MACHINE_ADVICE_UNAVAILABLE })),
-      warnings: [...warnings, ...(selected.length < 10 ? [`${kind} 可计算机台不足 10 台,实际展示 ${selected.length} 台;缺失不补零`] : []),
-        MACHINE_ADVICE_UNAVAILABLE + ":尚未完成逐台分析", "责任人为职能建议,待人工确认"],
+      warnings: [...coverageWarnings, MACHINE_ADVICE_UNAVAILABLE + ":尚未完成逐台分析"], notes,
     };
   }));
 }

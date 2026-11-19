@@ -86,6 +86,22 @@ test("two slots admit in FIFO order, queued cancellation and expiry never run, s
   await assert.rejects(executor.getSchema(), /关闭/u);
 });
 
+test("SQL snapshots preserve full text while the web tool marks shortened previews", async (t) => {
+  const { artifacts, save } = fixture(t);
+  const value = "测".repeat(2_500) + "末尾";
+  const result = await save("text", "SELECT ? AS value", [value]);
+  assert.ok(result.details && "preview" in result.details);
+  assert.deepEqual(result.details.preview, {
+    rows: [{ value: value.slice(0, 2_000) + "…" }], rowCount: 1, truncated: true,
+  });
+  const snapshot = artifacts.resolveDataSnapshot("text");
+  const json = readFileSync(snapshot.filePath, "utf8");
+  assert.equal(snapshot.byteCount, Buffer.byteLength(json));
+  assert.deepEqual(JSON.parse(json), {
+    columns: ["value"], rows: [{ value }], rowCount: 1, truncated: false, truncationReason: null,
+  });
+});
+
 test("concurrent exports merge the manifest and interrupted replacements discard partial files", async (t) => {
   const { root, executor, artifacts, save } = fixture(t, 3000, pausingWorker);
   await Promise.all([save("left", "SELECT n FROM sample"), save("right", "SELECT 42 AS answer")]);

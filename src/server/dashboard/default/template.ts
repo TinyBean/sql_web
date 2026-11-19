@@ -41,7 +41,8 @@ export function fillCardTemplate(template: DashboardWidget, values: DashboardWid
     throw new Error("卡片计算结果与模板不匹配：" + template.id);
   }
   const card = { ...template, data: values.data, title: values.title, subtitle: values.subtitle,
-    metricDefinition: values.metricDefinition, warnings: values.warnings };
+    metricDefinition: values.metricDefinition, warnings: values.warnings,
+    ...(values.notes ? { notes: values.notes } : {}) };
   if (card.kind === "overview" && values.kind === "overview") {
     return { ...card, encoding: { ...card.encoding,
       ...(values.encoding.description !== undefined ? { description: values.encoding.description } : {}),

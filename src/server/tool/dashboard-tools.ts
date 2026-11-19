@@ -291,7 +291,7 @@ export function createDashboardTools(dashboard: SessionDashboardStore, sessionId
             ...(widget.kind === "overview" ? {
               label: widget.encoding.label ?? widget.title,
               description: widget.encoding.description ?? widget.metricDefinition,
-            } : {}), warnings: widget.warnings,
+            } : {}), warnings: widget.warnings, ...(widget.notes ? { notes: widget.notes } : {}),
           })),
         };
       });

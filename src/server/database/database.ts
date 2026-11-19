@@ -50,6 +50,7 @@ export interface QueryJsonExportOptions {
 export interface QueryJsonExportResult {
   readonly columns: readonly string[];
   readonly previewRows: readonly NormalizedRow[];
+  readonly previewTruncated: boolean;
   readonly rowCount: number;
   readonly byteCount: number;
   readonly truncated: boolean;
@@ -363,13 +364,23 @@ function normalizeValue(value: unknown): NormalizedValue {
       : value.toString();
   }
   if (value instanceof Uint8Array) return `[BLOB ${value.byteLength} bytes]`;
-  if (typeof value === "string" && value.length > 2_000) return `${value.slice(0, 2_000)}…`;
   if (value === null || typeof value === "number") return value;
   return String(value);
 }
 
 function normalizeRow(row: Record<string, unknown>): NormalizedRow {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeValue(value)]));
+}
+
+function truncatePreviewText(row: NormalizedRow): boolean {
+  let truncated = false;
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value === "string" && value.length > 2_000) {
+      row[key] = value.slice(0, 2_000) + "…";
+      truncated = true;
+    }
+  }
+  return truncated;
 }
 
 function hardenConnection(database: DatabaseSync): void {
@@ -436,7 +447,9 @@ export class AppDatabase {
         truncated = true;
         break;
       }
-      rows.push(normalizeRow(row));
+      const displayRow = normalizeRow(row);
+      truncatePreviewText(displayRow);
+      rows.push(displayRow);
     }
     return { columns, rows, rowCount: rows.length, truncated };
   }
@@ -485,6 +498,7 @@ export class AppDatabase {
     let byteCount = Buffer.byteLength(header);
     let rowCount = 0;
     const previewRows: NormalizedRow[] = [];
+    let previewTextTruncated = false;
     let truncationReason: QueryTruncationReason | null = null;
 
     for (const row of statement.iterate(...bindParameters(parameters))) {
@@ -505,7 +519,10 @@ export class AppDatabase {
       writeSync(options.fileDescriptor, rowJson);
       byteCount += rowBytes;
       rowCount += 1;
-      if (previewRows.length < requestedPreviewRows) previewRows.push(normalizedRow);
+      if (previewRows.length < requestedPreviewRows) {
+        if (truncatePreviewText(normalizedRow)) previewTextTruncated = true;
+        previewRows.push(normalizedRow);
+      }
     }
     options.signal?.throwIfAborted();
 
@@ -515,7 +532,8 @@ export class AppDatabase {
     }}`;
     writeSync(options.fileDescriptor, footer);
     byteCount += Buffer.byteLength(footer);
-    return { columns, previewRows, rowCount, byteCount, truncated, truncationReason };
+    return { columns, previewRows, previewTruncated: previewTextTruncated || previewRows.length < rowCount || truncated,
+      rowCount, byteCount, truncated, truncationReason };
   }
 
   getSchema(): SchemaObject[] {

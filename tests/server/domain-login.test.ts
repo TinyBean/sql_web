@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -10,7 +10,7 @@ import { createDefaultDashboard } from "../../src/server/dashboard/default/templ
 import { createDashboardRegistry } from "../../src/server/dashboard/index.ts";
 import { loadUserDashboards } from "../../src/server/dashboard/user-dashboards.ts";
 import { writeDefaultDashboard } from "../../src/server/dashboard/default/index.ts";
-import { AgentSessionStore } from "../../src/server/agent/agent-sessions.ts";
+import { AgentSessionStore, SessionNotFoundError } from "../../src/server/agent/agent-sessions.ts";
 import { OWNER_ENTRY, readSessionFile } from "../../src/server/agent/session-files.ts";
 import { ArtifactStore } from "../../src/server/tool/artifact-store.ts";
 import { SessionDashboardStore } from "../../src/server/agent/session-dashboard.ts";
@@ -200,10 +200,35 @@ test("owned empty sessions persist watermarks, isolate cached access and freeze 
   assert.equal((await alice.getSerialized(a.id)).dashboards[0]!.state.dataAsOf, a.dashboards[0]!.state.dataAsOf);
   await env.store.dispose();
   const restarted = await env.open();
+  const [firstOpen, secondOpen] = await Promise.all([
+    restarted.forAccount("3000100562").get(a.id), restarted.forAccount("3000100562").get(a.id),
+  ]);
+  assert.strictEqual(firstOpen, secondOpen);
+  assert.strictEqual(await restarted.get(a.id), firstOpen);
   assert.equal((await restarted.forAccount("3000100562").getSerialized(a.id)).dashboards[0]!.state.widgets.length, 6);
   assert.equal((await restarted.forAccount("bob").list()).length, 1);
   await restarted.forAccount("bob").delete(b.id);
   assert.equal((await restarted.forAccount("bob").list()).length, 0);
+});
+
+test("a failed restore can be retried and deletion drains a concurrent restore", async (t) => {
+  const env = await sessionFixture(t);
+  const { id } = await env.store.forAccount("alice").create();
+  await env.store.dispose();
+  const restarted = await env.open();
+  const directory = path.join(env.data, "sessions");
+  const file = path.join(directory, readdirSync(directory).find((name) => name.endsWith(id + ".jsonl"))!);
+  renameSync(file, file + ".tmp");
+  await assert.rejects(restarted.get(id), SessionNotFoundError);
+  renameSync(file + ".tmp", file);
+
+  const restore = restarted.get(id);
+  const deletion = restarted.delete(id);
+  await assert.rejects(restarted.get(id), SessionNotFoundError);
+  assert.equal((await restore).sessionId, id);
+  await deletion;
+  assert.equal(restarted.status().activeSessionCount, 0);
+  await assert.rejects(restarted.get(id), SessionNotFoundError);
 });
 
 test("new authenticated sessions return platform display columns for all four analysis and default tables", async (t) => {

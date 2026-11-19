@@ -103,6 +103,7 @@ test("defaults inline queries to 200 rows and streams bounded JSON exports", (t)
   assert.deepEqual(rowLimited, {
     columns: ["value"],
     previewRows: [{ value: 1 }],
+    previewTruncated: true,
     rowCount: 2,
     byteCount: readFileSync(rowLimitedPath).byteLength,
     truncated: true,
@@ -127,6 +128,15 @@ test("defaults inline queries to 200 rows and streams bounded JSON exports", (t)
   assert.equal(byteLimited.truncated, true);
   assert.equal(byteLimited.truncationReason, "byte_limit");
   assert.doesNotThrow(() => JSON.parse(readFileSync(byteLimitedPath, "utf8")));
+
+  const longTextDescriptor = openSync(byteLimitedPath, "w");
+  try {
+    const fullTextLimit = database.exportQueryJson("SELECT ? AS text", ["测".repeat(2_500)], {
+      fileDescriptor: longTextDescriptor, maxRows: 1, maxBytes: 7_000, previewRows: 1,
+    });
+    assert.equal(fullTextLimit.truncationReason, "byte_limit");
+    assert.equal(fullTextLimit.rowCount, 0);
+  } finally { closeSync(longTextDescriptor); }
 });
 
 test("keeps SQL execution read-only", (t) => {

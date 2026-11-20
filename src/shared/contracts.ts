@@ -129,6 +129,10 @@ export interface SchemaResponse {
   readonly objects: readonly PublicSchemaObject[];
 }
 
+export interface DashboardPreviewResponse {
+  readonly dashboards: readonly SessionDashboard[];
+}
+
 export interface SessionsResponse {
   readonly sessions: readonly SessionSummary[];
 }
@@ -191,6 +195,7 @@ export type JsonResponseBody =
   | AbortResponse
   | ChatCompletionResponse
   | DeleteSessionResponse
+  | DashboardPreviewResponse
   | ErrorResponse
   | HealthResponse
   | SchemaResponse

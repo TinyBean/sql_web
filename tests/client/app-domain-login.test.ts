@@ -69,6 +69,7 @@ test("login, shared-history copying, logout and account switches discard streams
     }
     if (url === "/api/auth/logout") { account = null; return json({ ok: true }); }
     if (!account) return json({ error: "expired", requestId: "auth" }, 401);
+    if (url === "/api/dashboards") return json({ dashboards: [{ id: "default", title: account + " 首页", state: dashboard }] });
     if (url === "/api/sessions" && method === "GET") {
       return json({ sessions: [...stored.values()].filter((value) => value.ownerAccount === null || value.ownerAccount === account).map(summary) });
     }
@@ -107,7 +108,9 @@ test("login, shared-history copying, logout and account switches discard streams
   const login = async (value: string) => {
     accountInput.value = value; passwordInput.value = " p&correct ";
     loginForm.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
-    await waitFor(() => !document.body.classList.contains("signed-out") && location.hash.startsWith("#session=new-session"), "login did not initialize a private session");
+    await waitFor(() => !document.body.classList.contains("signed-out") && document.querySelector("#dashboardTitle")?.textContent === value + " 首页", "login did not load the account dashboard");
+    assert.equal(location.hash, "");
+    assert.equal(count, 0);
     assert.equal(passwordInput.value, "");
   };
   const selectLegacy = async () => {

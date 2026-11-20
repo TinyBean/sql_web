@@ -21,7 +21,7 @@ const edited: SessionFile = { ...original, id: "22222222-2222-4222-8222-22222222
   parentFileId: original.id, summary: "已写入 1 个单元格。\n数据!A2：写入", downloadUrl: "/api/sessions/session-excel/files/22222222-2222-4222-8222-222222222222" };
 let harnessId = 0;
 
-async function harness(t: TestContext, restored?: SerializedSession) {
+async function harness(t: TestContext, restored?: SerializedSession, fromHomepage = false) {
   const browser = parseHTML(readFileSync(path.join(process.cwd(), "public/index.html"), "utf8"));
   const { document } = browser;
   const originals = new Map<string, PropertyDescriptor | undefined>();
@@ -29,7 +29,7 @@ async function harness(t: TestContext, restored?: SerializedSession) {
     originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   };
-  const location = { hash: "#session=session-excel", pathname: "/", search: "" };
+  const location = { hash: fromHomepage ? "" : "#session=session-excel", pathname: "/", search: "" };
   expose("document", document); expose("window", browser); expose("location", location);
   expose("history", { replaceState(_state: unknown, _title: string, url: string) { location.hash = url; } });
   for (const name of ["Element", "HTMLElement", "HTMLButtonElement", "HTMLDivElement", "HTMLDetailsElement", "SVGSVGElement", "HTMLInputElement"] as const) expose(name, browser[name]);
@@ -45,13 +45,16 @@ async function harness(t: TestContext, restored?: SerializedSession) {
   const other: SerializedSession = { ...session, id: "other-session", title: "其他会话", files: [], messages: [{ id: "other-user", role: "user", text: "历史问题" }] };
   const requests: MessageRequest[] = [];
   const options = { uploadFile: original, rejectUpload: false, mode: "success" as "success" | "reject" | "accepted-error", failLoads: false, addEdited: true };
+  let creations = 0;
   let uploads = 0;
   let finish: (() => void) | undefined;
   expose("fetch", async (urlInput: string | URL | Request, init: RequestInit = {}) => {
     const url = String(urlInput);
     if (url === "/api/auth/me") return json({ account: "alice", dashboardIds: ["default"], expiresAt: new Date(Date.now() + 3600000).toISOString() });
     if (url === "/api/auth/logout") return json({ ok: true });
-    if (url === "/api/sessions") return json({ sessions: [session, other].map((value) => ({ id: value.id, title: value.title, ownerAccount: "alice", readOnly: false, dashboardIds: ["default"], createdAt: original.createdAt, updatedAt: original.createdAt, messageCount: value.messages.length, fileCount: value.files?.length ?? 0, active: false })) });
+    if (url === "/api/dashboards") return json({ dashboards: session.dashboards });
+    if (url === "/api/sessions" && init.method === "POST") { creations++; return json(session, 201); }
+    if (url === "/api/sessions") return json({ sessions: (fromHomepage && !creations ? [other] : [session, other]).map((value) => ({ id: value.id, title: value.title, ownerAccount: "alice", readOnly: false, dashboardIds: ["default"], createdAt: original.createdAt, updatedAt: original.createdAt, messageCount: value.messages.length, fileCount: value.files?.length ?? 0, active: false })) });
     if (url === "/api/sessions/session-excel") {
       if (options.failLoads) throw new Error("网络不可用");
       return json(session);
@@ -103,10 +106,11 @@ async function harness(t: TestContext, restored?: SerializedSession) {
   });
   const compiled = import.meta.url.endsWith(".js");
   await import(pathToFileURL(path.join(process.cwd(), compiled ? "public/generated/client/app.js" : "src/client/app.ts")).href + `?xlsx-${++harnessId}`);
-  await waitFor(() => document.querySelector("#chatTitle")!.textContent.includes("Excel 会话"), "session not loaded");
+  if (fromHomepage) await waitFor(() => document.querySelector("#dashboardTitle")!.textContent === "看板", "dashboard preview not loaded");
+  else await waitFor(() => document.querySelector("#chatTitle")!.textContent.includes("Excel 会话"), "session not loaded");
   return {
     document, input, pending, toast, options, requests, uploadButton,
-    get session() { return session; }, get uploads() { return uploads; },
+    get session() { return session; }, get creations() { return creations; }, get uploads() { return uploads; },
     fileLinks: () => Array.from(document.querySelectorAll(".message.user.message-file a")),
     upload(file = new File(["test"], options.uploadFile.filename)) {
       const fileInput = document.querySelector("#workbookInput")!;
@@ -130,14 +134,16 @@ async function harness(t: TestContext, restored?: SerializedSession) {
 }
 
 test("uploads show pending names, then a separate right-side file message; follow-ups use the edited file and history restores links", async (t) => {
-  const h = await harness(t);
+  const h = await harness(t, undefined, true);
   assert.equal(h.document.querySelector("#workbookSelect"), null);
   assert.equal(h.document.querySelector("#workbookFiles"), null);
   h.upload(new File(["bad"], "bad.xlsm"));
   await waitFor(() => h.toast.textContent.includes("xlsx"), "invalid extension not reported");
   assert.equal(h.uploads, 0);
+  assert.equal(h.creations, 0);
   h.upload();
   await waitFor(() => h.pending.textContent === "待发送：原表.xlsx", "pending file not shown");
+  assert.equal(h.creations, 1, "first valid upload creates exactly one private session");
   assert.equal(h.pending.querySelector("a"), null);
   assert.equal(h.fileLinks().length, 0);
   assert.ok(h.document.querySelector('[data-session-id="session-excel"]'), "upload-only sessions must appear in history");

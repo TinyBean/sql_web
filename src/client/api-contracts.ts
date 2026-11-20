@@ -8,6 +8,7 @@ import type {
   ChatTraceItem,
   CompactionOutcome,
   AgentToolName,
+  DashboardPreviewResponse,
   DeleteSessionResponse,
   ErrorResponse,
   HealthResponse,
@@ -306,6 +307,10 @@ export const decodeAuthResponse: Decoder<AuthResponse> = (value, path = "$auth")
   return { account: nonEmptyString(item["account"], `${path}.account`),
     dashboardIds: dashboardIds(item["dashboardIds"], `${path}.dashboardIds`), expiresAt };
 };
+
+export const decodeDashboardPreview: Decoder<DashboardPreviewResponse> = (value, path = "$preview") => ({
+  dashboards: sessionDashboards(record(value, path)["dashboards"], `${path}.dashboards`),
+});
 
 export const decodeSessionsResponse: Decoder<SessionsResponse> = (value, path = "$sessions") => {
   const item = record(value, path);

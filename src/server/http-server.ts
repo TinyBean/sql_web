@@ -34,6 +34,7 @@ import {
 import { DatabaseInputError } from "./database/database.ts";
 import { isDashboardUpdateDetails } from "./tool/dashboard-tools.ts";
 import { DashboardInputError } from "./agent/session-dashboard.ts";
+import { createDashboardRegistry, type DashboardRegistry } from "./dashboard/index.ts";
 import { DASHBOARD_ID_PATTERN } from "../shared/dashboard.ts";
 import { Authentication, AuthError } from "./auth.ts";
 import { ExportFileNotFoundError, MAX_EXCEL_BYTES, XLSX_CONTENT_TYPE, type OpenExportFile } from "./tool/export-files.ts";
@@ -107,6 +108,7 @@ export interface StreamableAgentSession {
 
 export interface WebServerOptions {
   authentication?: Authentication;
+  dashboardRegistry?: DashboardRegistry;
   dashboardForAccount?: (account: string) => readonly string[];
   database: WebDatabasePort;
   sessions: WebSessionPort;
@@ -398,7 +400,7 @@ function requestRoute(pathname: string): string {
 }
 
 export function createWebServer({ database, sessions, publicDir, vendorDir, logger = console,
-  authentication = new Authentication(), dashboardForAccount = () => ["default"] }: WebServerOptions): Server {
+  authentication = new Authentication(), dashboardRegistry = createDashboardRegistry(), dashboardForAccount = () => ["default"] }: WebServerOptions): Server {
   return http.createServer(async (request, response) => {
     const requestId = randomUUID();
     const requestLogger = logger.child?.({ requestId }) ?? logger;
@@ -455,8 +457,6 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         json(response, 200, { ...login!, dashboardIds: dashboardForAccount(login!.account) });
         return;
       }
-      const accountSessions = login ? sessions.forAccount(login.account) : undefined;
-
       if (request.method === "POST" && url.pathname === "/chat/compeletion") {
         const controller = new AbortController();
         const onClose = (): void => {
@@ -500,6 +500,15 @@ export function createWebServer({ database, sessions, publicDir, vendorDir, logg
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/dashboards") {
+        const dashboards = dashboardForAccount(login!.account).map((id) => ({
+          id, title: dashboardRegistry.title(id), state: dashboardRegistry.loadInitial(id),
+        }));
+        json(response, 200, { dashboards });
+        return;
+      }
+
+      const accountSessions = login ? sessions.forAccount(login.account) : undefined;
       if (request.method === "GET" && url.pathname === "/api/sessions") {
         const body = { sessions: await accountSessions!.list() } satisfies SessionsResponse;
         json(response, 200, body);

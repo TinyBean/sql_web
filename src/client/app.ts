@@ -14,6 +14,7 @@ import type { DashboardState, SessionDashboard } from "../shared/dashboard.ts";
 import {
   decodeAuthResponse,
   decodeAbortResponse,
+  decodeDashboardPreview,
   decodeDeleteSessionResponse,
   decodeSerializedSession,
   decodeSessionFile,
@@ -136,6 +137,13 @@ const state: ClientState = {
 
 const dashboardRenderer = new DashboardRenderer(elements.dashboardGrid);
 let authGeneration = 0;
+let viewGeneration = 0;
+let pendingCreation: Promise<void> | undefined;
+
+function beginNavigation(): number {
+  pendingCreation = undefined;
+  return ++viewGeneration;
+}
 let currentLogin: AuthResponse | null = null;
 let authExpiryTimer: number | undefined;
 const workbookFiles = new Map<string, readonly SessionFile[]>();
@@ -160,6 +168,7 @@ function requireCurrentAccount(generation: number): void {
 
 function clearLogin(message = "请使用域账号登录"): void {
   authGeneration++;
+  beginNavigation();
   currentLogin = null;
   if (authExpiryTimer !== undefined) window.clearTimeout(authExpiryTimer);
   for (const controller of pendingRequests) controller.abort();
@@ -279,12 +288,14 @@ function toggleHistory(force?: boolean): void {
   elements.historyButton.setAttribute("aria-expanded", String(open));
 }
 
+// The empty key holds the local homepage preview. Persisted session IDs are nonempty.
 function selectedDashboardId(sessionId: string | null = state.sessionId): string | undefined {
-  return sessionId ? state.selectedDashboardIds.get(sessionId) ?? state.dashboardOptions.get(sessionId)?.[0]?.id : undefined;
+  const key = sessionId ?? "";
+  return state.selectedDashboardIds.get(key) ?? state.dashboardOptions.get(key)?.[0]?.id;
 }
 
 function getDashboard(sessionId: string | null, dashboardId = selectedDashboardId(sessionId)): DashboardState | undefined {
-  return sessionId && dashboardId ? state.dashboards.get(sessionId)?.get(dashboardId) : undefined;
+  return dashboardId ? state.dashboards.get(sessionId ?? "")?.get(dashboardId) : undefined;
 }
 
 function cacheSessionDashboards(sessionId: string, dashboards: readonly SessionDashboard[]): void {
@@ -319,9 +330,9 @@ function renderDashboardTabs(): void {
 }
 
 function rememberDashboardScrollPosition(): void {
-  const sessionId = state.sessionId;
+  const sessionId = state.sessionId ?? "";
   const dashboardId = selectedDashboardId();
-  if (!sessionId || !dashboardId || !getDashboard(sessionId, dashboardId)) return;
+  if (!dashboardId || !getDashboard(sessionId, dashboardId)) return;
   let positions = state.dashboardScrollPositions.get(sessionId);
   if (!positions) { positions = new Map(); state.dashboardScrollPositions.set(sessionId, positions); }
   positions.set(dashboardId, {
@@ -331,15 +342,15 @@ function rememberDashboardScrollPosition(): void {
 }
 
 function restoreDashboardScrollPosition(): void {
-  const sessionId = state.sessionId;
+  const sessionId = state.sessionId ?? "";
   const dashboardId = selectedDashboardId();
-  const position = sessionId && dashboardId ? state.dashboardScrollPositions.get(sessionId)?.get(dashboardId) : undefined;
+  const position = dashboardId ? state.dashboardScrollPositions.get(sessionId)?.get(dashboardId) : undefined;
   window.scrollTo?.({ left: position?.left ?? 0, top: position?.top ?? 0, behavior: "instant" });
 }
 
 async function switchDashboard(dashboardId: string): Promise<void> {
-  const sessionId = state.sessionId;
-  if (!sessionId || dashboardId === selectedDashboardId() || !getDashboard(sessionId, dashboardId)) return;
+  const sessionId = state.sessionId ?? "";
+  if (dashboardId === selectedDashboardId() || !getDashboard(sessionId, dashboardId)) return;
   rememberDashboardScrollPosition();
   state.selectedDashboardIds.set(sessionId, dashboardId);
   renderCurrentDashboard();
@@ -399,7 +410,6 @@ function pendingWidgetIdsForCurrentSession(): ReadonlySet<string> {
 
 function renderCurrentDashboard(): void {
   renderDashboardTabs();
-  if (!state.sessionId) return;
   const dashboard = getDashboard(state.sessionId);
   if (dashboard) renderDashboard(dashboard, pendingWidgetIdsForCurrentSession());
 }
@@ -408,7 +418,7 @@ function renderCurrentDashboard(): void {
 function renderSessions(): void {
   elements.sessionList.replaceChildren();
   const visibleSessions = state.sessions.filter((session) => (
-    session.messageCount > 0 || (session.fileCount ?? 0) > 0 || state.activeStreams.has(session.id)
+    !session.readOnly || session.messageCount > 0 || (session.fileCount ?? 0) > 0 || state.activeStreams.has(session.id)
   ));
   if (!visibleSessions.length) {
     const placeholder = document.createElement("div");
@@ -940,7 +950,6 @@ async function uploadWorkbook(file: File): Promise<void> {
   uploadingWorkbook = true;
   syncComposerState();
   try {
-    if (!state.sessionId) await createSession();
     await ensurePrivateSession();
     requireCurrentAccount(generation);
     const id = state.sessionId;
@@ -1024,23 +1033,30 @@ async function refreshSessions(): Promise<void> {
   renderSessions();
 }
 
-async function createSession(): Promise<SerializedSession> {
-  const generation = authGeneration;
-  requireCurrentAccount(generation);
-  const session = await api("/api/sessions", decodeSerializedSession, {
-    method: "POST",
-    body: "{}",
-  });
-  await refreshSessions();
-  requireCurrentAccount(generation);
+async function createSession(): Promise<void> {
+  const view = beginNavigation();
+  const selected = selectedDashboardId();
+  const session = await api("/api/sessions", decodeSerializedSession, { method: "POST", body: "{}" });
+  if (view !== viewGeneration) throw new Error("会话已切换，请重试操作");
+  if (selected && session.dashboards.some((item) => item.id === selected)) state.selectedDashboardIds.set(session.id, selected);
+  rememberDashboardScrollPosition();
+  const positions = state.dashboardScrollPositions.get("");
+  if (positions) state.dashboardScrollPositions.set(session.id, new Map(positions));
   applySession(session);
-  return session;
+  await refreshSessions().catch((error) => showToast(messageFromUnknown(error)));
+  if (view !== viewGeneration) throw new Error("会话已切换，请重试操作");
 }
 
 async function ensurePrivateSession(): Promise<void> {
   const generation = authGeneration;
   const id = state.sessionId;
-  if (!id || !state.sessions.find((item) => item.id === id)?.readOnly) return;
+  if (pendingCreation || !id) {
+    const operation = pendingCreation ??= createSession();
+    try { await operation; }
+    finally { if (pendingCreation === operation) pendingCreation = undefined; }
+    return;
+  }
+  if (!state.sessions.find((item) => item.id === id)?.readOnly) return;
   let operation = forkRequests.get(id);
   if (!operation) {
     operation = api(`/api/sessions/${encodeURIComponent(id)}/fork`, decodeSerializedSession, {
@@ -1069,9 +1085,8 @@ async function ensurePrivateSession(): Promise<void> {
 }
 
 async function loadSession(id: string): Promise<void> {
-  const generation = authGeneration;
+  const view = beginNavigation();
   if (!id) return;
-  requireCurrentAccount(generation);
   const activeStream = state.activeStreams.get(id);
   if (activeStream) {
     applyActiveStream(activeStream);
@@ -1081,6 +1096,7 @@ async function loadSession(id: string): Promise<void> {
     `/api/sessions/${encodeURIComponent(id)}`,
     decodeSerializedSession,
   );
+  if (view !== viewGeneration) return;
   const startedWhileLoading = state.activeStreams.get(id);
   if (startedWhileLoading) applyActiveStream(startedWhileLoading);
   else applySession(session);
@@ -1088,6 +1104,10 @@ async function loadSession(id: string): Promise<void> {
 
 function clearSessionView(): void {
   state.sessionId = null;
+  state.dashboards.delete("");
+  state.dashboardOptions.delete("");
+  state.selectedDashboardIds.delete("");
+  state.dashboardScrollPositions.delete("");
   renderDashboardTabs();
   history.replaceState(null, "", `${location.pathname}${location.search}`);
   renderTranscript([]);
@@ -1104,6 +1124,17 @@ function clearSessionView(): void {
   elements.chatTitle.textContent = "新会话";
   renderSessions();
   syncComposerState();
+}
+
+async function openDashboardPreview(): Promise<void> {
+  const view = beginNavigation();
+  rememberSelectedScrollPosition();
+  rememberDashboardScrollPosition();
+  clearSessionView();
+  const { dashboards } = await api("/api/dashboards", decodeDashboardPreview);
+  if (view !== viewGeneration || state.sessionId !== null) return;
+  cacheSessionDashboards("", dashboards);
+  renderCurrentDashboard();
 }
 
 async function deleteSession(id: string): Promise<void> {
@@ -1138,10 +1169,11 @@ async function deleteSession(id: string): Promise<void> {
     pendingWorkbooks.delete(id);
     workbookSubmissions.delete(id);
     if (deletedCurrentSession) {
-      clearSessionView();
       const nextSession = state.sessions[0];
-      if (nextSession) await loadSession(nextSession.id);
-      else await createSession();
+      if (nextSession) {
+        clearSessionView();
+        await loadSession(nextSession.id);
+      } else await openDashboardPreview();
     } else {
       renderSessions();
     }
@@ -1324,7 +1356,6 @@ async function submitQuestion(question: string): Promise<void> {
   const generation = authGeneration;
   const message = question.trim();
   if (!message) return;
-  if (!state.sessionId) await createSession();
   await ensurePrivateSession();
   if (generation !== authGeneration) return;
   const sessionId = state.sessionId;
@@ -1440,15 +1471,17 @@ async function abortAnswer(): Promise<void> {
 
 async function initialize(): Promise<void> {
   if (!currentLogin) return;
+  const view = viewGeneration;
   try {
     const sessionPayload = await api("/api/sessions", decodeSessionsResponse);
     state.sessions = sessionPayload.sessions;
     renderSessions();
 
+    if (view !== viewGeneration) return;
     const availableSessionIds = new Set(state.sessions.map((session) => session.id));
     const initialTarget = initialSessionTarget(location.hash, availableSessionIds);
     if (initialTarget.kind === "load") await loadSession(initialTarget.sessionId);
-    else await createSession();
+    else await openDashboardPreview();
   } catch (error) {
     showToast(`初始化失败:${messageFromUnknown(error)}`);
   }
@@ -1473,7 +1506,7 @@ elements.input.addEventListener("keydown", (event) => {
 elements.input.addEventListener("focus", () => setChatOpen(true));
 elements.composer.addEventListener("click", () => setChatOpen(true));
 elements.newChatButton.addEventListener("click", () => {
-  void createSession()
+  void openDashboardPreview()
     .then(() => setChatOpen(true, true))
     .catch((error) => showToast(messageFromUnknown(error)));
 });

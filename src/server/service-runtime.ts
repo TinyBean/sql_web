@@ -87,17 +87,20 @@ const DEFAULT_DEPENDENCIES: ServiceRuntimeDependencies = {
       logger,
     });
   },
-  createServer: ({ database, sessions, config, logger }) => createWebServer({
-    authentication: new Authentication({ secureCookie: config.authCookieSecure,
-      verify: (account, password) => verifyDomainAccount(account, password, { url: config.domainVerifyUrl }) }),
-    dashboardForAccount: loadUserDashboards(config.userDashboardsPath,
-      createDashboardRegistry({ defaultDashboardPath: config.defaultDashboardPath, logger })),
-    database,
-    sessions,
-    publicDir: config.publicDir,
-    vendorDir: path.join(config.projectRoot, "node_modules"),
-    logger,
-  }),
+  createServer: ({ database, sessions, config, logger }) => {
+    const dashboardRegistry = createDashboardRegistry({ defaultDashboardPath: config.defaultDashboardPath, logger });
+    return createWebServer({
+      authentication: new Authentication({ secureCookie: config.authCookieSecure,
+        verify: (account, password) => verifyDomainAccount(account, password, { url: config.domainVerifyUrl }) }),
+      dashboardRegistry,
+      dashboardForAccount: loadUserDashboards(config.userDashboardsPath, dashboardRegistry),
+      database,
+      sessions,
+      publicDir: config.publicDir,
+      vendorDir: path.join(config.projectRoot, "node_modules"),
+      logger,
+    });
+  },
 };
 
 async function runStage<T>(

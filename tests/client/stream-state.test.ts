@@ -13,10 +13,10 @@ import {
 
 test("loads only an explicit session that is still available", () => {
   const availableSessionIds = new Set(["session-a"]);
-  assert.deepEqual(initialSessionTarget("", availableSessionIds), { kind: "create" });
-  assert.deepEqual(initialSessionTarget("#view=dashboard", availableSessionIds), { kind: "create" });
+  assert.deepEqual(initialSessionTarget("", availableSessionIds), { kind: "preview" });
+  assert.deepEqual(initialSessionTarget("#view=dashboard", availableSessionIds), { kind: "preview" });
   assert.deepEqual(initialSessionTarget("#session=expired-session", availableSessionIds), {
-    kind: "create",
+    kind: "preview",
   });
   assert.deepEqual(initialSessionTarget("#session=session-a", availableSessionIds), {
     kind: "load",

@@ -15,7 +15,6 @@ import type {
   AgentSessionEvent,
   ResourceLoader,
   InlineExtension,
-  SessionInfo,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -53,6 +52,7 @@ import { AuthError, normalizeAccount } from "../auth.ts";
 import { OWNER_ENTRY, persistOwnedSession, readSessionFile, sessionBranch, sameSessionOwner, type SessionOwner } from "./session-files.ts";
 import type { ScopedSessionPort } from "../http-server.ts";
 import { sessionDataReadPolicy } from "./session-data-access.ts";
+import { SessionDirectory } from "./session-directory.ts";
 import { SubagentRunner, SUBAGENT_TOOL_NAME, SUBAGENT_AGENT_RULES } from "./subagent.ts";
 
 const MAX_PROMPT_LENGTH = 4_000;
@@ -499,6 +499,7 @@ export class AgentSessionStore {
   readonly #database: QueryDatabase;
   readonly #cwd: string;
   readonly #sessionDir: string;
+  readonly #directory: SessionDirectory;
   readonly #agentDir: string;
   readonly #model: ModelSelection;
   readonly #artifacts: ArtifactStore;
@@ -534,6 +535,7 @@ export class AgentSessionStore {
     this.#sharedDashboardPath = sharedDashboardPath;
     this.#cwd = cwd;
     this.#sessionDir = sessionDir;
+    this.#directory = new SessionDirectory(sessionDir);
     this.#agentDir = agentDir;
     this.#model = model;
     this.#artifacts = artifacts;
@@ -590,30 +592,14 @@ export class AgentSessionStore {
     const readable = (id: string) => this.#authorize(id, account, false);
     const writable = (id: string) => this.#authorize(id, account, true);
     return {
-      list: async () => {
-        const items: SessionSummary[] = [];
-        const infos = await this.#listPersistedSessions();
-        const files = new Map<string, string | null>();
-        for (const info of infos) files.set(info.id, files.has(info.id) ? null : info.path);
-        for (const summary of await this.list()) {
-          try {
-            const filePath = files.get(summary.id);
-            if (!filePath) continue;
-            const record = readSessionFile(filePath);
-            if (record.header.id !== summary.id || (record.owner && record.owner.account !== account)) continue;
-            const cachedOwner = this.#owners.get(summary.id);
-            if (cachedOwner && !sameSessionOwner(record.owner, cachedOwner)) continue;
-            items.push({ ...summary, fileCount: this.#artifacts.forSession(summary.id).exportFiles().list().length, ownerAccount: record.owner?.account ?? null,
-              readOnly: record.owner === null, dashboardIds: record.owner?.dashboardIds ?? this.#dashboard.listOrPreview(summary.id).map((item) => item.id) });
-          } catch { /* Invalid private files must never degrade into shared history. */ }
-        }
-        return items;
-      },
+      list: async () => this.#list(account),
       create: () => this.create({ account, dashboardIds: this.#dashboardForAccount(account) }),
-      get: async (id) => { await writable(id); return this.get(id); },
+      get: async (id) => { writable(id); return this.get(id); },
       getSerialized: async (id) => {
-        const { record } = await readable(id);
-        if (record.owner) return this.getSerialized(id);
+        const { info, owner } = readable(id);
+        if (owner) return this.getSerialized(id);
+        const record = readSessionFile(info.path);
+        if (record.header.id !== id || record.owner) throw new SessionNotFoundError(id);
         const branch = sessionBranch(record.entries);
         const messages = serializeSessionBranch(branch);
         const name = record.entries.filter((entry) => entry.type === "session_info").at(-1);
@@ -625,20 +611,20 @@ export class AgentSessionStore {
           dashboards, files: this.#artifacts.forSession(id).exportFiles().list(),
         };
       },
-      delete: async (id) => { await writable(id); return this.delete(id); },
+      delete: async (id) => { writable(id); return this.delete(id); },
       openExportFile: async (id, fileId) => {
-        await readable(id);
+        readable(id);
         return this.#artifacts.forSession(id).exportFiles().open(fileId);
       },
       uploadWorkbook: async (id, filename, bytes, signal) => {
         const startedAt = Date.now();
-        await writable(id);
+        writable(id);
         const session = await this.get(id);
         if (session.isStreaming) throw new SessionBusyError();
         const combined = AbortSignal.any([this.#shutdown.signal, ...(signal ? [signal] : [])]);
         try {
           await validateUploadedWorkbook(this.#codeInterpreter, filename, bytes, combined);
-          await writable(id);
+          writable(id);
           combined.throwIfAborted();
           if (session.isStreaming) throw new SessionBusyError();
           const file = saveUploadedWorkbook(this.#artifacts.forSession(id), filename, bytes, combined);
@@ -650,11 +636,11 @@ export class AgentSessionStore {
           throw error;
         }
       },
-      prompt: async (id, text, requestId, dashboardId, fileId) => { await writable(id); return this.prompt(id, text, requestId, dashboardId, fileId); },
-      abort: async (id) => { await writable(id); return this.abort(id); },
+      prompt: async (id, text, requestId, dashboardId, fileId) => { writable(id); return this.prompt(id, text, requestId, dashboardId, fileId); },
+      abort: async (id) => { writable(id); return this.abort(id); },
       fork: async (id) => {
-        const { info, record } = await readable(id);
-        if (record.owner) throw new AuthError("仅共享历史会话需要复制", 400);
+        const { info, owner: sourceOwner } = readable(id);
+        if (sourceOwner) throw new AuthError("仅共享历史会话需要复制", 400);
         const temporary = mkdtempSync(path.join(tmpdir(), "datalens-fork-"));
         let newId: string | undefined;
         let newFile: string | undefined;
@@ -714,19 +700,18 @@ export class AgentSessionStore {
     };
   }
 
-  async #authorize(id: string, account: string, write: boolean) {
+  #authorize(id: string, account: string, write: boolean) {
     this.#assertValidId(id);
-    const candidates = (await this.#listPersistedSessions()).filter((candidate) => candidate.id === id);
-    const info = candidates[0];
-    if (candidates.length !== 1 || !info) throw new SessionNotFoundError(id);
-    let record;
-    try { record = readSessionFile(info.path); }
+    const info = this.#directory.files().get(id);
+    if (!info) throw new SessionNotFoundError(id);
+    let owner;
+    try { ({ owner } = this.#directory.summary(info)); }
     catch { throw new SessionNotFoundError(id); }
-    if (record.header.id !== id || (record.owner && record.owner.account !== account)) throw new SessionNotFoundError(id);
+    if (owner && owner.account !== account) throw new SessionNotFoundError(id);
     const cachedOwner = this.#owners.get(id);
-    if (cachedOwner && !sameSessionOwner(record.owner, cachedOwner)) throw new SessionNotFoundError(id);
-    if (write && !record.owner) throw new AuthError("共享历史会话为只读，请先复制为自己的会话", 403);
-    return { info, record };
+    if (cachedOwner && !sameSessionOwner(owner, cachedOwner)) throw new SessionNotFoundError(id);
+    if (write && !owner) throw new AuthError("共享历史会话为只读，请先复制为自己的会话", 403);
+    return { info, owner };
   }
 
   async create(owner?: SessionOwner): Promise<SerializedSession> {
@@ -769,37 +754,46 @@ export class AgentSessionStore {
   }
 
   async list(): Promise<SessionSummary[]> {
-    const infos = await this.#listPersistedSessions();
-    const listed = new Map<string, SessionSummary>(
-      infos.map((info) => [info.id, {
-        ownerAccount: this.#owners.get(info.id)?.account ?? null,
-        readOnly: !this.#owners.has(info.id),
-        dashboardIds: this.#owners.get(info.id)?.dashboardIds ?? ["default"],
-        id: info.id,
-        title: info.name || info.firstMessage || "新会话",
-        createdAt: info.created.toISOString(),
-        updatedAt: info.modified.toISOString(),
-        messageCount: info.messageCount,
-        active: this.#sessions.has(info.id),
-      }]),
-    );
+    return this.#list();
+  }
 
-    // Pi intentionally does not create the JSONL file until an assistant reply
-    // exists. Merge active empty/new sessions so the web list remains one-to-one.
-    for (const [id, session] of this.#sessions) {
-      if (listed.has(id)) continue;
-      const times = this.#sessionTimes.get(id) || { created: new Date(), modified: new Date() };
-      listed.set(id, {
-        ownerAccount: this.#owners.get(id)?.account ?? null,
-        readOnly: !this.#owners.has(id),
-        dashboardIds: this.#owners.get(id)?.dashboardIds ?? ["default"],
-        id,
-        title: sessionTitle(session),
-        createdAt: times.created.toISOString(),
-        updatedAt: times.modified.toISOString(),
-        messageCount: serializeSessionTranscript(session).length,
-        active: true,
-      });
+  #list(account?: string): SessionSummary[] {
+    const files = this.#directory.files();
+    const listed = new Map<string, SessionSummary>();
+    for (const [id, file] of files) {
+      if (!file) continue;
+      const filename = path.basename(file.path);
+      if (account && filename.includes("__") && !filename.startsWith(account + "__")) continue;
+      try {
+        const { owner, title, createdAt, updatedAt, messageCount } = this.#directory.summary(file);
+        if (account && owner && owner.account !== account) continue;
+        const cachedOwner = this.#owners.get(id);
+        if (cachedOwner && !sameSessionOwner(owner, cachedOwner)) continue;
+        listed.set(id, { id, title, createdAt, updatedAt, messageCount, active: this.#sessions.has(id),
+          ownerAccount: owner?.account ?? null, readOnly: owner === null,
+          dashboardIds: owner?.dashboardIds ?? (account ? this.#dashboard.listOrPreview(id).map((item) => item.id) : ["default"]),
+          ...(account ? { fileCount: this.#artifacts.forSession(id).exportFiles().list().length } : {}),
+        });
+      } catch { /* Never expose an invalid or unreadable file as shared history. */ }
+    }
+
+    if (!account) {
+      // Only internal sessions may be active before a JSONL file exists.
+      for (const [id, session] of this.#sessions) {
+        if (files.has(id)) continue;
+        const times = this.#sessionTimes.get(id) || { created: new Date(), modified: new Date() };
+        listed.set(id, {
+          ownerAccount: this.#owners.get(id)?.account ?? null,
+          readOnly: !this.#owners.has(id),
+          dashboardIds: this.#owners.get(id)?.dashboardIds ?? ["default"],
+          id,
+          title: sessionTitle(session),
+          createdAt: times.created.toISOString(),
+          updatedAt: times.modified.toISOString(),
+          messageCount: serializeSessionTranscript(session).length,
+          active: true,
+        });
+      }
     }
 
     return [...listed.values()].sort(
@@ -822,16 +816,15 @@ export class AgentSessionStore {
   }
 
   async #restore(id: string): Promise<AgentSession> {
-    const infos = await this.#listPersistedSessions();
-    const info = infos.find((candidate) => candidate.id === id);
+    const info = this.#directory.files().get(id);
     if (!info) throw new SessionNotFoundError(id);
-    const owner = readSessionFile(info.path).owner;
+    const { owner, createdAt, updatedAt } = this.#directory.summary(info);
     if (owner) this.#owners.set(id, owner);
     const session = await this.#createPiSession(
       this.#openInitializedManager(info.path),
     );
     this.#sessions.set(id, session);
-    this.#sessionTimes.set(id, { created: info.created, modified: info.modified });
+    this.#sessionTimes.set(id, { created: new Date(createdAt), modified: new Date(updatedAt) });
     this.#logger.info("agent.session.restored", { sessionId: id });
     return session;
   }
@@ -853,8 +846,8 @@ export class AgentSessionStore {
   async #delete(id: string): Promise<void> {
     // A failed restore can still leave a persisted session to delete.
     await this.#restoring.get(id)?.catch(() => {});
-    const infos = await this.#listPersistedSessions();
-    const info = infos.find((candidate) => candidate.id === id);
+    const info = this.#directory.files().get(id);
+    if (info === null) throw new SessionNotFoundError(id);
     const session = this.#sessions.get(id);
     if (!info && !session) throw new SessionNotFoundError(id);
     if (session?.isStreaming) throw new SessionBusyError();
@@ -1268,13 +1261,6 @@ export class AgentSessionStore {
 
   #assertValidId(id: string): void {
     if (!SESSION_ID_PATTERN.test(id)) throw new SessionNotFoundError(id);
-  }
-
-  async #listPersistedSessions(): Promise<SessionInfo[]> {
-    // The configured session directory belongs to this application instance. A copied
-    // project keeps its JSONL files but gets a new absolute cwd, so filtering by the
-    // cwd stored in each session header would make otherwise valid history disappear.
-    return SessionManager.listAll(this.#sessionDir);
   }
 
   #openInitializedManager(filePath: string): SessionManager {

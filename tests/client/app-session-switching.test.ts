@@ -94,6 +94,7 @@ test("switches between independent live session answers without stealing the cur
   const sessions = [
     sessionSummary("session-a", "会话 A", 2),
     sessionSummary("session-b", "会话 B", 2),
+    sessionSummary("old-empty", "新会话", 0),
   ];
   const stored = new Map([
     ["session-a", serializedSession("session-a", "会话 A", [
@@ -109,7 +110,8 @@ test("switches between independent live session answers without stealing the cur
   const sessionLoads = new Map<string, number>();
   const messageRequests: string[] = [];
   const aborts: string[] = [];
-  const createdSessionIds = ["session-c", "session-d"];
+  const createdSessionIds = ["session-c"];
+  const preview = [{ id: "default", title: "首页看板", state: EMPTY_DASHBOARD }, { id: "analysis", title: "首页分析", state: EMPTY_DASHBOARD }];
   let resolveAbortA: (() => void) | undefined;
   let failNextAbort = false;
   const encoder = new TextEncoder();
@@ -119,11 +121,12 @@ test("switches between independent live session answers without stealing the cur
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const method = init.method ?? "GET";
     if (url === "/api/auth/me") return jsonResponse({ account: "test-user", dashboardIds: ["default"], expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    if (url === "/api/dashboards" && method === "GET") return jsonResponse({ dashboards: preview });
     if (url === "/api/sessions" && method === "GET") return jsonResponse({ sessions });
     if (url === "/api/sessions" && method === "POST") {
       const createdId = createdSessionIds.shift();
       assert.ok(createdId, "unexpected extra session creation");
-      const created = serializedSession(createdId, "新会话");
+      const created = { ...serializedSession(createdId, "新会话"), dashboardIds: ["default", "analysis"], dashboards: preview };
       if (!stored.has(created.id)) {
         stored.set(created.id, created);
         sessions.unshift(sessionSummary(created.id, created.title));
@@ -132,6 +135,12 @@ test("switches between independent live session answers without stealing the cur
     }
 
     const sessionMatch = /^\/api\/sessions\/([^/]+)$/u.exec(url);
+    if (url === "/api/sessions/old-empty" && method === "DELETE") {
+      const index = sessions.findIndex((item) => item.id === "old-empty");
+      assert.notEqual(index, -1);
+      sessions.splice(index, 1);
+      return jsonResponse({ ok: true });
+    }
     if (sessionMatch && method === "GET") {
       const id = decodeURIComponent(sessionMatch[1] ?? "");
       sessionLoads.set(id, (sessionLoads.get(id) ?? 0) + 1);
@@ -143,6 +152,7 @@ test("switches between independent live session answers without stealing the cur
     const messageMatch = /^\/api\/sessions\/([^/]+)\/messages$/u.exec(url);
     if (messageMatch && method === "POST") {
       const id = decodeURIComponent(messageMatch[1] ?? "");
+      if (id === "session-c") assert.equal(JSON.parse(init.body as string).dashboardId, "analysis");
       messageRequests.push(id);
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -234,10 +244,15 @@ test("switches between independent live session answers without stealing the cur
 
   await import(pathToFileURL(path.join(projectRoot, "public", "generated", "client", "app.js")).href);
   await waitFor(
-    () => locationState.hash === "#session=session-c",
-    "a fresh session was not created for an expired empty-session ID",
+    () => document.querySelector("#dashboardTitle")?.textContent === "首页看板",
+    "an expired session link should open the account dashboard preview",
   );
   assert.equal(document.querySelector('[data-session-id="session-c"]'), null);
+  assert.equal(locationState.hash, "");
+  assert.deepEqual(createdSessionIds, ["session-c"], "viewing dashboards must not allocate a session");
+  assert.equal(deleteButton("old-empty").disabled, false, "old empty private sessions can be deleted");
+  (document.querySelector('[data-dashboard-id="analysis"]') as unknown as HTMLButtonElement).click();
+  assert.equal(document.querySelector("#dashboardTitle")?.textContent, "首页分析");
   assert.equal(sessionLoads.size, 0, "startup must not request an expired or fallback session");
   assert.equal(chatDock.classList.contains("open"), false, "chat should start collapsed");
   assert.equal(document.querySelector("#modelBadge"), null);
@@ -253,6 +268,10 @@ test("switches between independent live session answers without stealing the cur
   assert.equal(historyButton.getAttribute("aria-expanded"), "true");
   assert.equal(sessionButton("session-a").querySelector(".session-title")?.textContent, "会话 A");
   assert.ok(deleteButton("session-a").parentElement?.classList.contains("session-row"));
+  Object.defineProperty(browser, "confirm", { configurable: true, value: () => true });
+  deleteButton("old-empty").click();
+  await waitFor(() => document.querySelector('[data-session-id="old-empty"]') === null, "deleted empty session remained in history");
+  assert.ok(!sessions.some((item) => item.id === "old-empty"));
   historyCloseButton.click();
   assert.equal(historyPanel.classList.contains("open"), false);
   historyButton.click();
@@ -260,6 +279,7 @@ test("switches between independent live session answers without stealing the cur
   dashboardMain.click();
   assert.equal(historyPanel.classList.contains("open"), false, "outside click should close history");
   input.value = "问题 C";
+  submit();
   submit();
   await waitFor(() => controllers.has("session-c"), "fresh session stream did not start");
   assert.equal(sessionButton("session-c").classList.contains("streaming"), true);
@@ -367,8 +387,8 @@ test("switches between independent live session answers without stealing the cur
   messages.scrollTop = 180;
   newChatButton.click();
   await waitFor(
-    () => locationState.hash === "#session=session-d",
-    "new session did not open while session A was answering",
+    () => locationState.hash === "" && document.querySelector("#dashboardTitle")?.textContent === "首页看板",
+    "new chat should open the dashboard preview while session A is answering",
   );
   assert.equal(document.querySelector('[data-session-id="session-d"]'), null);
   assert.equal(input.disabled, false);

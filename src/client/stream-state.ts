@@ -12,7 +12,7 @@ export interface SessionScopedStream {
 }
 
 export type InitialSessionTarget =
-  | { readonly kind: "create" }
+  | { readonly kind: "preview" }
   | { readonly kind: "load"; readonly sessionId: string };
 
 export function initialSessionTarget(
@@ -23,7 +23,7 @@ export function initialSessionTarget(
   const sessionId = new URLSearchParams(value).get("session");
   return sessionId && availableSessionIds.has(sessionId)
     ? { kind: "load", sessionId }
-    : { kind: "create" };
+    : { kind: "preview" };
 }
 
 /** Keep independent in-flight streams isolated by their owning session. */

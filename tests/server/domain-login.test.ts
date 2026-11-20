@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createServer, type Server } from "node:http";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,7 +90,7 @@ test("login routes enforce cookies, expiry, logout, origin checks and account ro
   const post = (route: string, body: unknown, cookie = "", origin?: string) => fetch(base + route, {
     method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie, ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body),
   });
-  for (const route of ["/api/auth/me", "/api/sessions", "/api/schema"]) assert.equal((await fetch(base + route)).status, 401);
+  for (const route of ["/api/auth/me", "/api/sessions", "/api/schema", "/api/dashboards"]) assert.equal((await fetch(base + route)).status, 401);
   assert.equal((await fetch(base + "/api/health")).status, 200);
   assert.equal((await post("/api/auth/login", { account: "user", password: "correct" }, "", "http://evil.example")).status, 403);
   assert.equal(verificationCount, 0);
@@ -101,6 +103,8 @@ test("login routes enforce cookies, expiry, logout, origin checks and account ro
   assert.ok(!setCookie.includes("Secure"));
   const cookie = setCookie.split(";")[0]!;
   const get = (route: string, token = cookie) => fetch(base + route, { headers: { Cookie: token } });
+  const preview = await (await get("/api/dashboards")).json();
+  assert.deepEqual(preview.dashboards.map((board: { id: string }) => board.id), ["analysis"]);
   const me = await (await get("/api/auth/me")).json();
   assert.equal(me.account, "3000100562");
   assert.equal((await (await get("/api/sessions")).json()).sessions[0].title, "3000100562");
@@ -209,6 +213,48 @@ test("owned empty sessions persist watermarks, isolate cached access and freeze 
   assert.equal((await restarted.forAccount("bob").list()).length, 1);
   await restarted.forAccount("bob").delete(b.id);
   assert.equal((await restarted.forAccount("bob").list()).length, 0);
+});
+
+test("warm session lookups read only changed history and reject duplicate IDs until removed", async (t) => {
+  const env = await sessionFixture(t);
+  const alice = env.store.forAccount("alice");
+  const first = await alice.create();
+  const other = await env.store.forAccount("bob").create();
+  await alice.list();
+  const directory = path.join(env.data, "sessions");
+  const filename = (id: string) => path.join(directory, readdirSync(directory).find((name) => name.endsWith(id + ".jsonl"))!);
+  const original = filename(first.id);
+  const unrelated = filename(other.id);
+  const raw = readFileSync(original, "utf8");
+  const reads = t.mock.method(fs, "readFileSync");
+  const scans = t.mock.method(fs, "readdirSync");
+  syncBuiltinESMExports();
+  try {
+    await alice.getSerialized(first.id);
+    await alice.abort(first.id);
+    await alice.list();
+    assert.ok(!scans.mock.calls.some(({ arguments: args }) => args[0] === directory));
+    assert.ok(!reads.mock.calls.some(({ arguments: args }) => args[0] === original || args[0] === unrelated));
+
+    writeFileSync(original, raw.replaceAll("新会话", "更新标题"));
+    const summaries = await alice.list();
+    assert.equal(summaries[0]?.title, "更新标题");
+    assert.ok(reads.mock.calls.some(({ arguments: args }) => args[0] === original));
+    assert.ok(!reads.mock.calls.some(({ arguments: args }) => args[0] === unrelated));
+
+    const duplicate = path.join(directory, "legacy-copy.jsonl");
+    writeFileSync(duplicate, "");
+    assert.equal((await alice.getSerialized(first.id)).id, first.id);
+    writeFileSync(duplicate, raw);
+    await assert.rejects(alice.getSerialized(first.id), SessionNotFoundError);
+    assert.ok(!(await alice.list()).some((item) => item.id === first.id));
+    rmSync(duplicate);
+    assert.equal((await alice.getSerialized(first.id)).id, first.id);
+  } finally {
+    reads.mock.restore();
+    scans.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("a failed restore can be retried and deletion drains a concurrent restore", async (t) => {
